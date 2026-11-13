@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "queue_cfg_dir": "/opt/ue5_synth/config",
     "project_dir": "/data/avsynth",
     "real_dir": "",
+    "overlay_dir": "/data/render/overlay",
 }
 # 解释器：用跑本服务的这个 python（Ubuntu 的 python3 / Windows 的 python.exe 都对）
 # 环境里取不到 sys.executable 时回退 python3，保持老行为。
@@ -120,6 +121,13 @@ def build_cmd(action, p, cfg):
     if action == "dryrun":
         # 链路自检：工具本体的参数契约由它自己管，这里只保证解释器与脚本路径
         return [py, os.path.join(s, "tools/dryrun_check.py")]
+    if action == "overlay":
+        # 真值抽检图：把 bbox 画到成品图上，供人工目检（表 11 抽检项）
+        return [py, os.path.join(s, "tools/overlay_boxes.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", cfg["overlay_dir"],
+                "--limit", str(int_param(p, "limit", 20)),
+                "--cols", "4"]
     return None
 
 def start_job(action, params):
@@ -212,6 +220,27 @@ def count_lines(path):
     except Exception:
         return 0
 
+def count_dir(path, suffix="", cap=20000):
+    """数目录里的文件（带上限，避免几十万帧时每次轮询都全量扫）。"""
+    n = 0
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                if e.is_file() and (not suffix or e.name.endswith(suffix)):
+                    n += 1
+                    if n >= cap:
+                        return cap
+    except Exception:
+        return 0
+    return n
+
+def has_entries(path):
+    try:
+        with os.scandir(path) as it:
+            return next(it, None) is not None
+    except Exception:
+        return False
+
 def probe_status():
     cfg = load_config()
     st = {"cfg": cfg, "time": time.strftime("%F %T")}
@@ -255,6 +284,10 @@ def probe_status():
         st["tasks_done"] = len(os.listdir(cfg["done_dir"]))
     except Exception:
         st["tasks_done"] = 0
+    st["final_count"] = count_dir(cfg["final_dir"], ".png")
+    st["dataset_ready"] = has_entries(cfg["dataset_dir"])
+    st["overlay_ready"] = os.path.exists(
+        os.path.join(cfg["overlay_dir"], "contact_sheet.jpg"))
     with JOBS_LOCK:
         st["jobs"] = [{k: j[k] for k in ("id", "action", "status", "ret", "started", "ended")}
                       for j in sorted(JOBS.values(), key=lambda x: x["started"], reverse=True)[:12]]
@@ -309,6 +342,17 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"name": name,
                                     "out": tail(os.path.join(load_config()["logs_dir"], name),
                                                 min(lines, 1000))})
+        if u.path == "/api/overlay":
+            # 只允许读配置目录下这一张固定文件，不接受任意路径
+            p = os.path.join(load_config()["overlay_dir"], "contact_sheet.jpg")
+            if not os.path.exists(p):
+                return self._send(404, {"error": "还没有抽检图"})
+            try:
+                with open(p, "rb") as f:
+                    blob = f.read()
+            except Exception as e:
+                return self._send(500, {"error": "读取失败: %s" % e})
+            return self._send(200, blob, "image/jpeg")
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         u = urlparse(self.path)

@@ -3,162 +3,450 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UE5 合成流水线操作台</title>
+<title>UE5 出图操作台</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;background:#12161c;color:#d8e0ea;font:13px/1.5 "Segoe UI",system-ui,sans-serif}
-header{padding:10px 16px;background:#1a212b;border-bottom:1px solid #2a3442;display:flex;justify-content:space-between;align-items:center}
-header h1{font-size:16px;margin:0;color:#7ec7ff}
-main{padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
-.card{background:#1a212b;border:1px solid #2a3442;border-radius:8px;padding:12px 14px}
-.card h2{font-size:13px;margin:0 0 8px;color:#9fd0ff;border-bottom:1px solid #2a3442;padding-bottom:6px}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px}
-.kv b{font-weight:normal;color:#8fa3ba}
-.ok{color:#5ddb8a}.bad{color:#ff7b7b}.warn{color:#ffd166}
-button{background:#2563b0;border:0;color:#fff;border-radius:5px;padding:6px 14px;cursor:pointer;font-size:13px}
-button:hover{background:#2f7ad6}
+body{margin:0;background:#0f1319;color:#e3e9f2;font:15px/1.65 "Segoe UI",system-ui,sans-serif}
+header{padding:16px 18px 10px;display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+header h1{font-size:22px;margin:0;color:#8fd0ff}
+header .sub{color:#93a4bb;font-size:13px;margin-top:2px}
+main{max-width:920px;margin:0 auto;padding:0 14px 40px}
+.banner{margin:10px 14px 14px;padding:14px 18px;border-radius:12px;background:#173a2a;border:1px solid #2c6b4b;font-size:16px;display:flex;gap:10px;align-items:flex-start}
+.banner .now{background:#2f7d51;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;white-space:nowrap;margin-top:2px}
+.banner.work{background:#1b2f47;border-color:#2f5c8f}.banner.work .now{background:#2f6fae}
+.banner.warn{background:#3d3320;border-color:#7a6030}.banner.warn .now{background:#9a742e}
+.banner.ok{background:#173a2a;border-color:#2c6b4b}
+.card{background:#161c25;border:1px solid #26303d;border-radius:12px;padding:16px 18px;margin:14px 0}
+.overview .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{background:#11161e;border:1px solid #222c39;border-radius:10px;padding:10px 12px}
+.stat b{display:block;font-size:20px;color:#bfe3ff;font-weight:600}
+.stat span{color:#93a4bb;font-size:12px}
+.hint{color:#93a4bb;font-size:13px}
+.progress{height:22px;background:#0c1117;border-radius:11px;overflow:hidden;margin-top:12px;border:1px solid #222c39}
+.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2f6fae,#4fd18b);color:#fff;font-size:12px;text-align:center;line-height:20px;font-style:normal;transition:width .3s}
+.step .head{display:flex;gap:12px;align-items:flex-start}
+.step .num{flex:0 0 36px;height:36px;border-radius:18px;background:#1f2c3d;color:#9fd0ff;font-size:17px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.step h2{font-size:17px;margin:0;color:#dfe9f6}
+.step .desc{color:#9fb0c6;font-size:13px;margin:3px 0 0}
+.pill{flex:0 0 auto;font-size:12px;border-radius:20px;padding:2px 10px;border:1px solid #33404f;color:#93a4bb;white-space:nowrap;margin-top:4px}
+.pill.ok{color:#6ee7a5;border-color:#2f6b4b;background:#12281d}
+.pill.run{color:#8fd0ff;border-color:#2f5c8f;background:#132238}
+.pill.bad{color:#ff9a9a;border-color:#7a3030;background:#2a1515}
+.pill.warn{color:#ffd166;border-color:#7a6030;background:#2a2213}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+button{background:#2f6fae;border:0;color:#fff;border-radius:9px;padding:10px 20px;cursor:pointer;font-size:15px;min-height:44px}
+button:hover{background:#3b84cc}
+button.big{font-size:16px;padding:13px 26px;font-weight:600;background:#2f9e63}
+button.big:hover{background:#37b873}
 button.red{background:#a83a3a}button.red:hover{background:#c94a4a}
-button.gray{background:#3a4656}button.gray:hover{background:#4a5a70}
-input,select{background:#0e1218;border:1px solid #33404f;color:#d8e0ea;border-radius:4px;padding:5px 7px;font-size:13px;width:100%}
-label{color:#8fa3ba;display:block;margin:6px 0 2px}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
-pre{background:#0b0e13;border:1px solid #26303d;border-radius:6px;padding:8px;max-height:300px;overflow:auto;white-space:pre-wrap;font-size:12px;margin:8px 0 0}
-.bar{height:16px;background:#0e1218;border-radius:8px;overflow:hidden;margin-top:4px}
-.bar i{display:block;height:100%;background:linear-gradient(90deg,#2563b0,#5ddb8a);color:#fff;font-size:11px;text-align:center;font-style:normal}
-.job{padding:3px 6px;border:1px solid #33404f;border-radius:4px;margin-top:4px;cursor:pointer}
-.job:hover{background:#232c38}
-.wide{grid-column:1/-1}
+button.gray{background:#39485c}button.gray:hover{background:#485a72}
+input,select{background:#0c1117;border:1px solid #33404f;color:#e3e9f2;border-radius:8px;padding:9px 10px;font-size:15px;width:100%}
+label{color:#93a4bb;display:block;margin:8px 0 3px;font-size:13px}
+.out{margin-top:10px}
+.res{border-radius:9px;padding:9px 12px;font-size:14px;border:1px solid #2a3442;background:#11161e}
+.res.ok{color:#8beab2;border-color:#2f6b4b;background:#11241a}
+.res.bad{color:#ffabab;border-color:#7a3030;background:#2a1515}
+.res.warn{color:#ffd166;border-color:#7a6030;background:#2a2213}
+.res.run{color:#8fd0ff;border-color:#2f5c8f;background:#132238}
+details.mini-adv,details.adv{margin-top:10px}
+details.adv{max-width:920px;margin:18px auto;background:#141922;border:1px solid #26303d;border-radius:12px;padding:0 18px 14px}
+details.adv summary{font-size:15px;color:#9fd0ff;cursor:pointer;padding:12px 0}
+details.mini-adv summary{font-size:13px;color:#8fa3ba;cursor:pointer}
+details summary{color:#9fb0c6;cursor:pointer}
+pre{background:#0a0e13;border:1px solid #222c39;border-radius:8px;padding:10px;max-height:320px;overflow:auto;white-space:pre-wrap;font-size:12px;margin:8px 0 0;color:#b8c6d8}
+.job{padding:8px 10px;border:1px solid #2a3442;border-radius:8px;margin-top:6px;cursor:pointer;background:#11161e;font-size:13px}
+.job:hover{background:#1a2330}
+.adv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.adv-grid h3{font-size:14px;margin:0;color:#cfe0f2}
+.adv-grid p{font-size:12px;color:#8fa3ba;margin:4px 0 8px}
+.cfg{display:flex;flex-direction:column}
+.cfg .key{font-size:11px;color:#5f7188;margin-top:2px}
+.cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px 14px}
+#ovimg{display:none;width:100%;border-radius:10px;border:1px solid #2a3442;margin-top:10px;cursor:zoom-in}
 .mini{font-size:12px;color:#8fa3ba}
+footer{max-width:920px;margin:0 auto;padding:0 14px 30px;color:#5f7188;font-size:12px}
+@media (max-width:560px){.stat b{font-size:17px}header h1{font-size:19px}}
 </style>
 </head>
 <body>
-<header><h1>UE5 合成流水线操作台</h1><span class="mini" id="clock">–</span></header>
-<details style="margin:10px 16px 0;background:#1a212b;border:1px solid #2a3442;border-radius:8px;padding:8px 14px" open>
-<summary style="cursor:pointer;color:#9fd0ff;font-weight:bold">📖 使用说明（第一次看这里）</summary>
-<ol style="margin:8px 0 4px;padding-left:20px;line-height:1.9">
-<li><b>总览</b>：只看不用点——显卡/内存/磁盘状态；最下面进度条 = 渲染任务完成了百分之几，5 秒自动刷新。</li>
-<li><b>干活按顺序</b>：① 环境核查（全 PASS 才继续）→ ② 编译 UE5（1~3 小时，<b>只点一次</b>）→ ③ 任务生成 → ④ 启动渲染 → ⑤ 跑后处理 → ⑥ 打包数据集。改过任何脚本后先点「链路自检」，全 PASS 再跑正式批次。</li>
-<li><b>每个按钮点下去 = 启动一个"作业"</b>：输出实时显示在对应卡片下方的黑框里，也可在下方"作业控制台"点开任意作业看；黄字=跑着、绿字=完成、红字=失败。</li>
-<li><b>作业控制台</b>：点某一行看它的输出；选中后可"杀掉"（中断）。<b>同类作业在跑时不能重复点</b>，会自动提示。</li>
-<li><b>日志</b>：出问题先看 <code>batch.log</code>（渲染日志）、<code>capture_errors.log</code>（单帧错误）。</li>
-<li><b>配置</b>：所有文件路径都在这，一般不用动；改完点"保存配置"立即生效。</li>
-<li>渲染/编译这类长任务，<b>关掉网页也照样跑</b>，回来刷新就能看到进度。</li>
-</ol></details>
+
+<header>
+  <div><h1>UE5 出图操作台</h1><div class="sub">从上往下按顺序点，不用记命令。每一步做完会自动告诉下一步做什么。</div></div>
+  <span id="clock" class="mini">–</span>
+</header>
+
+<div class="banner" id="banner"><span class="now" id="nowStep">下一步</span><span id="nextText">正在读取状态…</span></div>
+
 <main>
-<div class="card"><h2>总览</h2><div class="kv" id="ov"></div>
-<div class="row"><span class="mini">渲染进度</span></div><div class="bar"><i id="prog" style="width:0%">–</i></div></div>
+  <section class="card overview">
+    <div class="stats">
+      <div class="stat"><b id="ovDone">–</b><span>已出图 / 计划张数</span></div>
+      <div class="stat"><b id="ovRender">–</b><span>出图状态</span></div>
+      <div class="stat"><b id="ovGpu">–</b><span>显卡</span></div>
+      <div class="stat"><b id="ovDisk">–</b><span>磁盘剩余</span></div>
+    </div>
+    <div class="hint" id="advice" style="margin-top:10px">–</div>
+    <div class="progress"><i id="pRender">0%</i></div>
+  </section>
 
-<div class="card"><h2>环境核查（只读）</h2>
-<div class="mini">发行版/驱动/Vulkan/磁盘/内存/swap 逐项 PASS·FAIL</div>
-<div class="row"><button onclick="run('envcheck',{},'envout')">跑一次</button><span id="envst" class="mini"></span></div>
-<pre id="envout" style="max-height:200px">尚未运行</pre></div>
+  <section class="card step" id="s1">
+    <div class="head"><span class="num">1</span>
+      <div><h2>检查这台机器</h2><p class="desc">看看显卡、驱动、磁盘能不能用。第一次用必须点一次，几秒钟就好，不会改动任何东西（已经出过图的机器可以跳过）。</p></div>
+      <span class="pill" id="p1">待做</span></div>
+    <div class="row"><button onclick="doEnv()">开始检查</button></div>
+    <div class="out" id="r1"></div>
+  </section>
 
-<div class="card"><h2>任务生成（四维笛卡尔）</h2>
-<label>配置目录（scenes/lights/targets/cameras 四个 json）</label><input id="q_dir" placeholder="/opt/ue5_synth/config">
-<div class="row"><div style="flex:1"><label>seed</label><input id="q_seed" value="20261113"></div>
-<div style="flex:2"><label>输出 tasks.jsonl</label><input id="q_out" placeholder="/data/queue/tasks.jsonl"></div></div>
-<div class="row"><button onclick="run('queue_gen',{cfg_dir:$v('q_dir'),seed:$v('q_seed'),out:$v('q_out')},'queueout')">生成</button></div>
-<pre id="queueout">尚未运行</pre></div>
+  <section class="card step" id="s2">
+    <div class="head"><span class="num">2</span>
+      <div><h2>生成拍摄清单</h2><p class="desc">决定这一批要拍哪些画面（路段、天气、目标、相机）。用默认配置直接点就行，不用改。</p></div>
+      <span class="pill" id="p2">待做</span></div>
+    <div class="row"><button onclick="doQueue()">生成清单</button><span class="mini" id="qinfo"></span></div>
+    <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+      <label>配置目录（scenes/lights/targets/cameras 四个 json 所在目录）</label><input id="q_dir" placeholder="留空 = 用服务器配置">
+      <div class="row"><div style="flex:1"><label>随机种子（同一种子结果可复现）</label><input id="q_seed" placeholder="留空 = 20261113"></div>
+      <div style="flex:2"><label>清单输出文件</label><input id="q_out" placeholder="留空 = 用服务器配置"></div></div>
+    </details>
+    <div class="out" id="r2"></div>
+  </section>
 
-<div class="card"><h2>渲染控制</h2>
-<div class="mini">工程与清单取配置；run_batch 自己起 tmux（ue5_render），重启即断点续跑</div>
-<div class="row">
-<button onclick="run('render_start',{},'renderout')">启动渲染</button>
-<button class="red" onclick="run('render_stop',{},'renderout')">停止渲染</button>
-<button class="gray" onclick="run('gpu_watch',{},'renderout')">GPU 监控</button>
-</div>
-<div class="row">
-<button class="gray" onclick="run('case_check',{},'renderout')">工程大小写校验</button>
-<button class="gray" onclick="run('compile',{},'renderout')">编译 UE5（1~3h）</button>
-</div>
-<pre id="renderout">尚未运行</pre></div>
+  <section class="card step" id="s3">
+    <div class="head"><span class="num">3</span>
+      <div><h2>开始出图</h2><p class="desc">机器会一张一张渲染，很慢是正常的。可以关掉这个网页，出图不会停；下次打开点同一个按钮会接着上次继续，不会重拍。</p></div>
+      <span class="pill" id="p3">待做</span></div>
+    <div class="row">
+      <button class="big" onclick="doRender()">开始出图 / 继续出图</button>
+      <button class="red" onclick="doStop()">停止出图</button>
+    </div>
+    <div class="progress"><i id="pRender2">0%</i></div>
+    <div class="out" id="r3"></div>
+  </section>
 
-<div class="card"><h2>链路自检（dryrun）</h2>
-<div class="mini">用合成假帧把「任务生成 → 后处理 → 打包」整条链路跑一遍（不跑渲染、不用 UE），改完脚本先点它</div>
-<div class="row"><button class="gray" onclick="run('dryrun',{},'dryout')">链路自检</button></div>
-<pre id="dryout" style="max-height:200px">尚未运行</pre></div>
+  <section class="card step" id="s4">
+    <div class="head"><span class="num">4</span>
+      <div><h2>把原图变成"训练能用的照片"</h2><p class="desc">给渲染图加曝光、噪声、暗角、模糊，让它更像真车拍的。原图会保留，这一步可以反复跑。</p></div>
+      <span class="pill" id="p4">待做</span></div>
+    <div class="row"><button onclick="doPost()">开始处理</button></div>
+    <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+      <div class="row"><div style="flex:1"><label>只处理前 N 张（0 或留空 = 全部）</label><input id="p_limit" value="0"></div>
+      <div style="flex:2"><label>实拍参考图目录（用于调色，可留空）</label><input id="p_real" placeholder="留空 = 跳过调色"></div></div>
+    </details>
+    <div class="progress"><i id="pPost">0%</i></div>
+    <div class="out" id="r4"></div>
+  </section>
 
-<div class="card"><h2>后处理七步 + 打包</h2>
-<label>域对齐实采图目录（留空=跳过第6步）</label><input id="p_real" placeholder="/data/real_refs">
-<div class="row"><div style="flex:1"><label>limit（0=全部）</label><input id="p_limit" value="0"></div>
-<div style="flex:1"><label>打包格式</label><select id="p_fmt"><option>coco</option><option>yolo</option></select></div></div>
-<div class="row">
-<button onclick="run('post',{real:$v('p_real'),limit:$v('p_limit')},'postout')">跑后处理</button>
-<button onclick="run('pack',{format:$v('p_fmt')},'postout')">打包数据集</button>
-</div>
-<pre id="postout">尚未运行</pre></div>
+  <section class="card step" id="s5">
+    <div class="head"><span class="num">5</span>
+      <div><h2>打包成训练集</h2><p class="desc">把标注整理成训练框架认识的格式，并自动分成"训练用"和"验证用"两份。</p></div>
+      <span class="pill" id="p5">待做</span></div>
+    <div class="row">
+      <select id="p_fmt" style="max-width:240px"><option value="coco">通用格式（COCO）</option><option value="yolo">YOLO 格式</option></select>
+      <button onclick="doPack()">打包训练集</button>
+    </div>
+    <div class="out" id="r5"></div>
+  </section>
 
-<div class="card"><h2>日志</h2>
-<label>日志文件</label>
-<select id="logname" onchange="loadLog()">
-<option>batch.log</option><option>capture_errors.log</option>
-<option>gpu_watch.csv</option><option>oom_guard_cron.log</option></select>
-<button class="gray" style="margin-top:6px" onclick="loadLog()">刷新</button>
-<pre id="logout">–</pre></div>
+  <section class="card step" id="s6">
+    <div class="head"><span class="num">6</span>
+      <div><h2>抽几张看看框得准不准</h2><p class="desc">把标注框画到图上、拼成一张 20 张的图。框贴不贴边、有没有跑偏，一眼就能看出来。</p></div>
+      <span class="pill" id="p6">待做</span></div>
+    <div class="row"><button onclick="doOverlay()">生成抽检图</button><span class="mini" id="oinfo"></span></div>
+    <details class="mini-adv"><summary>要改数量？</summary><label>抽检多少张</label><input id="o_limit" value="20"></details>
+    <img id="ovimg" alt="抽检拼图" onclick="window.open(this.src,'_blank')">
+    <div class="out" id="r6"></div>
+  </section>
 
-<div class="card"><h2>作业控制台</h2>
-<div id="jobs" class="mini">暂无作业</div>
-<pre id="jobout">点上面作业看输出</pre>
-<div class="row"><button class="red" onclick="killSel()">杀掉所选作业</button><span class="mini" id="seljob">未选</span></div></div>
-
-<div class="card wide"><h2>配置（改完点保存，立即生效）</h2>
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 14px" id="cfgfields"></div>
-<div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div></div>
+  <section class="card">
+    <div class="head"><div><h2>出问题了？看这里</h2><p class="desc">红字看不懂没关系，把下面的内容复制发给出图的人就行。先看"渲染日志"和"单帧错误"。</p></div></div>
+    <div class="row">
+      <button class="gray" onclick="loadLog('batch.log')">渲染日志</button>
+      <button class="gray" onclick="loadLog('capture_errors.log')">单帧错误</button>
+      <button class="gray" onclick="loadLog('gpu_watch.csv')">显卡记录</button>
+    </div>
+    <pre id="logout">点上面的按钮查看日志</pre>
+    <details><summary>最近的作业记录（点一条看输出，也可以停止它）</summary>
+      <div id="jobs" class="mini">还没有作业记录</div>
+      <div class="row"><span class="mini" id="seljob">未选择</span><button class="red" onclick="killSel()">停止所选作业</button></div>
+      <pre id="jobout">点上面一条记录看它的输出</pre>
+    </details>
+  </section>
 </main>
+
+<details class="adv">
+  <summary>高级操作（不懂就别点）</summary>
+  <div class="adv-grid">
+    <div><h3>编译引擎（只做一次）</h3><p>第一次用才需要，要 1~3 小时，会把内存吃满。编译时不要出图。</p>
+      <button class="gray" onclick="doCompile()">开始编译</button><div class="out" id="radv"></div></div>
+    <div><h3>工程检查</h3><p>从 Windows 拷过来的工程有没有大小写不一致（否则 Ubuntu 加载会报资产找不到）。</p>
+      <button class="gray" onclick="doCaseCheck()">检查工程</button><div class="out" id="radv2"></div></div>
+    <div><h3>脚本自检</h3><p>检查脚本本身有没有坏，不会真的出图，约 10 秒。</p>
+      <button class="gray" onclick="doDryrun()">跑自检</button><div class="out" id="radv3"></div></div>
+    <div><h3>显卡记录</h3><p>每秒记一次显存和温度，出图卡顿时用来看是不是显存爆了。</p>
+      <button class="gray" onclick="doGpuWatch()">开始记录</button><div class="out" id="radv4"></div></div>
+  </div>
+  <h3 style="margin-top:18px">配置（一般不用改，改完记得保存）</h3>
+  <div class="cfg-grid" id="cfgfields"></div>
+  <div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div>
+  <p class="mini" style="margin-top:8px">下面小灰字是配置项的真实名字，方便对照文档。</p>
+</details>
+
+<footer>UE5 感知合成数据 · 操作台（零依赖单文件）。页面每 5 秒自动刷新；关掉网页不影响后台作业。</footer>
+
 <script>
-var $=function(i){return document.getElementById(i)},$v=function(i){return $(i).value.trim()};
+var $=function(i){return document.getElementById(i)};
+var $v=function(i){return ($(i)&&$(i).value||'').trim()};
 function api(p,m,b){return fetch(p,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json()})}
-function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-var selJob=null;
-function refresh(){api('/api/status').then(function(s){
-  var g=s.gpu,rows=[];
-  rows.push(['GPU',(g?(esc(g.name||'GPU')+' / '+g.mem_mb+' MiB / 利用 '+g.util+'% / '+g.temp+'°C'):'<span class=bad>nvidia-smi 不可用</span>')]);
-  rows.push(['内存',s.mem_total_g>0?(s.mem_avail_g+' G 可用 / '+s.mem_total_g+' G 总'):'<span class=mini>不可用（需 Linux /proc/meminfo）</span>']);
-  rows.push(['swap',s.swap_on==null?'<span class=mini>不可用</span>':(s.swap_on?'<span class=bad>开启中</span>':'<span class=ok>已关闭</span>')]);
-  rows.push(['磁盘','/ '+(s.disk_root_free_g>=0?s.disk_root_free_g+'G':'—')+' · /data '+(s.disk_data_free_g>=0?s.disk_data_free_g+'G':'—')]);
-  rows.push(['渲染会话',s.render_running?'<span class=ok>运行中 (tmux ue5_render)</span>':'<span class=mini>未运行</span>']);
-  rows.push(['任务',(s.tasks_done+' / '+s.tasks_total+' 已完成')]);
-  $('ov').innerHTML=rows.map(function(r){return '<b>'+r[0]+'</b><span>'+r[1]+'</span>'}).join('');
-  var pct=s.tasks_total?Math.round(100*s.tasks_done/s.tasks_total):0;
-  $('prog').style.width=pct+'%';$('prog').textContent=pct+'%  ('+s.tasks_done+'/'+s.tasks_total+')';
-  $('clock').textContent=s.time;
-  renderJobs(s.jobs);
-})['catch'](function(e){$('clock').textContent='连接失败:'+e})}
-function renderJobs(list){
-  if(!list||!list.length){$('jobs').textContent='暂无作业';return}
-  $('jobs').innerHTML=list.map(function(j){
-    var st=j.status=='running'?'<span class=warn>跑着</span>':(j.status=='ok'?'<span class=ok>完成</span>':'<span class=bad>失败('+j.ret+')</span>');
-    return '<div class="job" onclick="viewJob(\''+j.id+'\',this)">['+j.action+'] '+st+' <span class=mini>'+j.started+'</span></div>'}).join('');
+function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function fmt(n){return n>=20000?'2万+':String(n)}
+
+var S={cfg:{},jobs:[]}, CFG_DONE=false, JOB_CACHE={}, ACTIVE={}, SELJOB=null;
+var CFG_LABELS={scripts_dir:'脚本目录',queue_file:'拍摄清单文件',done_dir:'已完成标记目录',raw_dir:'原始图目录',meta_dir:'标注真值目录',final_dir:'处理后的图目录',dataset_dir:'训练集目录',uproject:'UE 工程文件',ue_dir:'UE 引擎目录',logs_dir:'日志目录',queue_cfg_dir:'拍摄配置目录',project_dir:'工程目录',real_dir:'实拍参考图目录（可空）',overlay_dir:'抽检图目录'};
+var ACTION_NAMES={envcheck:'检查机器',queue_gen:'生成清单',render_start:'开始出图',render_stop:'停止出图',post:'处理图',pack:'打包训练集',overlay:'生成抽检图',compile:'编译引擎',case_check:'工程检查',dryrun:'脚本自检',gpu_watch:'显卡记录'};
+
+function actionName(a){return ACTION_NAMES[a]||a}
+function latest(action){for(var i=0;i<S.jobs.length;i++){if(S.jobs[i].action===action)return S.jobs[i]}return null}
+function newestOf(list){
+  var best=null;
+  for(var i=0;i<list.length;i++){
+    if(!list[i])continue;
+    if(!best||String(list[i].started)>String(best.started))best=list[i];
+  }
+  return best;
 }
-function viewJob(id,el){selJob=id;$('seljob').textContent='所选: '+id;
-  if(el)el.style.background='#2563b0';
-  api('/api/job?id='+id).then(function(j){$('jobout').textContent='['+j.action+'] '+j.status+' ret='+j.ret+'\n$ '+j.cmd.join(' ')+'\n\n'+(j.out||'')}) }
-function killSel(){if(!selJob){$('seljob').textContent='先点一个作业';return}api('/api/kill','POST',{id:selJob}).then(function(r){$('seljob').textContent=r.killed?'已杀':'没杀成'})}
-function run(action,params,preId){
-  // preId：目标 <pre> 的 id（如 'envout'）；兼容老写法 true=作业控制台，false/省略=只启动作业
-  var target=preId===true?'jobout':preId;
-  var pre=target?$(target):null;
+function pill(id,txt,cls){var e=$(id);if(!e)return;e.textContent=txt;e.className='pill '+(cls||'')}
+
+function setResult(el,cls,txt,out){
+  el.innerHTML='';
+  var d=document.createElement('div');d.className='res '+(cls||'');d.textContent=txt;el.appendChild(d);
+  if(out){var det=document.createElement('details');var s=document.createElement('summary');s.textContent='技术细节（出问题才需要看）';
+    var pre=document.createElement('pre');pre.textContent=out;det.appendChild(s);det.appendChild(pre);el.appendChild(det);}
+}
+
+function friendlyError(msg){
+  msg=String(msg);
+  if(msg.indexOf('已有同类作业')>=0)return '这个动作正在跑，等它跑完再点（不用重复点）。';
+  if(msg.indexOf('启动失败')>=0||msg.indexOf('WinError')>=0)return '启动失败：服务器上找不到要用的程序。常见原因是"脚本目录"配置不对，或这台机器缺少 bash/tmux。';
+  if(msg.indexOf('参数错误')>=0)return msg;
+  return '没能启动：'+msg;
+}
+
+function summarize(action,j){
+  var out=j.out||'';
+  if(j.status==='running')return {cls:'run',text:'正在干活…（可以关掉这个网页，不会停）'};
+  var ok=j.status==='ok';
+  if(action==='envcheck'){
+    if(ok)return {cls:'ok',text:'机器检查通过，可以继续第 2 步。'};
+    return {cls:'bad',text:'机器检查没通过：下面红字里写着哪一项不行，把这段发给管理员。'};
+  }
+  if(action==='queue_gen'){
+    var m=out.match(/(\d+)\s*个任务/);
+    return ok?{cls:'ok',text:'拍摄清单生成好了'+(m?'，共 '+m[1]+' 张图要拍':'')}:{cls:'bad',text:'清单生成失败，看下面原因（常见：配置目录里缺四个 json）。'};
+  }
+  if(action==='render_start')return ok?{cls:'ok',text:'已经开始出图。看第 3 步的进度条，出图期间可以关网页。'}:{cls:'bad',text:'没能启动出图，看下面原因（常见：还没生成清单、工程文件路径不对，或 UE 还没编译）。'};
+  if(action==='render_stop')return ok?{cls:'ok',text:'已停止。已经出的图不会丢，下次点"开始出图"会接着出。'}:{cls:'bad',text:'停止失败：可能本来就没在出图。'};
+  if(action==='post'){
+    var m2=out.match(/new=(\d+)\s+skip=(\d+)\s+fail=(\d+)/);
+    if(m2){var bad=parseInt(m2[3],10)>0;
+      return {cls:bad?'warn':'ok',text:'处理完成：新处理 '+m2[1]+' 张，跳过 '+m2[2]+' 张'+(bad?'，失败 '+m2[3]+' 张（看下面原因）':'')+'。'};}
+    return ok?{cls:'ok',text:'处理完成。'}:{cls:'bad',text:'处理出错了，看下面原因（常见：原始图还没出，或 16bit 图缺 OpenCV）。'};
+  }
+  if(action==='pack')return ok?{cls:'ok',text:'训练集打包完成，可以去第 6 步看抽检图了。'}:{cls:'bad',text:'打包失败，看下面原因（常见：第 4 步还没处理完）。'};
+  if(action==='overlay')return ok?{cls:'ok',text:'抽检图生成好了，下面就是。框贴不贴边，一眼能看出。'}:{cls:'bad',text:'抽检图生成失败：可能第 4 步还没产出处理后的图。'};
+  if(action==='dryrun')return ok&&out.indexOf('自检通过')>=0?{cls:'ok',text:'脚本自检通过，脚本本身没问题（这不代表图已经出了）。'}:{cls:'bad',text:'脚本自检没通过，把下面的内容发给出图的人。'};
+  if(action==='compile')return ok?{cls:'ok',text:'引擎编译完成。'}:{cls:'bad',text:'编译失败，看下面原因（常见：内存不够，先停掉在跑的任务）。'};
+  if(action==='case_check')return ok?{cls:'ok',text:'工程检查通过。'}:{cls:'bad',text:'工程检查发现问题，看下面原因（大小写不一致是最常见原因）。'};
+  return {cls:ok?'ok':'bad',text:ok?'完成。':'出错了，看下面原因。'};
+}
+
+function pollJob(id,action,el){
+  ACTIVE[action]=true;
+  function tick(){
+    api('/api/job?id='+id).then(function(j){
+      JOB_CACHE[j.id]=j;
+      var sm=summarize(action,j);
+      setResult(el,sm.cls,sm.text,j.out);
+      if(j.status==='running'){setTimeout(tick,1500);}
+      else{
+        ACTIVE[action]=false;
+        if(action==='overlay'&&j.status==='ok')reloadOverlay();
+        refresh();
+      }
+    })['catch'](function(e){ACTIVE[action]=false;setResult(el,'bad','和服务器断了连接：'+e)});
+  }
+  tick();
+}
+
+function runStep(action,params,elId){
+  var el=$(elId);
+  setResult(el,'run','已提交，正在启动…');
   api('/api/run','POST',{action:action,params:params||{}}).then(function(r){
-    if(r.error){if(pre)pre.textContent='错误: '+r.error;return}
-    selJob=r.id;$('seljob').textContent='所选: '+r.id;
-    if(pre)pollJob(r.id,target);
+    if(r.error){setResult(el,'bad',friendlyError(r.error));return;}
+    pollJob(r.id,action,el);
     refresh();
-  })}
-function pollJob(id,preId){
+  })['catch'](function(e){setResult(el,'bad','连不上服务器：'+e)});
+}
+
+function doEnv(){runStep('envcheck',{},'r1')}
+function doQueue(){runStep('queue_gen',{cfg_dir:$v('q_dir'),seed:$v('q_seed'),out:$v('q_out')},'r2')}
+function doRender(){runStep('render_start',{},'r3')}
+function doStop(){
+  if(!confirm('确定停止出图吗？\n已经出的图不会丢，下次点"开始出图"会接着出。'))return;
+  runStep('render_stop',{},'r3');
+}
+function doPost(){runStep('post',{limit:$v('p_limit'),real:$v('p_real')},'r4')}
+function doPack(){runStep('pack',{format:$('p_fmt').value},'r5')}
+function doOverlay(){runStep('overlay',{limit:$v('o_limit')},'r6')}
+function doCompile(){
+  if(!confirm('编译引擎要 1~3 小时，而且会把内存吃满。\n确定现在开始？（建议先停掉在跑的任务）'))return;
+  runStep('compile',{},'radv');
+}
+function doCaseCheck(){runStep('case_check',{},'radv2')}
+function doDryrun(){runStep('dryrun',{},'radv3')}
+function doGpuWatch(){runStep('gpu_watch',{},'radv4')}
+
+function reloadOverlay(){$('ovimg').src='/api/overlay?t='+Date.now();$('ovimg').style.display='block';}
+
+function refresh(){
+  api('/api/status').then(function(s){
+    S=s;S.jobs=s.jobs||[];
+    if(!CFG_DONE){CFG_DONE=true;renderCfg(s.cfg);}
+    var done=s.tasks_done||0,total=s.tasks_total||0,fin=s.final_count||0;
+    $('clock').textContent=s.time;
+
+    $('ovDone').textContent=total?(done+' / '+total):'—';
+    $('ovRender').textContent=s.render_running?'正在出图':(total&&done>=total?'已出完':'没在跑');
+    var g=s.gpu,adv=[];
+    if(g){
+      $('ovGpu').textContent=g.mem_mb+'M / '+g.temp+'°C';
+      if(g.temp>=85)adv.push('显卡有点烫（'+g.temp+'°C），最好先停一会儿散热。');
+      else if(g.mem_mb>=10500)adv.push('显存快满了（'+g.mem_mb+'M），出图可能变慢或失败。');
+      else if(g.util>0)adv.push('显卡正在干活，正常。');
+      else adv.push('显卡空闲。');
+    }else{
+      $('ovGpu').textContent='看不到';
+      adv.push('看不到显卡信息（可能没装驱动，或这不是服务器本机）。');
+    }
+    var disk=s.disk_data_free_g>=0?s.disk_data_free_g:s.disk_root_free_g;
+    $('ovDisk').textContent=disk>=0?disk+' G':'—';
+    if(disk>=0&&disk<50)adv.push('磁盘快满了（剩 '+disk+'G），先清理再继续出图。');
+    var envAdv=latest('envcheck');
+    if(envAdv&&envAdv.status==='fail')adv.push('上次机器检查有项目没通过，见第 1 步红字。');
+    $('advice').textContent=adv.join(' ');
+
+    var pct=total?Math.min(100,Math.round(done*100/total)):0;
+    ['pRender','pRender2'].forEach(function(id){var e=$(id);e.style.width=pct+'%';e.textContent=pct+'%  ('+done+'/'+total+')';});
+    var pct2=done?Math.min(100,Math.round(fin*100/done)):0;
+    $('pPost').style.width=pct2+'%';$('pPost').textContent=pct2+'%  ('+fin+'/'+done+')';
+
+    // 每一步的状态标签
+    var env=latest('envcheck');
+    pill('p1',env?(env.status==='ok'?'已通过':(env.status==='running'?'检查中':'没通过')):'待做',env?(env.status==='ok'?'ok':(env.status==='running'?'run':'bad')):'');
+    pill('p2',total?('已生成 '+total+' 张'):'待做',total?'ok':'');
+    pill('p3',s.render_running?'出图中':(total&&done>=total?'已完成':(done>0?'未完成':'待做')),s.render_running?'run':(total&&done>=total?'ok':(done>0?'warn':'')));
+    pill('p4',done?(fin>=done?'已完成':(fin>0?'做了一部分':'待做')):'待做',done&&fin>=done?'ok':(fin>0?'warn':''));
+    // 第 5/6 步是否"对这一批已经做完"：必须本轮图已出完且已处理完，
+    // 否则上一批留下的训练集/抽检图会让人误以为已经做完（重新生成清单后尤其明显）
+    var postReady=done>0&&fin>=done;
+    pill('p5',(s.dataset_ready&&postReady)?'已完成':'待做',(s.dataset_ready&&postReady)?'ok':'');
+    pill('p6',(s.overlay_ready&&postReady)?'已生成':'待做',(s.overlay_ready&&postReady)?'ok':'');
+
+    $('qinfo').textContent=total?('清单里共 '+total+' 张图'):'';
+    $('oinfo').textContent=(s.overlay_ready&&postReady)?'（已有抽检图，重新生成会覆盖）':'';
+    if(s.overlay_ready&&postReady){
+      if(!$('ovimg').getAttribute('src'))reloadOverlay();
+      $('ovimg').style.display='block';
+    }else{
+      $('ovimg').style.display='none';
+    }
+
+    // 已经结束的作业，把结论回填到对应步骤（轮询中的不覆盖）
+    [['envcheck','r1'],['queue_gen','r2'],['post','r4'],['pack','r5'],['overlay','r6'],
+     ['compile','radv'],['case_check','radv2'],['dryrun','radv3'],['gpu_watch','radv4']].forEach(function(pair){
+      var action=pair[0],elId=pair[1];
+      if(ACTIVE[action])return;
+      var j=latest(action);if(!j)return;
+      var detail=JOB_CACHE[j.id];
+      if(!detail){api('/api/job?id='+j.id).then(function(d){JOB_CACHE[d.id]=d;if(!ACTIVE[action]){var sm=summarize(action,d);setResult($(elId),sm.cls,sm.text,d.out);}})['catch'](function(){});return;}
+      var sm2=summarize(action,detail);
+      setResult($(elId),sm2.cls,sm2.text,detail.out);
+    });
+    // 出图相关两个动作合并：只显示最近一次（开始/停止），避免互相覆盖
+    if(!ACTIVE['render_start']&&!ACTIVE['render_stop']){
+      var rj=newestOf([latest('render_start'),latest('render_stop')]);
+      if(rj){
+        var rd=JOB_CACHE[rj.id];
+        if(rd){var rs=summarize(rd.action,rd);setResult($('r3'),rs.cls,rs.text,rd.out);}
+        else{api('/api/job?id='+rj.id).then(function(d){JOB_CACHE[d.id]=d;var s2=summarize(d.action,d);setResult($('r3'),s2.cls,s2.text,d.out);})['catch'](function(){});}
+      }
+    }
+
+    // 顶部"下一步"提示
+    var nx=computeNext(s,done,total,fin);
+    $('nowStep').textContent='第 '+nx.n+' 步';
+    $('nextText').textContent=nx.text;
+    $('banner').className='banner '+(nx.cls||'');
+
+    renderJobs(S.jobs);
+  })['catch'](function(e){$('clock').textContent='连不上服务器：'+e});
+}
+
+function computeNext(s,done,total,fin){
+  var env=latest('envcheck');
+  var envFailed=env&&env.status==='fail';
+  if(total===0){
+    if(envFailed)return {n:2,text:'机器检查有项目没通过（看第 1 步红字），最好先处理；也可以点第 2 步先继续。',cls:'warn'};
+    if(!env)return {n:1,text:'先点第 1 步「开始检查」，看看这台机器能不能出图。',cls:'work'};
+    return {n:2,text:'机器没问题。点第 2 步「生成清单」，决定这一批要拍哪些画面。',cls:'work'};
+  }
+  if(done<total){
+    if(s.render_running)return {n:3,text:'正在出图：已完成 '+done+' / '+total+' 张，放着别管就行（可以关网页）。',cls:'work'};
+    return {n:3,text:'还没出完（'+done+' / '+total+' 张）。点第 3 步「开始出图」，会自动接着上次继续。',cls:'warn'};
+  }
+  if(fin<done)return {n:4,text:'图出完了。点第 4 步「开始处理」，把原图变成训练能用的照片。',cls:'work'};
+  if(!s.dataset_ready)return {n:5,text:'处理完了。点第 5 步「打包训练集」。',cls:'work'};
+  if(!s.overlay_ready)return {n:6,text:'最后一步：点第 6 步「生成抽检图」，看看框画得准不准。',cls:'work'};
+  return {n:6,text:'全部做完了。训练集在 '+(s.cfg.dataset_dir||'')+'，抽检图在 '+(s.cfg.overlay_dir||'')+'。',cls:'ok'};
+}
+
+function loadLog(name){
+  $('logout').textContent='读取中…';
+  api('/api/log?name='+encodeURIComponent(name)+'&lines=200').then(function(r){
+    $('logout').textContent=(r.error?r.error:r.out)||'（空）';
+  })['catch'](function(e){$('logout').textContent='读取失败：'+e});
+}
+
+function renderJobs(list){
+  if(!list||!list.length){$('jobs').textContent='还没有作业记录';return}
+  $('jobs').innerHTML=list.map(function(j){
+    var st=j.status==='running'?'跑着':(j.status==='ok'?'完成':'出错');
+    return '<div class="job" onclick="viewJob(\''+j.id+'\')">'+esc(actionName(j.action))+' · '+st+' · '+esc(j.started)+'</div>';
+  }).join('');
+}
+function viewJob(id){
+  SELJOB=id;$('seljob').textContent='已选择：'+id;
   api('/api/job?id='+id).then(function(j){
-    var pre=$(preId||'jobout')||$('jobout');
-    pre.textContent='['+j.action+'] '+(j.status=='running'?'跑着…':'结束 ret='+j.ret)+'\n$ '+j.cmd.join(' ')+'\n\n'+(j.out||'');
-    if(j.status=='running')setTimeout(function(){pollJob(id,preId)},1500);
-    else refresh();
-  })}
-function loadLog(){api('/api/log?name='+encodeURIComponent($('logname').value)+'&lines=300').then(function(r){$('logout').textContent=r.out})}
-var CFGKEYS=null;
-function renderCfg(c){CFGKEYS=Object.keys(c);
+    $('jobout').textContent='【'+actionName(j.action)+'】'+(j.status==='running'?'正在跑…':'已结束')+'\n\n'+(j.out||'');
+  });
+}
+function killSel(){
+  if(!SELJOB){$('seljob').textContent='先点上面一条记录';return;}
+  if(!confirm('确定停止这个作业吗？停止后可以重新点按钮再跑。'))return;
+  api('/api/kill','POST',{id:SELJOB}).then(function(r){$('seljob').textContent=r.killed?'已停止':'没停成（可能已经结束了）'});
+}
+
+var CFGKEYS=[];
+function renderCfg(c){
+  CFGKEYS=Object.keys(c);
   $('cfgfields').innerHTML=CFGKEYS.map(function(k){
-    return '<div><label>'+k+'</label><input id="cfg_'+k+'" value="'+esc(c[k])+'"></div>'}).join('')}
-function saveCfg(){var p={};CFGKEYS.forEach(function(k){p[k]=$v('cfg_'+k)});
-  api('/api/config','POST',p).then(function(c){renderCfg(c);$('cfgst').textContent='已保存 '+new Date().toLocaleTimeString()})}
-refresh();setInterval(refresh,5000);api('/api/status').then(function(s){renderCfg(s.cfg)});loadLog();
+    return '<div class="cfg"><label>'+esc(CFG_LABELS[k]||k)+'</label><input id="cfg_'+k+'" value="'+esc(c[k])+'"><span class="key">'+esc(k)+'</span></div>';
+  }).join('');
+}
+function saveCfg(){
+  var p={};CFGKEYS.forEach(function(k){p[k]=$v('cfg_'+k)});
+  api('/api/config','POST',p).then(function(c){renderCfg(c);$('cfgst').textContent='已保存（立即生效）';refresh();});
+}
+
+refresh();setInterval(refresh,5000);
 </script>
 </body>
 </html>
