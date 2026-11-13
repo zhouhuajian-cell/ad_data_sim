@@ -24,6 +24,7 @@ main{max-width:920px;margin:0 auto;padding:0 14px 40px}
 .hint{color:#93a4bb;font-size:13px}
 .progress{height:22px;background:#0c1117;border-radius:11px;overflow:hidden;margin-top:12px;border:1px solid #222c39}
 .progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2f6fae,#4fd18b);color:#fff;font-size:12px;text-align:center;line-height:20px;font-style:normal;transition:width .3s}
+.ready{margin-top:10px;border-radius:9px;padding:10px 12px;font-size:13px;border:1px solid #7a6030;background:#2a2213;color:#ffd166;white-space:pre-line;line-height:1.6}
 .step .head{display:flex;gap:12px;align-items:flex-start}
 .step .num{flex:0 0 36px;height:36px;border-radius:18px;background:#1f2c3d;color:#9fd0ff;font-size:17px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
 .step h2{font-size:17px;margin:0;color:#dfe9f6}
@@ -118,6 +119,7 @@ footer{max-width:920px;margin:0 auto;padding:0 14px 30px;color:#5f7188;font-size
       <button class="big" onclick="doRender()">开始出图 / 继续出图</button>
       <button class="red" onclick="doStop()">停止出图</button>
     </div>
+    <div class="ready" id="ready3" style="display:none"></div>
     <div class="progress"><i id="pRender2">0%</i></div>
     <div class="out" id="r3"></div>
   </section>
@@ -225,6 +227,7 @@ function setResult(el,cls,txt,out){
 function friendlyError(msg){
   msg=String(msg);
   if(msg.indexOf('已有同类作业')>=0)return '这个动作正在跑，等它跑完再点（不用重复点）。';
+  if(msg.indexOf('还没准备好')>=0)return msg;
   if(msg.indexOf('启动失败')>=0||msg.indexOf('WinError')>=0)return '启动失败：服务器上找不到要用的程序。常见原因是"脚本目录"配置不对，或这台机器缺少 bash/tmux。';
   if(msg.indexOf('参数错误')>=0)return msg;
   return '没能启动：'+msg;
@@ -242,7 +245,7 @@ function summarize(action,j){
     var m=out.match(/(\d+)\s*个任务/);
     return ok?{cls:'ok',text:'拍摄清单生成好了'+(m?'，共 '+m[1]+' 张图要拍':'')}:{cls:'bad',text:'清单生成失败，看下面原因（常见：配置目录里缺四个 json）。'};
   }
-  if(action==='render_start')return ok?{cls:'ok',text:'已经开始出图。看第 3 步的进度条，出图期间可以关网页。'}:{cls:'bad',text:'没能启动出图，看下面原因（常见：还没生成清单、工程文件路径不对，或 UE 还没编译）。'};
+  if(action==='render_start')return ok?{cls:'ok',text:'已经开始出图。看第 3 步的进度条，出图期间可以关网页。'}:{cls:'bad',text:'没能启动出图：看下面原因（常见：工程没同步、引擎没编译、清单没生成）。'};
   if(action==='render_stop')return ok?{cls:'ok',text:'已停止。已经出的图不会丢，下次点"开始出图"会接着出。'}:{cls:'bad',text:'停止失败：可能本来就没在出图。'};
   if(action==='post'){
     var m2=out.match(/new=(\d+)\s+skip=(\d+)\s+fail=(\d+)/);
@@ -343,6 +346,17 @@ function refresh(){
     pill('p1',env?(env.status==='ok'?'已通过':(env.status==='running'?'检查中':'没通过')):'待做',env?(env.status==='ok'?'ok':(env.status==='running'?'run':'bad')):'');
     pill('p2',total?('已生成 '+total+' 张'):'待做',total?'ok':'');
     pill('p3',s.render_running?'出图中':(total&&done>=total?'已完成':(done>0?'未完成':'待做')),s.render_running?'run':(total&&done>=total?'ok':(done>0?'warn':'')));
+    // 出图前环境检查：缺工程/脚本/引擎时直接说怎么办，不用点下去等英文报错
+    var ready='';
+    if(!s.uproject_exists){
+      ready='⚠️ 服务器上还没有工程文件：'+s.cfg.uproject+'\n先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；工程在别的目录时，去「高级操作 → 配置」把 uproject / project_dir 改成实际路径。';
+    }else if(!s.capture_script_exists){
+      ready='⚠️ 工程里没有批量捕获脚本：'+s.cfg.project_dir+'/Content/Python/batch_capture.py\n把仓库 engine/Content/Python/ 下的 batch_capture.py 和 capture_math.py 复制到 Windows 工程再下发。';
+    }else if(!s.ue_ready){
+      ready='⚠️ 引擎还没编译好：'+s.cfg.ue_dir+'/Engine/Binaries/Linux/UnrealEditor-Cmd 不存在\n先去「高级操作 → 编译引擎」（1~3 小时，内存吃满，选空闲窗口）。';
+    }
+    $('ready3').textContent=ready;
+    $('ready3').style.display=ready?'block':'none';
     pill('p4',done?(fin>=done?'已完成':(fin>0?'做了一部分':'待做')):'待做',done&&fin>=done?'ok':(fin>0?'warn':''));
     // 第 5/6 步是否"对这一批已经做完"：必须本轮图已出完且已处理完，
     // 否则上一批留下的训练集/抽检图会让人误以为已经做完（重新生成清单后尤其明显）
@@ -399,6 +413,8 @@ function computeNext(s,done,total,fin){
     return {n:2,text:'机器没问题。点第 2 步「生成清单」，决定这一批要拍哪些画面。',cls:'work'};
   }
   if(done<total){
+    if(!s.uproject_exists)return {n:3,text:'工程还没下发到服务器（'+s.cfg.uproject+' 不存在）。先在 Windows 上跑 sync_project.ps1，或去配置里改路径。',cls:'warn'};
+    if(!s.ue_ready)return {n:3,text:'引擎还没编译好。先去「高级操作 → 编译引擎」（1~3 小时，内存吃满）。',cls:'warn'};
     if(s.render_running)return {n:3,text:'正在出图：已完成 '+done+' / '+total+' 张，放着别管就行（可以关网页）。',cls:'work'};
     return {n:3,text:'还没出完（'+done+' / '+total+' 张）。点第 3 步「开始出图」，会自动接着上次继续。',cls:'warn'};
   }

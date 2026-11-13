@@ -64,6 +64,8 @@ python3 dashboard/server.py          # 默认端口 8010（或 UE5_PANEL_PORT / 
 - **给新手看的六步引导**：① 检查机器 → ② 生成拍摄清单 → ③ 开始出图 → ④ 处理成训练照片 →
   ⑤ 打包训练集 → ⑥ 生成抽检图。顶部横幅直接告诉你"下一步点第几步"，每一步按钮下显示**说人话的结论**
   （如"图出完了，点第 4 步"），技术输出收进"技术细节"折叠区。
+- **出图前预检**：第 3 步启动前会检查工程文件、批量脚本、引擎、任务清单是否就绪；缺什么直接在页面上给出处理办法，
+  不会让人点完才看到 tmux/bash 的英文报错（工程没下发是最常见的一种）。
 - **防误操作**：停止出图/杀作业/编译引擎都要二次确认；重复点同一动作会被拦下并提示；
   关掉网页不影响后台作业，进度每 5 秒自动刷新。
 - **在线抽检**：第 6 步生成 20 帧标注拼图并在页面里直接显示（`/api/overlay` 只读配置目录下这一张图），
@@ -75,6 +77,14 @@ python3 dashboard/server.py          # 默认端口 8010（或 UE5_PANEL_PORT / 
 - 各动作的 Python 用服务端自身解释器（`sys.executable`），不依赖 PATH 里的 `python3`；作业返回值非 0 会标红。
 - 本地 Windows 也能起，用于界面调试（GPU/内存探针自动降级；`bash`/`tmux`/`nvidia-smi` 类动作不可用属正常）。
 - **安全边界**：只暴露白名单动作（`build_cmd`），参数走 argv 不过 shell，参数做类型校验；端口绑 0.0.0.0（内网访问）。
+- **更新到服务器**（面板启动时会把 `index.html` 读进内存，改完必须重启才生效）：
+  ```bash
+  scp dashboard/index.html dashboard/server.py root@10.2.248.34:/opt/ue5_synth/dashboard/
+  scp linux/run_batch.sh root@10.2.248.34:/opt/ue5_synth/linux/
+  ssh root@10.2.248.34 "pkill -f 'python3 server.py 8010'; cd /opt/ue5_synth/dashboard && \
+    setsid nohup python3 server.py 8010 >> panel.log 2>&1 < /dev/null &"
+  ```
+  更新前先备份旧文件；重启后浏览器刷新，标题应为「UE5 出图操作台」。
 - ⚠️ 脚本路径默认全按服务器（`/data/...`、`/opt/ue5_synth`）——**要在服务器上跑才有意义**；
   本地调试时把配置里的 `scripts_dir`/`project_dir` 指向本仓库即可跑通「链路自检」与「工程校验」类动作。
 

@@ -90,7 +90,7 @@ def build_cmd(action, p, cfg):
                 p.get("project_dir") or cfg["project_dir"]]
     if action == "render_start":
         return ["bash", os.path.join(s, "linux/run_batch.sh"),
-                cfg["uproject"], p.get("queue") or cfg["queue_file"]]
+                cfg["uproject"], p.get("queue") or cfg["queue_file"], cfg["ue_dir"]]
     if action == "render_stop":
         return ["tmux", "kill-session", "-t", "ue5_render"]
     if action == "gpu_watch":
@@ -130,6 +130,38 @@ def build_cmd(action, p, cfg):
                 "--cols", "4"]
     return None
 
+def precheck(action, cfg):
+    """动作前置检查：启动作业前把"缺什么、怎么办"直接说清楚。
+
+    为什么要这层：脚本自己报错时人已经点完按钮了，看到的是 tmux/bash 的英文报错；
+    无人值守场景下，缺工程/缺引擎是最常见的"看起来点得动其实跑不了"。
+    """
+    if action == "render_start":
+        up = cfg["uproject"]
+        if not os.path.exists(up):
+            return ("还没准备好：服务器上找不到工程文件 %s。\n"
+                    "先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；"
+                    "工程在别的目录时，去「高级操作 → 配置」把 uproject / project_dir 改成实际路径。" % up)
+        cap = os.path.join(cfg["project_dir"], "Content", "Python", "batch_capture.py")
+        if not os.path.exists(cap):
+            return ("还没准备好：工程里没有批量捕获脚本 %s。\n"
+                    "把仓库 engine/Content/Python/ 下的 batch_capture.py 和 capture_math.py "
+                    "复制到 <Windows 工程>/Content/Python/，再重新下发工程。" % cap)
+        ue_cmd = os.path.join(cfg["ue_dir"], "Engine", "Binaries", "Linux", "UnrealEditor-Cmd")
+        if not os.path.exists(ue_cmd):
+            return ("还没准备好：引擎还没编译好（找不到 %s）。\n"
+                    "先在「高级操作 → 编译引擎」跑一次（1~3 小时、内存吃满，选空闲窗口）；"
+                    "引擎装在别处就去配置里改 ue_dir。" % ue_cmd)
+        if not os.path.exists(cfg["queue_file"]):
+            return ("还没准备好：任务清单 %s 不存在。\n先在第 2 步「生成拍摄清单」。" % cfg["queue_file"])
+    if action == "post" and not os.path.isdir(cfg["raw_dir"]):
+        return ("还没准备好：原始图目录 %s 不存在。\n先在第 3 步出图，出图会自动建这个目录。" % cfg["raw_dir"])
+    if action == "pack" and not os.path.isdir(cfg["meta_dir"]):
+        return ("还没准备好：真值目录 %s 不存在。\n先在第 3 步出图，真值 JSON 会写到这个目录。" % cfg["meta_dir"])
+    if action == "overlay" and count_dir(cfg["final_dir"], ".png", cap=1) == 0:
+        return ("还没准备好：还没有处理后的图。\n先在第 4 步「开始处理」，再生成抽检图。")
+    return None
+
 def start_job(action, params):
     cfg = load_config()
     try:
@@ -138,6 +170,9 @@ def start_job(action, params):
         return None, "参数错误: %s" % e
     if not cmd:
         return None, "未知动作: %s" % action
+    err = precheck(action, cfg)
+    if err:
+        return None, err
     with JOBS_LOCK:
         for j in JOBS.values():
             if j["action"] == action and j["status"] == "running":
@@ -288,6 +323,12 @@ def probe_status():
     st["dataset_ready"] = has_entries(cfg["dataset_dir"])
     st["overlay_ready"] = os.path.exists(
         os.path.join(cfg["overlay_dir"], "contact_sheet.jpg"))
+    # 出图前环境是否就绪（缺工程/脚本/引擎时，前端直接提示怎么办，不用点下去等报错）
+    st["uproject_exists"] = os.path.exists(cfg["uproject"])
+    st["capture_script_exists"] = os.path.exists(
+        os.path.join(cfg["project_dir"], "Content", "Python", "batch_capture.py"))
+    st["ue_ready"] = os.path.exists(
+        os.path.join(cfg["ue_dir"], "Engine", "Binaries", "Linux", "UnrealEditor-Cmd"))
     with JOBS_LOCK:
         st["jobs"] = [{k: j[k] for k in ("id", "action", "status", "ret", "started", "ended")}
                       for j in sorted(JOBS.values(), key=lambda x: x["started"], reverse=True)[:12]]
