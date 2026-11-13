@@ -1,0 +1,112 @@
+[
+  [
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [25.0, 2.5, 3.0],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [2.0, 0.5, 0.3, 8.0]
+    }
+  ],
+  [
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [25.0, 2.5, 3.0],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [2.0, 0.5, 0.3, 8.0]
+    },
+    {
+      "class": "vehicle",
+      "actor_class": "/Game/Vehicles/BP_Car.BP_Car_C",
+      "location": [18.0, 1.75, 0.8],
+      "rotation": [0.0, 0.0, 0.0],
+      "jitter": [4.0, 0.3, 0.2, 5.0]
+    }
+  ],
+  [
+    {
+      "class": "cone",
+      "actor_class": "/Game/Props/BP_Cone.BP_Cone_C",
+      "location": [15.0, 0.5, 0.35],
+      "rotation": [0.0, 0.0, 0.0],
+      "jitter": [3.0, 0.6, 0.1, 30.0]
+    },
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [22.0, 3.0, 2.8],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [2.0, 0.5, 0.3, 8.0]
+    }
+  ],
+  [
+    {
+      "class": "pedestrian",
+      "actor_class": "/Game/Characters/BP_Pedestrian.BP_Pedestrian_C",
+      "location": [12.0, 4.2, 0.0],
+      "rotation": [0.0, -90.0, 0.0],
+      "jitter": [3.0, 0.8, 0.0, 20.0]
+    },
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [26.0, 2.6, 3.0],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [2.0, 0.5, 0.3, 8.0]
+    },
+    {
+      "class": "vehicle",
+      "actor_class": "/Game/Vehicles/BP_Car.BP_Car_C",
+      "location": [30.0, -1.75, 0.8],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [5.0, 0.3, 0.2, 5.0]
+    }
+  ],
+  [
+    {
+      "class": "vehicle",
+      "actor_class": "/Game/Vehicles/BP_Car.BP_Car_C",
+      "location": [14.0, 1.75, 0.8],
+      "rotation": [0.0, 0.0, 0.0],
+      "jitter": [3.0, 0.3, 0.2, 5.0]
+    },
+    {
+      "class": "pedestrian",
+      "actor_class": "/Game/Characters/BP_Pedestrian.BP_Pedestrian_C",
+      "location": [9.0, 4.0, 0.0],
+      "rotation": [0.0, -90.0, 0.0],
+      "jitter": [2.0, 0.8, 0.0, 20.0]
+    },
+    {
+      "class": "cone",
+      "actor_class": "/Game/Props/BP_Cone.BP_Cone_C",
+      "location": [11.0, 0.2, 0.35],
+      "rotation": [0.0, 0.0, 0.0],
+      "jitter": [3.0, 0.6, 0.1, 30.0]
+    },
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [28.0, 2.4, 3.2],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [2.0, 0.5, 0.3, 8.0]
+    }
+  ],
+  [
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSign.BP_TrafficSign_C",
+      "location": [40.0, 3.2, 3.4],
+      "rotation": [0.0, 180.0, 0.0],
+      "jitter": [4.0, 0.6, 0.3, 10.0]
+    },
+    {
+      "class": "traffic_sign",
+      "actor_class": "/Game/Props/BP_TrafficSignSmall.BP_TrafficSignSmall_C",
+      "location": [16.0, -3.6, 2.6],
+      "rotation": [0.0, 90.0, 0.0],
+      "jitter": [2.5, 0.4, 0.3, 12.0]
+    }
+  ]
+]

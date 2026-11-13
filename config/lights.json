@@ -1,0 +1,52 @@
+[
+  {
+    "condition": "front_light",
+    "label": "顺光",
+    "sun_elevation_deg": 45,
+    "sun_azimuth_deg": 0,
+    "sun_intensity": 8.0,
+    "skylight_intensity": 1.0,
+    "weather": "clear",
+    "street_lights": false
+  },
+  {
+    "condition": "back_light",
+    "label": "逆光",
+    "sun_elevation_deg": 12,
+    "sun_azimuth_deg": 180,
+    "sun_intensity": 10.0,
+    "skylight_intensity": 1.2,
+    "weather": "clear",
+    "street_lights": false
+  },
+  {
+    "condition": "dusk",
+    "label": "黄昏",
+    "sun_elevation_deg": 3,
+    "sun_azimuth_deg": 120,
+    "sun_intensity": 3.0,
+    "skylight_intensity": 0.6,
+    "weather": "clear",
+    "street_lights": true
+  },
+  {
+    "condition": "night",
+    "label": "夜间",
+    "sun_elevation_deg": -15,
+    "sun_azimuth_deg": 90,
+    "sun_intensity": 0.05,
+    "skylight_intensity": 0.12,
+    "weather": "clear",
+    "street_lights": true
+  },
+  {
+    "condition": "rain",
+    "label": "雨天",
+    "sun_elevation_deg": 25,
+    "sun_azimuth_deg": 60,
+    "sun_intensity": 4.0,
+    "skylight_intensity": 0.9,
+    "weather": "rain",
+    "street_lights": true
+  }
+]

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UE5 合成流水线操作台</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#12161c;color:#d8e0ea;font:13px/1.5 "Segoe UI",system-ui,sans-serif}
+header{padding:10px 16px;background:#1a212b;border-bottom:1px solid #2a3442;display:flex;justify-content:space-between;align-items:center}
+header h1{font-size:16px;margin:0;color:#7ec7ff}
+main{padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
+.card{background:#1a212b;border:1px solid #2a3442;border-radius:8px;padding:12px 14px}
+.card h2{font-size:13px;margin:0 0 8px;color:#9fd0ff;border-bottom:1px solid #2a3442;padding-bottom:6px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px}
+.kv b{font-weight:normal;color:#8fa3ba}
+.ok{color:#5ddb8a}.bad{color:#ff7b7b}.warn{color:#ffd166}
+button{background:#2563b0;border:0;color:#fff;border-radius:5px;padding:6px 14px;cursor:pointer;font-size:13px}
+button:hover{background:#2f7ad6}
+button.red{background:#a83a3a}button.red:hover{background:#c94a4a}
+button.gray{background:#3a4656}button.gray:hover{background:#4a5a70}
+input,select{background:#0e1218;border:1px solid #33404f;color:#d8e0ea;border-radius:4px;padding:5px 7px;font-size:13px;width:100%}
+label{color:#8fa3ba;display:block;margin:6px 0 2px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+pre{background:#0b0e13;border:1px solid #26303d;border-radius:6px;padding:8px;max-height:300px;overflow:auto;white-space:pre-wrap;font-size:12px;margin:8px 0 0}
+.bar{height:16px;background:#0e1218;border-radius:8px;overflow:hidden;margin-top:4px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,#2563b0,#5ddb8a);color:#fff;font-size:11px;text-align:center;font-style:normal}
+.job{padding:3px 6px;border:1px solid #33404f;border-radius:4px;margin-top:4px;cursor:pointer}
+.job:hover{background:#232c38}
+.wide{grid-column:1/-1}
+.mini{font-size:12px;color:#8fa3ba}
+</style>
+</head>
+<body>
+<header><h1>UE5 合成流水线操作台</h1><span class="mini" id="clock">–</span></header>
+<details style="margin:10px 16px 0;background:#1a212b;border:1px solid #2a3442;border-radius:8px;padding:8px 14px" open>
+<summary style="cursor:pointer;color:#9fd0ff;font-weight:bold">📖 使用说明（第一次看这里）</summary>
+<ol style="margin:8px 0 4px;padding-left:20px;line-height:1.9">
+<li><b>总览</b>：只看不用点——显卡/内存/磁盘状态；最下面进度条 = 渲染任务完成了百分之几，5 秒自动刷新。</li>
+<li><b>干活按顺序</b>：① 环境核查（全 PASS 才继续）→ ② 编译 UE5（1~3 小时，<b>只点一次</b>）→ ③ 任务生成 → ④ 启动渲染 → ⑤ 跑后处理 → ⑥ 打包数据集。改过任何脚本后先点「链路自检」，全 PASS 再跑正式批次。</li>
+<li><b>每个按钮点下去 = 启动一个"作业"</b>：输出实时显示在对应卡片下方的黑框里，也可在下方"作业控制台"点开任意作业看；黄字=跑着、绿字=完成、红字=失败。</li>
+<li><b>作业控制台</b>：点某一行看它的输出；选中后可"杀掉"（中断）。<b>同类作业在跑时不能重复点</b>，会自动提示。</li>
+<li><b>日志</b>：出问题先看 <code>batch.log</code>（渲染日志）、<code>capture_errors.log</code>（单帧错误）。</li>
+<li><b>配置</b>：所有文件路径都在这，一般不用动；改完点"保存配置"立即生效。</li>
+<li>渲染/编译这类长任务，<b>关掉网页也照样跑</b>，回来刷新就能看到进度。</li>
+</ol></details>
+<main>
+<div class="card"><h2>总览</h2><div class="kv" id="ov"></div>
+<div class="row"><span class="mini">渲染进度</span></div><div class="bar"><i id="prog" style="width:0%">–</i></div></div>
+
+<div class="card"><h2>环境核查（只读）</h2>
+<div class="mini">发行版/驱动/Vulkan/磁盘/内存/swap 逐项 PASS·FAIL</div>
+<div class="row"><button onclick="run('envcheck',{},'envout')">跑一次</button><span id="envst" class="mini"></span></div>
+<pre id="envout" style="max-height:200px">尚未运行</pre></div>
+
+<div class="card"><h2>任务生成（四维笛卡尔）</h2>
+<label>配置目录（scenes/lights/targets/cameras 四个 json）</label><input id="q_dir" placeholder="/opt/ue5_synth/config">
+<div class="row"><div style="flex:1"><label>seed</label><input id="q_seed" value="20261113"></div>
+<div style="flex:2"><label>输出 tasks.jsonl</label><input id="q_out" placeholder="/data/queue/tasks.jsonl"></div></div>
+<div class="row"><button onclick="run('queue_gen',{cfg_dir:$v('q_dir'),seed:$v('q_seed'),out:$v('q_out')},'queueout')">生成</button></div>
+<pre id="queueout">尚未运行</pre></div>
+
+<div class="card"><h2>渲染控制</h2>
+<div class="mini">工程与清单取配置；run_batch 自己起 tmux（ue5_render），重启即断点续跑</div>
+<div class="row">
+<button onclick="run('render_start',{},'renderout')">启动渲染</button>
+<button class="red" onclick="run('render_stop',{},'renderout')">停止渲染</button>
+<button class="gray" onclick="run('gpu_watch',{},'renderout')">GPU 监控</button>
+</div>
+<div class="row">
+<button class="gray" onclick="run('case_check',{},'renderout')">工程大小写校验</button>
+<button class="gray" onclick="run('compile',{},'renderout')">编译 UE5（1~3h）</button>
+</div>
+<pre id="renderout">尚未运行</pre></div>
+
+<div class="card"><h2>链路自检（dryrun）</h2>
+<div class="mini">用合成假帧把「任务生成 → 后处理 → 打包」整条链路跑一遍（不跑渲染、不用 UE），改完脚本先点它</div>
+<div class="row"><button class="gray" onclick="run('dryrun',{},'dryout')">链路自检</button></div>
+<pre id="dryout" style="max-height:200px">尚未运行</pre></div>
+
+<div class="card"><h2>后处理七步 + 打包</h2>
+<label>域对齐实采图目录（留空=跳过第6步）</label><input id="p_real" placeholder="/data/real_refs">
+<div class="row"><div style="flex:1"><label>limit（0=全部）</label><input id="p_limit" value="0"></div>
+<div style="flex:1"><label>打包格式</label><select id="p_fmt"><option>coco</option><option>yolo</option></select></div></div>
+<div class="row">
+<button onclick="run('post',{real:$v('p_real'),limit:$v('p_limit')},'postout')">跑后处理</button>
+<button onclick="run('pack',{format:$v('p_fmt')},'postout')">打包数据集</button>
+</div>
+<pre id="postout">尚未运行</pre></div>
+
+<div class="card"><h2>日志</h2>
+<label>日志文件</label>
+<select id="logname" onchange="loadLog()">
+<option>batch.log</option><option>capture_errors.log</option>
+<option>gpu_watch.csv</option><option>oom_guard_cron.log</option></select>
+<button class="gray" style="margin-top:6px" onclick="loadLog()">刷新</button>
+<pre id="logout">–</pre></div>
+
+<div class="card"><h2>作业控制台</h2>
+<div id="jobs" class="mini">暂无作业</div>
+<pre id="jobout">点上面作业看输出</pre>
+<div class="row"><button class="red" onclick="killSel()">杀掉所选作业</button><span class="mini" id="seljob">未选</span></div></div>
+
+<div class="card wide"><h2>配置（改完点保存，立即生效）</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 14px" id="cfgfields"></div>
+<div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div></div>
+</main>
+<script>
+var $=function(i){return document.getElementById(i)},$v=function(i){return $(i).value.trim()};
+function api(p,m,b){return fetch(p,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json()})}
+function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+var selJob=null;
+function refresh(){api('/api/status').then(function(s){
+  var g=s.gpu,rows=[];
+  rows.push(['GPU',(g?(esc(g.name||'GPU')+' / '+g.mem_mb+' MiB / 利用 '+g.util+'% / '+g.temp+'°C'):'<span class=bad>nvidia-smi 不可用</span>')]);
+  rows.push(['内存',s.mem_total_g>0?(s.mem_avail_g+' G 可用 / '+s.mem_total_g+' G 总'):'<span class=mini>不可用（需 Linux /proc/meminfo）</span>']);
+  rows.push(['swap',s.swap_on==null?'<span class=mini>不可用</span>':(s.swap_on?'<span class=bad>开启中</span>':'<span class=ok>已关闭</span>')]);
+  rows.push(['磁盘','/ '+(s.disk_root_free_g>=0?s.disk_root_free_g+'G':'—')+' · /data '+(s.disk_data_free_g>=0?s.disk_data_free_g+'G':'—')]);
+  rows.push(['渲染会话',s.render_running?'<span class=ok>运行中 (tmux ue5_render)</span>':'<span class=mini>未运行</span>']);
+  rows.push(['任务',(s.tasks_done+' / '+s.tasks_total+' 已完成')]);
+  $('ov').innerHTML=rows.map(function(r){return '<b>'+r[0]+'</b><span>'+r[1]+'</span>'}).join('');
+  var pct=s.tasks_total?Math.round(100*s.tasks_done/s.tasks_total):0;
+  $('prog').style.width=pct+'%';$('prog').textContent=pct+'%  ('+s.tasks_done+'/'+s.tasks_total+')';
+  $('clock').textContent=s.time;
+  renderJobs(s.jobs);
+})['catch'](function(e){$('clock').textContent='连接失败:'+e})}
+function renderJobs(list){
+  if(!list||!list.length){$('jobs').textContent='暂无作业';return}
+  $('jobs').innerHTML=list.map(function(j){
+    var st=j.status=='running'?'<span class=warn>跑着</span>':(j.status=='ok'?'<span class=ok>完成</span>':'<span class=bad>失败('+j.ret+')</span>');
+    return '<div class="job" onclick="viewJob(\''+j.id+'\',this)">['+j.action+'] '+st+' <span class=mini>'+j.started+'</span></div>'}).join('');
+}
+function viewJob(id,el){selJob=id;$('seljob').textContent='所选: '+id;
+  if(el)el.style.background='#2563b0';
+  api('/api/job?id='+id).then(function(j){$('jobout').textContent='['+j.action+'] '+j.status+' ret='+j.ret+'\n$ '+j.cmd.join(' ')+'\n\n'+(j.out||'')}) }
+function killSel(){if(!selJob){$('seljob').textContent='先点一个作业';return}api('/api/kill','POST',{id:selJob}).then(function(r){$('seljob').textContent=r.killed?'已杀':'没杀成'})}
+function run(action,params,preId){
+  // preId：目标 <pre> 的 id（如 'envout'）；兼容老写法 true=作业控制台，false/省略=只启动作业
+  var target=preId===true?'jobout':preId;
+  var pre=target?$(target):null;
+  api('/api/run','POST',{action:action,params:params||{}}).then(function(r){
+    if(r.error){if(pre)pre.textContent='错误: '+r.error;return}
+    selJob=r.id;$('seljob').textContent='所选: '+r.id;
+    if(pre)pollJob(r.id,target);
+    refresh();
+  })}
+function pollJob(id,preId){
+  api('/api/job?id='+id).then(function(j){
+    var pre=$(preId||'jobout')||$('jobout');
+    pre.textContent='['+j.action+'] '+(j.status=='running'?'跑着…':'结束 ret='+j.ret)+'\n$ '+j.cmd.join(' ')+'\n\n'+(j.out||'');
+    if(j.status=='running')setTimeout(function(){pollJob(id,preId)},1500);
+    else refresh();
+  })}
+function loadLog(){api('/api/log?name='+encodeURIComponent($('logname').value)+'&lines=300').then(function(r){$('logout').textContent=r.out})}
+var CFGKEYS=null;
+function renderCfg(c){CFGKEYS=Object.keys(c);
+  $('cfgfields').innerHTML=CFGKEYS.map(function(k){
+    return '<div><label>'+k+'</label><input id="cfg_'+k+'" value="'+esc(c[k])+'"></div>'}).join('')}
+function saveCfg(){var p={};CFGKEYS.forEach(function(k){p[k]=$v('cfg_'+k)});
+  api('/api/config','POST',p).then(function(c){renderCfg(c);$('cfgst').textContent='已保存 '+new Date().toLocaleTimeString()})}
+refresh();setInterval(refresh,5000);api('/api/status').then(function(s){renderCfg(s.cfg)});loadLog();
+</script>
+</body>
+</html>

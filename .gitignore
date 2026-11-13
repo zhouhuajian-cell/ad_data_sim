@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 本仓库运行/自检产物（不入库）
+_dryrun/
+dashboard/jobs/
+dashboard/config.json
+*.log
+
+# Office 临时锁文件
+~$*
+
+# UE 工程中间产物（本目录是脚本仓，防误提交工程缓存）
+Intermediate/
+Saved/
+Binaries/
+DerivedDataCache/
+.vs/

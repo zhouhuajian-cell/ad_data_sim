@@ -1,0 +1,17 @@
+[
+  {
+    "name": "road_straight",
+    "map": "/Game/Maps/road_straight",
+    "note": "直线城市路段，含两车道与右侧人行道"
+  },
+  {
+    "name": "road_curve",
+    "map": "/Game/Maps/road_curve",
+    "note": "弯道，用于检查小目标在边缘的形变与截断"
+  },
+  {
+    "name": "intersection",
+    "map": "/Game/Maps/intersection",
+    "note": "十字路口，多目标同屏与遮挡的主要来源"
+  }
+]

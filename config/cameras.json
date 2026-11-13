@@ -1,0 +1,46 @@
+[
+  {
+    "name": "wide_8mm",
+    "location": [0.0, 0.0, 1.35],
+    "rotation": [0.0, 0.0, 0.0],
+    "focal_length": 8.0,
+    "film_back_width": 36.0,
+    "film_back_height": 24.0,
+    "aperture": 2.0,
+    "shutter_deg": 180.0,
+    "speed_mps": 8.3
+  },
+  {
+    "name": "std_12mm",
+    "location": [0.0, 0.0, 1.35],
+    "rotation": [0.0, 0.0, 0.0],
+    "focal_length": 12.0,
+    "film_back_width": 36.0,
+    "film_back_height": 24.0,
+    "aperture": 2.0,
+    "shutter_deg": 180.0,
+    "speed_mps": 13.9
+  },
+  {
+    "name": "tele_25mm",
+    "location": [0.0, 0.0, 1.35],
+    "rotation": [0.0, 0.0, 0.0],
+    "focal_length": 25.0,
+    "film_back_width": 36.0,
+    "film_back_height": 24.0,
+    "aperture": 2.0,
+    "shutter_deg": 180.0,
+    "speed_mps": 22.2
+  },
+  {
+    "name": "std_12mm_slow",
+    "location": [0.0, 0.0, 1.35],
+    "rotation": [0.0, 0.0, 0.0],
+    "focal_length": 12.0,
+    "film_back_width": 36.0,
+    "film_back_height": 24.0,
+    "aperture": 2.0,
+    "shutter_deg": 180.0,
+    "speed_mps": 2.8
+  }
+]
