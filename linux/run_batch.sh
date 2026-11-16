@@ -45,6 +45,16 @@ CAPTURE="$PROJECT_DIR/Content/Python/batch_capture.py"
   "先在操作台「高级操作 → 编译引擎」跑 compile_ue5.sh（1~3 小时、内存吃满，选空闲窗口）。" \
   "引擎装在别处时，改操作台配置里的 ue_dir，或给本脚本第 3 个参数。"
 
+# 工程模块没编译过时 UnrealEditor-Cmd 会以「缺模块」退出；先增量编译一次工程（只编本工程）
+if ! ls "$PROJECT_DIR/Binaries/Linux/"UnrealEditor-avsynth* >/dev/null 2>&1; then
+  echo "== 工程模块尚未编译，先增量编译（首次几分钟，不动引擎）"
+  "$UE_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" avsynthEditor Linux Development \
+    -Project="$UPROJECT" -Progress 2>&1 | tail -20 || true
+  ls "$PROJECT_DIR/Binaries/Linux/"UnrealEditor-avsynth* >/dev/null 2>&1 || die \
+    "工程模块编译失败（见上面日志）" \
+    "把上面最后 30 行发给人看：常见是 clang 版本不对或 Source 里的 C++ 文件缺失。"
+fi
+
 [ -f "$QUEUE" ] || die "任务清单不存在：$QUEUE" \
   "先在操作台第 2 步「生成拍摄清单」（或跑 common/queue_gen.py）。"
 
