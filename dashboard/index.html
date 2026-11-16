@@ -1,205 +1,380 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UE5 出图操作台</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UE5 出图操作台 · Synth Data Pipeline</title>
 <style>
-*{box-sizing:border-box}
-body{margin:0;background:#0f1319;color:#e3e9f2;font:15px/1.65 "Segoe UI",system-ui,sans-serif}
-header{padding:16px 18px 10px;display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
-header h1{font-size:22px;margin:0;color:#8fd0ff}
-header .sub{color:#93a4bb;font-size:13px;margin-top:2px}
-main{max-width:920px;margin:0 auto;padding:0 14px 40px}
-.banner{margin:10px 14px 14px;padding:14px 18px;border-radius:12px;background:#173a2a;border:1px solid #2c6b4b;font-size:16px;display:flex;gap:10px;align-items:flex-start}
-.banner .now{background:#2f7d51;color:#fff;border-radius:20px;padding:2px 12px;font-size:13px;white-space:nowrap;margin-top:2px}
-.banner.work{background:#1b2f47;border-color:#2f5c8f}.banner.work .now{background:#2f6fae}
-.banner.warn{background:#3d3320;border-color:#7a6030}.banner.warn .now{background:#9a742e}
-.banner.ok{background:#173a2a;border-color:#2c6b4b}
-.card{background:#161c25;border:1px solid #26303d;border-radius:12px;padding:16px 18px;margin:14px 0}
-.overview .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.stat{background:#11161e;border:1px solid #222c39;border-radius:10px;padding:10px 12px}
-.stat b{display:block;font-size:20px;color:#bfe3ff;font-weight:600}
-.stat span{color:#93a4bb;font-size:12px}
-.hint{color:#93a4bb;font-size:13px}
-.progress{height:22px;background:#0c1117;border-radius:11px;overflow:hidden;margin-top:12px;border:1px solid #222c39}
-.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2f6fae,#4fd18b);color:#fff;font-size:12px;text-align:center;line-height:20px;font-style:normal;transition:width .3s}
-.ready{margin-top:10px;border-radius:9px;padding:10px 12px;font-size:13px;border:1px solid #7a6030;background:#2a2213;color:#ffd166;white-space:pre-line;line-height:1.6}
-.step .head{display:flex;gap:12px;align-items:flex-start}
-.step .num{flex:0 0 36px;height:36px;border-radius:18px;background:#1f2c3d;color:#9fd0ff;font-size:17px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:2px}
-.step h2{font-size:17px;margin:0;color:#dfe9f6}
-.step .desc{color:#9fb0c6;font-size:13px;margin:3px 0 0}
-.pill{flex:0 0 auto;font-size:12px;border-radius:20px;padding:2px 10px;border:1px solid #33404f;color:#93a4bb;white-space:nowrap;margin-top:4px}
-.pill.ok{color:#6ee7a5;border-color:#2f6b4b;background:#12281d}
-.pill.run{color:#8fd0ff;border-color:#2f5c8f;background:#132238}
-.pill.bad{color:#ff9a9a;border-color:#7a3030;background:#2a1515}
-.pill.warn{color:#ffd166;border-color:#7a6030;background:#2a2213}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
-button{background:#2f6fae;border:0;color:#fff;border-radius:9px;padding:10px 20px;cursor:pointer;font-size:15px;min-height:44px}
-button:hover{background:#3b84cc}
-button.big{font-size:16px;padding:13px 26px;font-weight:600;background:#2f9e63}
-button.big:hover{background:#37b873}
-button.red{background:#a83a3a}button.red:hover{background:#c94a4a}
-button.gray{background:#39485c}button.gray:hover{background:#485a72}
-input,select{background:#0c1117;border:1px solid #33404f;color:#e3e9f2;border-radius:8px;padding:9px 10px;font-size:15px;width:100%}
-label{color:#93a4bb;display:block;margin:8px 0 3px;font-size:13px}
-.out{margin-top:10px}
-.res{border-radius:9px;padding:9px 12px;font-size:14px;border:1px solid #2a3442;background:#11161e}
-.res.ok{color:#8beab2;border-color:#2f6b4b;background:#11241a}
-.res.bad{color:#ffabab;border-color:#7a3030;background:#2a1515}
-.res.warn{color:#ffd166;border-color:#7a6030;background:#2a2213}
-.res.run{color:#8fd0ff;border-color:#2f5c8f;background:#132238}
-details.mini-adv,details.adv{margin-top:10px}
-details.adv{max-width:920px;margin:18px auto;background:#141922;border:1px solid #26303d;border-radius:12px;padding:0 18px 14px}
-details.adv summary{font-size:15px;color:#9fd0ff;cursor:pointer;padding:12px 0}
-details.mini-adv summary{font-size:13px;color:#8fa3ba;cursor:pointer}
-details summary{color:#9fb0c6;cursor:pointer}
-pre{background:#0a0e13;border:1px solid #222c39;border-radius:8px;padding:10px;max-height:320px;overflow:auto;white-space:pre-wrap;font-size:12px;margin:8px 0 0;color:#b8c6d8}
-.job{padding:8px 10px;border:1px solid #2a3442;border-radius:8px;margin-top:6px;cursor:pointer;background:#11161e;font-size:13px}
-.job:hover{background:#1a2330}
-.adv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
-.adv-grid h3{font-size:14px;margin:0;color:#cfe0f2}
-.adv-grid p{font-size:12px;color:#8fa3ba;margin:4px 0 8px}
-.cfg{display:flex;flex-direction:column}
-.cfg .key{font-size:11px;color:#5f7188;margin-top:2px}
-.cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px 14px}
-#ovimg{display:none;width:100%;border-radius:10px;border:1px solid #2a3442;margin-top:10px;cursor:zoom-in}
-.mini{font-size:12px;color:#8fa3ba}
-footer{max-width:920px;margin:0 auto;padding:0 14px 30px;color:#5f7188;font-size:12px}
-@media (max-width:560px){.stat b{font-size:17px}header h1{font-size:19px}}
+  :root {
+    --primary: #00d4ff;
+    --primary-dark: #0096c7;
+    --accent: #8a2be2;
+    --bg-deep: #01040f;
+    --surface: rgba(16, 30, 60, 0.55);
+    --surface-hover: rgba(16, 30, 60, 0.75);
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --border: rgba(0, 212, 255, 0.25);
+    --border-highlight: rgba(0, 212, 255, 0.6);
+    --success: #10b981;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --radius-sm: 8px;
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --shadow-glow: 0 0 20px rgba(0, 212, 255, 0.2);
+    --shadow-glow-hover: 0 0 30px rgba(0, 212, 255, 0.45);
+    --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+    --transition-all: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+  ::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.4); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(0, 212, 255, 0.7); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: #01040f;
+    color: var(--text-main);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: auto;
+    min-height: 100vh;
+    letter-spacing: 0.3px;
+    position: relative;
+  }
+  /* 背景画在固定定位的伪元素上，而不是 background-attachment:fixed：
+     后者在长页面截图、iOS/部分 Chromium 版本下只覆盖首屏，页面下半会变白（已实测）。 */
+  body::before {
+    content: '';
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: radial-gradient(circle at 50% 30%, #102a63 0%, #030b20 70%, #01040f 100%);
+    pointer-events: none; z-index: -2;
+  }
+  body::after {
+    content: '';
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background-image:
+      radial-gradient(rgba(255,255,255,0.12) 1px, transparent 1px),
+      radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+    background-size: 50px 50px, 90px 90px;
+    background-position: 0 0, 25px 25px;
+    opacity: 0.35; pointer-events: none; z-index: -1;
+  }
+  header {
+    background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border); padding: 12px 28px; position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  .header-title { font-size: 20px; font-weight: 800; display: flex; align-items: center; gap: 12px; }
+  .header-title-text {
+    background: linear-gradient(to right, #00d4ff, #8a2be2);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .header-sub { font-size: 12px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
+  .project-switch-box {
+    display: flex; align-items: center; gap: 8px; background: rgba(0, 212, 255, 0.08);
+    padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+  }
+  .container { padding: 28px; max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+  .panel {
+    background: var(--surface); backdrop-filter: blur(16px); border-radius: var(--radius-lg);
+    border: 1px solid var(--border); padding: 28px; position: relative; overflow: hidden;
+    transition: var(--transition-all); box-shadow: var(--shadow-card);
+  }
+  .panel::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(to right, var(--primary), var(--accent)); opacity: 0.9;
+  }
+  .panel:hover { box-shadow: var(--shadow-glow-hover); border-color: var(--border-highlight); }
+  .section-label {
+    font-size: 13px; font-weight: 700; color: var(--primary); text-transform: uppercase;
+    letter-spacing: 2px; margin-bottom: 18px; display: flex; align-items: center; gap: 10px;
+    text-shadow: 0 0 8px rgba(0,212,255,0.4);
+  }
+  .section-label::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, var(--border-highlight), transparent); }
+  .widget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+  .widget {
+    background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-md); padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;
+    transition: var(--transition-all);
+  }
+  .widget:hover { border-color: rgba(0,212,255,0.35); background: rgba(0, 0, 0, 0.45); }
+  .widget-title { color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+  .widget-value { font-size: 26px; font-weight: 800; font-family: var(--mono); color: var(--text-main); }
+  .widget-value.ok { color: var(--success); }
+  .widget-value.warn { color: var(--warning); }
+  .widget-value.bad { color: var(--danger); }
+  .stats-bar {
+    font-size: 14px; font-weight: 600; background: rgba(0, 212, 255, 0.06); padding: 14px 22px;
+    border-radius: var(--radius-sm); display: flex; align-items: center; gap: 14px;
+    border: 1px solid rgba(0,212,255,0.25); margin-top: 18px; flex-wrap: wrap;
+  }
+  .stats-number { font-size: 18px; font-weight: 800; font-family: var(--mono); }
+  input, select {
+    background: rgba(0,0,0,0.5); border: 1px solid rgba(0,212,255,0.3); color: var(--text-main);
+    border-radius: var(--radius-sm); padding: 10px 14px; font-size: 14px; width: 100%;
+    transition: var(--transition-all); outline: none; font-family: inherit;
+  }
+  input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0,212,255,0.15); }
+  input::placeholder { color: rgba(148,163,184,0.6); }
+  label { color: var(--text-muted); display: block; margin: 10px 0 5px; font-size: 12px; font-weight: 600; }
+  button {
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.18), rgba(0, 150, 199, 0.1));
+    color: var(--text-main); border: 1px solid rgba(0, 212, 255, 0.45); border-radius: var(--radius-sm);
+    padding: 11px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: var(--transition-all); display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    box-shadow: 0 4px 15px rgba(0, 212, 255, 0.15); backdrop-filter: blur(6px); font-family: inherit;
+  }
+  button:hover {
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.3), rgba(0, 150, 199, 0.2));
+    border-color: var(--primary); transform: translateY(-2px); box-shadow: 0 6px 22px rgba(0, 212, 255, 0.4);
+  }
+  button:active { transform: translateY(0); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  button.primary {
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.35), rgba(138, 43, 226, 0.25));
+    border-color: var(--primary); font-weight: 700; letter-spacing: 1px;
+  }
+  button.primary:hover { box-shadow: 0 0 28px rgba(0, 212, 255, 0.6); }
+  button.danger { border-color: rgba(239,68,68,0.6); color: #fecaca; background: linear-gradient(135deg, rgba(239,68,68,0.18), rgba(153,27,27,0.1)); }
+  button.danger:hover { border-color: var(--danger); box-shadow: 0 6px 22px rgba(239,68,68,0.35); }
+  button.secondary { background: transparent; border-color: rgba(255,255,255,0.15); color: var(--text-muted); box-shadow: none; }
+  button.secondary:hover { border-color: var(--primary); color: var(--text-main); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .pill {
+    font-size: 12px; font-weight: 700; border-radius: 20px; padding: 4px 12px; letter-spacing: 1px;
+    border: 1px solid rgba(255,255,255,0.15); color: var(--text-muted); white-space: nowrap;
+    background: rgba(255,255,255,0.04); font-family: var(--mono);
+  }
+  .pill.ok { color: #6ee7a5; border-color: rgba(16,185,129,0.6); background: rgba(16,185,129,0.12); box-shadow: 0 0 12px rgba(16,185,129,0.25); }
+  .pill.run { color: var(--primary); border-color: var(--border-highlight); background: rgba(0,212,255,0.12); box-shadow: 0 0 12px rgba(0,212,255,0.3); animation: pulse 1.6s ease-in-out infinite; }
+  .pill.bad { color: #fca5a5; border-color: rgba(239,68,68,0.65); background: rgba(239,68,68,0.12); }
+  .pill.warn { color: #fcd34d; border-color: rgba(245,158,11,0.6); background: rgba(245,158,11,0.12); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+  .res { border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; margin-top: 12px; line-height: 1.6;
+         border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); white-space: pre-line; }
+  .res.ok { border-color: rgba(16,185,129,0.5); background: rgba(16,185,129,0.08); color: #a7f3d0; }
+  .res.bad { border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); color: #fecaca; }
+  .res.warn { border-color: rgba(245,158,11,0.5); background: rgba(245,158,11,0.08); color: #fde68a; }
+  .res.run { border-color: var(--border-highlight); background: rgba(0,212,255,0.08); color: var(--primary); }
+  .ready { border: 1px solid rgba(245,158,11,0.5); background: rgba(245,158,11,0.08); color: #fde68a;
+           border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; margin-top: 12px; white-space: pre-line; line-height: 1.6; }
+  .progress { height: 10px; background: rgba(0,0,0,0.6); border-radius: 6px; overflow: hidden; margin-top: 14px; border: 1px solid rgba(0,212,255,0.2); }
+  .progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--success)); transition: width 0.4s ease; }
+  .prog-label { font-size: 12px; color: var(--text-muted); font-family: var(--mono); margin-top: 5px; }
+  pre { background: rgba(0,0,0,0.55); border: 1px solid rgba(0,212,255,0.18); border-radius: var(--radius-sm);
+        padding: 14px; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; color: #cbd5e1;
+        font-family: var(--mono); margin: 10px 0 0; line-height: 1.5; }
+  details.mini-adv, details { margin-top: 12px; }
+  details summary { color: var(--text-muted); cursor: pointer; font-size: 13px; transition: var(--transition-all); list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▸ '; color: var(--primary); }
+  details[open] summary::before { content: '▾ '; }
+  details summary:hover { color: var(--primary); text-shadow: 0 0 8px rgba(0,212,255,0.4); }
+  .step-head { display: flex; gap: 16px; align-items: flex-start; }
+  .step-num {
+    flex: 0 0 44px; width: 44px; height: 44px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 800;
+    background: linear-gradient(135deg, rgba(0,212,255,0.25), rgba(138,43,226,0.2));
+    border: 1px solid rgba(0,212,255,0.55); color: var(--primary); font-family: var(--mono);
+    box-shadow: 0 0 18px rgba(0,212,255,0.25), inset 0 0 10px rgba(0,212,255,0.12);
+    text-shadow: 0 0 10px rgba(0,212,255,0.8);
+  }
+  .step-num.done { color: var(--success); border-color: rgba(16,185,129,0.6); background: linear-gradient(135deg, rgba(16,185,129,0.22), rgba(0,150,199,0.12)); box-shadow: 0 0 18px rgba(16,185,129,0.25); }
+  h2 { color: var(--text-main); font-size: 19px; margin: 0 0 4px; }
+  h3 { color: var(--text-main); font-size: 15px; margin: 0 0 6px; }
+  .desc { color: var(--text-muted); font-size: 13px; margin: 0; line-height: 1.7; }
+  .step-body { flex: 1; }
+  .banner {
+    display: flex; align-items: center; gap: 14px; padding: 16px 24px; border-radius: var(--radius-md); flex-wrap: wrap;
+    background: rgba(0, 212, 255, 0.08); border: 1px solid var(--border-highlight);
+    box-shadow: 0 0 24px rgba(0,212,255,0.18);
+  }
+  .banner.warn { background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.5); box-shadow: 0 0 24px rgba(245,158,11,0.15); }
+  .banner.ok { background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.5); box-shadow: 0 0 24px rgba(16,185,129,0.15); }
+  .banner .now {
+    font-size: 13px; font-weight: 800; letter-spacing: 1px; padding: 5px 14px; border-radius: 20px;
+    background: rgba(0,212,255,0.2); border: 1px solid var(--primary); color: var(--primary);
+    font-family: var(--mono); white-space: nowrap;
+  }
+  .banner.ok .now { color: var(--success); border-color: rgba(16,185,129,0.7); background: rgba(16,185,129,0.15); }
+  .banner.warn .now { color: var(--warning); border-color: rgba(245,158,11,0.7); background: rgba(245,158,11,0.15); }
+  .banner-text { font-size: 14px; font-weight: 600; line-height: 1.6; }
+  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
+  .adv-item { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-md); padding: 18px; }
+  .adv-item p { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; line-height: 1.6; }
+  .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 16px; margin-top: 10px; }
+  .cfg .key { font-size: 11px; color: rgba(148,163,184,0.5); font-family: var(--mono); margin-top: 2px; display: block; }
+  .job { padding: 10px 14px; border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-sm);
+         margin-top: 8px; cursor: pointer; background: rgba(0,0,0,0.25); font-size: 13px;
+         transition: var(--transition-all); font-family: var(--mono); }
+  .job:hover { background: rgba(0,212,255,0.08); border-color: rgba(0,212,255,0.45); transform: translateX(3px); }
+  #ovimg { display: none; width: 100%; border-radius: var(--radius-md); border: 1px solid rgba(0,212,255,0.35);
+           margin-top: 14px; cursor: zoom-in; box-shadow: 0 0 24px rgba(0,0,0,0.5); }
+  .mini { font-size: 12px; color: var(--text-muted); font-family: var(--mono); }
+  footer { text-align: center; color: rgba(148,163,184,0.55); font-size: 12px; padding: 10px 0 28px; font-family: var(--mono); }
+  @media (max-width: 640px) {
+    .container { padding: 14px; gap: 16px; }
+    .panel { padding: 18px 16px; }
+    .widget-value { font-size: 21px; }
+    header { padding: 10px 14px; }
+    .header-sub { display: none; }
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <div><h1>UE5 出图操作台</h1><div class="sub">从上往下按顺序点，不用记命令。每一步做完会自动告诉下一步做什么。</div></div>
-  <span id="clock" class="mini">–</span>
+  <div class="header-title">
+    <span class="header-title-text">UE5 Synth Data</span>
+    <span class="header-sub">感知合成数据 · 出图流水线</span>
+  </div>
+  <div class="project-switch-box">
+    <span>状态</span><span id="clock">–</span>
+  </div>
 </header>
 
-<div class="banner" id="banner"><span class="now" id="nowStep">下一步</span><span id="nextText">正在读取状态…</span></div>
+<div class="container">
 
-<main>
-  <section class="card overview">
-    <div class="stats">
-      <div class="stat"><b id="ovDone">–</b><span>已出图 / 计划张数</span></div>
-      <div class="stat"><b id="ovRender">–</b><span>出图状态</span></div>
-      <div class="stat"><b id="ovGpu">–</b><span>显卡</span></div>
-      <div class="stat"><b id="ovDisk">–</b><span>磁盘剩余</span></div>
+  <div class="banner" id="banner">
+    <span class="now" id="nowStep">下一步</span>
+    <span class="banner-text" id="nextText">正在读取状态…</span>
+  </div>
+
+  <section class="panel">
+    <div class="section-label">运行总览</div>
+    <div class="widget-grid">
+      <div class="widget"><span class="widget-title">已出图 / 计划</span><span class="widget-value" id="ovDone">–</span></div>
+      <div class="widget"><span class="widget-title">渲染状态</span><span class="widget-value" id="ovRender">–</span></div>
+      <div class="widget"><span class="widget-title">显卡（显存 / 温度）</span><span class="widget-value" id="ovGpu">–</span></div>
+      <div class="widget"><span class="widget-title">磁盘剩余</span><span class="widget-value" id="ovDisk">–</span></div>
     </div>
-    <div class="hint" id="advice" style="margin-top:10px">–</div>
-    <div class="progress"><i id="pRender">0%</i></div>
+    <div class="hint mini" id="advice" style="margin-top:14px">–</div>
+    <div class="progress"><i id="pRender"></i></div>
+    <div class="prog-label" id="pRenderTxt">0%</div>
   </section>
 
-  <section class="card step" id="s1">
-    <div class="head"><span class="num">1</span>
-      <div><h2>检查这台机器</h2><p class="desc">看看显卡、驱动、磁盘能不能用。第一次用必须点一次，几秒钟就好，不会改动任何东西（已经出过图的机器可以跳过）。</p></div>
-      <span class="pill" id="p1">待做</span></div>
-    <div class="row"><button onclick="doEnv()">开始检查</button></div>
-    <div class="out" id="r1"></div>
+  <section class="panel step" id="s1">
+    <div class="step-head"><span class="step-num" id="n1">1</span><div class="step-body">
+      <h2>检查这台机器<span class="pill" id="p1">待做</span></h2>
+      <p class="desc">看看显卡、驱动、磁盘能不能用。第一次用必须点一次，几秒钟就好，不会改动任何东西（已经出过图的机器可以跳过）。</p>
+      <div class="row"><button onclick="doEnv()">开始检查</button></div>
+      <div class="out" id="r1"></div>
+    </div></div>
   </section>
 
-  <section class="card step" id="s2">
-    <div class="head"><span class="num">2</span>
-      <div><h2>生成拍摄清单</h2><p class="desc">决定这一批要拍哪些画面（路段、天气、目标、相机）。用默认配置直接点就行，不用改。</p></div>
-      <span class="pill" id="p2">待做</span></div>
-    <div class="row"><button onclick="doQueue()">生成清单</button><span class="mini" id="qinfo"></span></div>
-    <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
-      <label>配置目录（scenes/lights/targets/cameras 四个 json 所在目录）</label><input id="q_dir" placeholder="留空 = 用服务器配置">
-      <div class="row"><div style="flex:1"><label>随机种子（同一种子结果可复现）</label><input id="q_seed" placeholder="留空 = 20261113"></div>
-      <div style="flex:2"><label>清单输出文件</label><input id="q_out" placeholder="留空 = 用服务器配置"></div></div>
-    </details>
-    <div class="out" id="r2"></div>
+  <section class="panel step" id="s2">
+    <div class="step-head"><span class="step-num" id="n2">2</span><div class="step-body">
+      <h2>生成拍摄清单<span class="pill" id="p2">待做</span></h2>
+      <p class="desc">决定这一批要拍哪些画面（路段、天气、目标、相机）。用默认配置直接点就行，不用改。</p>
+      <div class="row"><button onclick="doQueue()">生成清单</button><span class="mini" id="qinfo"></span></div>
+      <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+        <label>配置目录（scenes/lights/targets/cameras 四个 json 所在目录）</label><input id="q_dir" placeholder="留空 = 用服务器配置">
+        <div class="row"><div style="flex:1"><label>随机种子（同一种子结果可复现）</label><input id="q_seed" placeholder="留空 = 20261113"></div>
+        <div style="flex:2"><label>清单输出文件</label><input id="q_out" placeholder="留空 = 用服务器配置"></div></div>
+      </details>
+      <div class="out" id="r2"></div>
+    </div></div>
   </section>
 
-  <section class="card step" id="s3">
-    <div class="head"><span class="num">3</span>
-      <div><h2>开始出图</h2><p class="desc">机器会一张一张渲染，很慢是正常的。可以关掉这个网页，出图不会停；下次打开点同一个按钮会接着上次继续，不会重拍。</p></div>
-      <span class="pill" id="p3">待做</span></div>
+  <section class="panel step" id="s3">
+    <div class="step-head"><span class="step-num" id="n3">3</span><div class="step-body">
+      <h2>开始出图<span class="pill" id="p3">待做</span></h2>
+      <p class="desc">机器会一张一张渲染，很慢是正常的。可以关掉这个网页，出图不会停；下次打开点同一个按钮会接着上次继续，不会重拍。</p>
+      <div class="row">
+        <button class="primary" onclick="doRender()">开始出图 / 继续出图</button>
+        <button class="danger" onclick="doStop()">停止出图</button>
+      </div>
+      <div class="ready" id="ready3" style="display:none"></div>
+      <div class="progress"><i id="pRender2"></i></div>
+      <div class="prog-label" id="pRender2Txt">0%</div>
+      <div class="out" id="r3"></div>
+    </div></div>
+  </section>
+
+  <section class="panel step" id="s4">
+    <div class="step-head"><span class="step-num" id="n4">4</span><div class="step-body">
+      <h2>把原图变成“训练能用的照片”<span class="pill" id="p4">待做</span></h2>
+      <p class="desc">给渲染图加曝光、噪声、暗角、模糊，让它更像真车拍的。原图会保留，这一步可以反复跑。</p>
+      <div class="row"><button onclick="doPost()">开始处理</button></div>
+      <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+        <div class="row"><div style="flex:1"><label>只处理前 N 张（0 或留空 = 全部）</label><input id="p_limit" value="0"></div>
+        <div style="flex:2"><label>实拍参考图目录（用于调色，可留空）</label><input id="p_real" placeholder="留空 = 跳过调色"></div></div>
+      </details>
+      <div class="progress"><i id="pPost"></i></div>
+      <div class="prog-label" id="pPostTxt">0%</div>
+      <div class="out" id="r4"></div>
+    </div></div>
+  </section>
+
+  <section class="panel step" id="s5">
+    <div class="step-head"><span class="step-num" id="n5">5</span><div class="step-body">
+      <h2>打包成训练集<span class="pill" id="p5">待做</span></h2>
+      <p class="desc">把标注整理成训练框架认识的格式，并自动分成“训练用”和“验证用”两份。</p>
+      <div class="row">
+        <select id="p_fmt" style="max-width:240px"><option value="coco">通用格式（COCO）</option><option value="yolo">YOLO 格式</option></select>
+        <button onclick="doPack()">打包训练集</button>
+      </div>
+      <div class="out" id="r5"></div>
+    </div></div>
+  </section>
+
+  <section class="panel step" id="s6">
+    <div class="step-head"><span class="step-num" id="n6">6</span><div class="step-body">
+      <h2>抽几张看看框得准不准<span class="pill" id="p6">待做</span></h2>
+      <p class="desc">把标注框画到图上、拼成一张 20 张的图。框贴不贴边、有没有跑偏，一眼就能看出来。</p>
+      <div class="row"><button onclick="doOverlay()">生成抽检图</button><span class="mini" id="oinfo"></span></div>
+      <details class="mini-adv"><summary>要改数量？</summary><label>抽检多少张</label><input id="o_limit" value="20"></details>
+      <img id="ovimg" alt="抽检拼图" onclick="window.open(this.src,'_blank')">
+      <div class="out" id="r6"></div>
+    </div></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-label">出问题了？看这里</div>
+    <p class="desc">红字看不懂没关系，把下面的内容复制发给出图的人就行。先看“渲染日志”和“单帧错误”。</p>
     <div class="row">
-      <button class="big" onclick="doRender()">开始出图 / 继续出图</button>
-      <button class="red" onclick="doStop()">停止出图</button>
-    </div>
-    <div class="ready" id="ready3" style="display:none"></div>
-    <div class="progress"><i id="pRender2">0%</i></div>
-    <div class="out" id="r3"></div>
-  </section>
-
-  <section class="card step" id="s4">
-    <div class="head"><span class="num">4</span>
-      <div><h2>把原图变成"训练能用的照片"</h2><p class="desc">给渲染图加曝光、噪声、暗角、模糊，让它更像真车拍的。原图会保留，这一步可以反复跑。</p></div>
-      <span class="pill" id="p4">待做</span></div>
-    <div class="row"><button onclick="doPost()">开始处理</button></div>
-    <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
-      <div class="row"><div style="flex:1"><label>只处理前 N 张（0 或留空 = 全部）</label><input id="p_limit" value="0"></div>
-      <div style="flex:2"><label>实拍参考图目录（用于调色，可留空）</label><input id="p_real" placeholder="留空 = 跳过调色"></div></div>
-    </details>
-    <div class="progress"><i id="pPost">0%</i></div>
-    <div class="out" id="r4"></div>
-  </section>
-
-  <section class="card step" id="s5">
-    <div class="head"><span class="num">5</span>
-      <div><h2>打包成训练集</h2><p class="desc">把标注整理成训练框架认识的格式，并自动分成"训练用"和"验证用"两份。</p></div>
-      <span class="pill" id="p5">待做</span></div>
-    <div class="row">
-      <select id="p_fmt" style="max-width:240px"><option value="coco">通用格式（COCO）</option><option value="yolo">YOLO 格式</option></select>
-      <button onclick="doPack()">打包训练集</button>
-    </div>
-    <div class="out" id="r5"></div>
-  </section>
-
-  <section class="card step" id="s6">
-    <div class="head"><span class="num">6</span>
-      <div><h2>抽几张看看框得准不准</h2><p class="desc">把标注框画到图上、拼成一张 20 张的图。框贴不贴边、有没有跑偏，一眼就能看出来。</p></div>
-      <span class="pill" id="p6">待做</span></div>
-    <div class="row"><button onclick="doOverlay()">生成抽检图</button><span class="mini" id="oinfo"></span></div>
-    <details class="mini-adv"><summary>要改数量？</summary><label>抽检多少张</label><input id="o_limit" value="20"></details>
-    <img id="ovimg" alt="抽检拼图" onclick="window.open(this.src,'_blank')">
-    <div class="out" id="r6"></div>
-  </section>
-
-  <section class="card">
-    <div class="head"><div><h2>出问题了？看这里</h2><p class="desc">红字看不懂没关系，把下面的内容复制发给出图的人就行。先看"渲染日志"和"单帧错误"。</p></div></div>
-    <div class="row">
-      <button class="gray" onclick="loadLog('batch.log')">渲染日志</button>
-      <button class="gray" onclick="loadLog('capture_errors.log')">单帧错误</button>
-      <button class="gray" onclick="loadLog('gpu_watch.csv')">显卡记录</button>
+      <button class="secondary" onclick="loadLog('batch.log')">渲染日志</button>
+      <button class="secondary" onclick="loadLog('capture_errors.log')">单帧错误</button>
+      <button class="secondary" onclick="loadLog('gpu_watch.csv')">显卡记录</button>
     </div>
     <pre id="logout">点上面的按钮查看日志</pre>
     <details><summary>最近的作业记录（点一条看输出，也可以停止它）</summary>
       <div id="jobs" class="mini">还没有作业记录</div>
-      <div class="row"><span class="mini" id="seljob">未选择</span><button class="red" onclick="killSel()">停止所选作业</button></div>
+      <div class="row"><span class="mini" id="seljob">未选择</span><button class="danger" onclick="killSel()">停止所选作业</button></div>
       <pre id="jobout">点上面一条记录看它的输出</pre>
     </details>
   </section>
-</main>
 
-<details class="adv">
-  <summary>高级操作（不懂就别点）</summary>
-  <div class="adv-grid">
-    <div><h3>编译引擎（只做一次）</h3><p>第一次用才需要，要 1~3 小时，会把内存吃满。编译时不要出图。</p>
-      <button class="gray" onclick="doCompile()">开始编译</button><div class="out" id="radv"></div></div>
-    <div><h3>工程检查</h3><p>从 Windows 拷过来的工程有没有大小写不一致（否则 Ubuntu 加载会报资产找不到）。</p>
-      <button class="gray" onclick="doCaseCheck()">检查工程</button><div class="out" id="radv2"></div></div>
-    <div><h3>脚本自检</h3><p>检查脚本本身有没有坏，不会真的出图，约 10 秒。</p>
-      <button class="gray" onclick="doDryrun()">跑自检</button><div class="out" id="radv3"></div></div>
-    <div><h3>显卡记录</h3><p>每秒记一次显存和温度，出图卡顿时用来看是不是显存爆了。</p>
-      <button class="gray" onclick="doGpuWatch()">开始记录</button><div class="out" id="radv4"></div></div>
-  </div>
-  <h3 style="margin-top:18px">配置（一般不用改，改完记得保存）</h3>
-  <div class="cfg-grid" id="cfgfields"></div>
-  <div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div>
-  <p class="mini" style="margin-top:8px">下面小灰字是配置项的真实名字，方便对照文档。</p>
-</details>
+  <details class="panel">
+    <summary style="font-size:15px;font-weight:700;color:var(--text-main)">高级操作（不懂就别点）</summary>
+    <div class="adv-grid">
+      <div class="adv-item"><h3>编译引擎（只做一次）</h3><p>第一次用才需要，要 1~3 小时，会把内存吃满。编译时不要出图。</p>
+        <button class="secondary" onclick="doCompile()">开始编译</button><div class="out" id="radv"></div></div>
+      <div class="adv-item"><h3>工程检查</h3><p>从 Windows 拷过来的工程有没有大小写不一致（否则 Ubuntu 加载会报资产找不到）。</p>
+        <button class="secondary" onclick="doCaseCheck()">检查工程</button><div class="out" id="radv2"></div></div>
+      <div class="adv-item"><h3>脚本自检</h3><p>检查脚本本身有没有坏，不会真的出图，约 10 秒。</p>
+        <button class="secondary" onclick="doDryrun()">跑自检</button><div class="out" id="radv3"></div></div>
+      <div class="adv-item"><h3>显卡记录</h3><p>每秒记一次显存和温度，出图卡顿时用来看是不是显存爆了。</p>
+        <button class="secondary" onclick="doGpuWatch()">开始记录</button><div class="out" id="radv4"></div></div>
+    </div>
+    <h3 style="margin-top:24px">配置（一般不用改，改完记得保存）</h3>
+    <div class="cfg-grid" id="cfgfields"></div>
+    <div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div>
+    <p class="mini" style="margin-top:10px">下面小灰字是配置项的真实名字，方便对照文档。</p>
+  </details>
 
-<footer>UE5 感知合成数据 · 操作台（零依赖单文件）。页面每 5 秒自动刷新；关掉网页不影响后台作业。</footer>
+  <footer>UE5 感知合成数据 · 操作台（零依赖单文件）｜每 5 秒自动刷新 · 关掉网页不影响后台作业</footer>
+</div>
 
 <script>
 var $=function(i){return document.getElementById(i)};
 var $v=function(i){return ($(i)&&$(i).value||'').trim()};
 function api(p,m,b){return fetch(p,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json()})}
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-function fmt(n){return n>=20000?'2万+':String(n)}
 
 var S={cfg:{},jobs:[]}, CFG_DONE=false, JOB_CACHE={}, ACTIVE={}, SELJOB=null;
 var CFG_LABELS={scripts_dir:'脚本目录',queue_file:'拍摄清单文件',done_dir:'已完成标记目录',raw_dir:'原始图目录',meta_dir:'标注真值目录',final_dir:'处理后的图目录',dataset_dir:'训练集目录',uproject:'UE 工程文件',ue_dir:'UE 引擎目录',logs_dir:'日志目录',queue_cfg_dir:'拍摄配置目录',project_dir:'工程目录',real_dir:'实拍参考图目录（可空）',overlay_dir:'抽检图目录'};
@@ -216,6 +391,11 @@ function newestOf(list){
   return best;
 }
 function pill(id,txt,cls){var e=$(id);if(!e)return;e.textContent=txt;e.className='pill '+(cls||'')}
+function setStepNum(id,done){var e=$(id);if(e)e.className='step-num'+(done?' done':'')}
+function setProgress(barId,txtId,pct,label){
+  var b=$(barId);if(b)b.style.width=pct+'%';
+  var t=$(txtId);if(t)t.textContent=(label||'')+' '+pct+'%';
+}
 
 function setResult(el,cls,txt,out){
   el.innerHTML='';
@@ -317,36 +497,40 @@ function refresh(){
     $('clock').textContent=s.time;
 
     $('ovDone').textContent=total?(done+' / '+total):'—';
-    $('ovRender').textContent=s.render_running?'正在出图':(total&&done>=total?'已出完':'没在跑');
-    var g=s.gpu,adv=[];
+    $('ovRender').textContent=s.render_running?'ON':'IDLE';
+    $('ovRender').className='widget-value '+(s.render_running?'warn':(total&&done>=total?'ok':''));
+    var g=s.gpu,adv=[],gpuCls='';
     if(g){
       $('ovGpu').textContent=g.mem_mb+'M / '+g.temp+'°C';
-      if(g.temp>=85)adv.push('显卡有点烫（'+g.temp+'°C），最好先停一会儿散热。');
-      else if(g.mem_mb>=10500)adv.push('显存快满了（'+g.mem_mb+'M），出图可能变慢或失败。');
-      else if(g.util>0)adv.push('显卡正在干活，正常。');
+      if(g.temp>=85){adv.push('显卡有点烫（'+g.temp+'°C），最好先停一会儿散热。');gpuCls='bad';}
+      else if(g.mem_mb>=10500){adv.push('显存快满了（'+g.mem_mb+'M），出图可能变慢或失败。');gpuCls='warn';}
+      else if(g.util>0){adv.push('显卡正在干活，正常。');gpuCls='ok';}
       else adv.push('显卡空闲。');
     }else{
-      $('ovGpu').textContent='看不到';
+      $('ovGpu').textContent='N/A';
+      gpuCls='bad';
       adv.push('看不到显卡信息（可能没装驱动，或这不是服务器本机）。');
     }
+    $('ovGpu').className='widget-value '+gpuCls;
     var disk=s.disk_data_free_g>=0?s.disk_data_free_g:s.disk_root_free_g;
     $('ovDisk').textContent=disk>=0?disk+' G':'—';
+    $('ovDisk').className='widget-value '+(disk>=0&&disk<50?'bad':'');
     if(disk>=0&&disk<50)adv.push('磁盘快满了（剩 '+disk+'G），先清理再继续出图。');
     var envAdv=latest('envcheck');
     if(envAdv&&envAdv.status==='fail')adv.push('上次机器检查有项目没通过，见第 1 步红字。');
     $('advice').textContent=adv.join(' ');
 
     var pct=total?Math.min(100,Math.round(done*100/total)):0;
-    ['pRender','pRender2'].forEach(function(id){var e=$(id);e.style.width=pct+'%';e.textContent=pct+'%  ('+done+'/'+total+')';});
+    setProgress('pRender','pRenderTxt',pct,'渲染进度');
+    setProgress('pRender2','pRender2Txt',pct,'渲染进度');
     var pct2=done?Math.min(100,Math.round(fin*100/done)):0;
-    $('pPost').style.width=pct2+'%';$('pPost').textContent=pct2+'%  ('+fin+'/'+done+')';
+    setProgress('pPost','pPostTxt',pct2,'后处理进度');
 
-    // 每一步的状态标签
     var env=latest('envcheck');
+    var envOk=env&&env.status==='ok';
     pill('p1',env?(env.status==='ok'?'已通过':(env.status==='running'?'检查中':'没通过')):'待做',env?(env.status==='ok'?'ok':(env.status==='running'?'run':'bad')):'');
     pill('p2',total?('已生成 '+total+' 张'):'待做',total?'ok':'');
     pill('p3',s.render_running?'出图中':(total&&done>=total?'已完成':(done>0?'未完成':'待做')),s.render_running?'run':(total&&done>=total?'ok':(done>0?'warn':'')));
-    // 出图前环境检查：缺工程/脚本/引擎时直接说怎么办，不用点下去等英文报错
     var ready='';
     if(!s.uproject_exists){
       ready='⚠️ 服务器上还没有工程文件：'+s.cfg.uproject+'\n先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；工程在别的目录时，去「高级操作 → 配置」把 uproject / project_dir 改成实际路径。';
@@ -357,10 +541,9 @@ function refresh(){
     }
     $('ready3').textContent=ready;
     $('ready3').style.display=ready?'block':'none';
-    pill('p4',done?(fin>=done?'已完成':(fin>0?'做了一部分':'待做')):'待做',done&&fin>=done?'ok':(fin>0?'warn':''));
-    // 第 5/6 步是否"对这一批已经做完"：必须本轮图已出完且已处理完，
-    // 否则上一批留下的训练集/抽检图会让人误以为已经做完（重新生成清单后尤其明显）
+
     var postReady=done>0&&fin>=done;
+    pill('p4',done?(fin>=done?'已完成':(fin>0?'做了一部分':'待做')):'待做',done&&fin>=done?'ok':(fin>0?'warn':''));
     pill('p5',(s.dataset_ready&&postReady)?'已完成':'待做',(s.dataset_ready&&postReady)?'ok':'');
     pill('p6',(s.overlay_ready&&postReady)?'已生成':'待做',(s.overlay_ready&&postReady)?'ok':'');
 
@@ -373,7 +556,6 @@ function refresh(){
       $('ovimg').style.display='none';
     }
 
-    // 已经结束的作业，把结论回填到对应步骤（轮询中的不覆盖）
     [['envcheck','r1'],['queue_gen','r2'],['post','r4'],['pack','r5'],['overlay','r6'],
      ['compile','radv'],['case_check','radv2'],['dryrun','radv3'],['gpu_watch','radv4']].forEach(function(pair){
       var action=pair[0],elId=pair[1];
@@ -384,7 +566,6 @@ function refresh(){
       var sm2=summarize(action,detail);
       setResult($(elId),sm2.cls,sm2.text,detail.out);
     });
-    // 出图相关两个动作合并：只显示最近一次（开始/停止），避免互相覆盖
     if(!ACTIVE['render_start']&&!ACTIVE['render_stop']){
       var rj=newestOf([latest('render_start'),latest('render_stop')]);
       if(rj){
@@ -394,14 +575,19 @@ function refresh(){
       }
     }
 
-    // 顶部"下一步"提示
     var nx=computeNext(s,done,total,fin);
-    $('nowStep').textContent='第 '+nx.n+' 步';
+    $('nowStep').textContent='STEP '+nx.n;
     $('nextText').textContent=nx.text;
     $('banner').className='banner '+(nx.cls||'');
+    setStepNum('n1',envOk);
+    setStepNum('n2',total>0);
+    setStepNum('n3',total>0&&done>=total);
+    setStepNum('n4',postReady);
+    setStepNum('n5',s.dataset_ready&&postReady);
+    setStepNum('n6',s.overlay_ready&&postReady);
 
     renderJobs(S.jobs);
-  })['catch'](function(e){$('clock').textContent='连不上服务器：'+e});
+  })['catch'](function(e){$('clock').textContent='OFFLINE：'+e});
 }
 
 function computeNext(s,done,total,fin){
@@ -409,18 +595,18 @@ function computeNext(s,done,total,fin){
   var envFailed=env&&env.status==='fail';
   if(total===0){
     if(envFailed)return {n:2,text:'机器检查有项目没通过（看第 1 步红字），最好先处理；也可以点第 2 步先继续。',cls:'warn'};
-    if(!env)return {n:1,text:'先点第 1 步「开始检查」，看看这台机器能不能出图。',cls:'work'};
-    return {n:2,text:'机器没问题。点第 2 步「生成清单」，决定这一批要拍哪些画面。',cls:'work'};
+    if(!env)return {n:1,text:'先点第 1 步「开始检查」，看看这台机器能不能出图。',cls:''};
+    return {n:2,text:'机器没问题。点第 2 步「生成清单」，决定这一批要拍哪些画面。',cls:''};
   }
   if(done<total){
     if(!s.uproject_exists)return {n:3,text:'工程还没下发到服务器（'+s.cfg.uproject+' 不存在）。先在 Windows 上跑 sync_project.ps1，或去配置里改路径。',cls:'warn'};
     if(!s.ue_ready)return {n:3,text:'引擎还没编译好。先去「高级操作 → 编译引擎」（1~3 小时，内存吃满）。',cls:'warn'};
-    if(s.render_running)return {n:3,text:'正在出图：已完成 '+done+' / '+total+' 张，放着别管就行（可以关网页）。',cls:'work'};
+    if(s.render_running)return {n:3,text:'正在出图：已完成 '+done+' / '+total+' 张，放着别管就行（可以关网页）。',cls:''};
     return {n:3,text:'还没出完（'+done+' / '+total+' 张）。点第 3 步「开始出图」，会自动接着上次继续。',cls:'warn'};
   }
-  if(fin<done)return {n:4,text:'图出完了。点第 4 步「开始处理」，把原图变成训练能用的照片。',cls:'work'};
-  if(!s.dataset_ready)return {n:5,text:'处理完了。点第 5 步「打包训练集」。',cls:'work'};
-  if(!s.overlay_ready)return {n:6,text:'最后一步：点第 6 步「生成抽检图」，看看框画得准不准。',cls:'work'};
+  if(fin<done)return {n:4,text:'图出完了。点第 4 步「开始处理」，把原图变成训练能用的照片。',cls:''};
+  if(!s.dataset_ready)return {n:5,text:'处理完了。点第 5 步「打包训练集」。',cls:''};
+  if(!s.overlay_ready)return {n:6,text:'最后一步：点第 6 步「生成抽检图」，看看框画得准不准。',cls:''};
   return {n:6,text:'全部做完了。训练集在 '+(s.cfg.dataset_dir||'')+'，抽检图在 '+(s.cfg.overlay_dir||'')+'。',cls:'ok'};
 }
 
@@ -435,7 +621,8 @@ function renderJobs(list){
   if(!list||!list.length){$('jobs').textContent='还没有作业记录';return}
   $('jobs').innerHTML=list.map(function(j){
     var st=j.status==='running'?'跑着':(j.status==='ok'?'完成':'出错');
-    return '<div class="job" onclick="viewJob(\''+j.id+'\')">'+esc(actionName(j.action))+' · '+st+' · '+esc(j.started)+'</div>';
+    var cls=j.status==='running'?'run':(j.status==='ok'?'ok':'bad');
+    return '<div class="job" onclick="viewJob(\''+j.id+'\')"><span class="pill '+cls+'" style="font-size:11px;padding:2px 8px">'+st+'</span> '+esc(actionName(j.action))+' · '+esc(j.started)+'</div>';
   }).join('');
 }
 function viewJob(id){
