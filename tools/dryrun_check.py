@@ -18,8 +18,26 @@ import sys
 import tempfile
 import types
 
-import numpy as np
-from PIL import Image
+# 依赖检查放在最前面：线上服务器（系统 python3）可能没装 numpy/Pillow，
+# 直接 import 会甩一大段 traceback，看不出该怎么办。这里给出可执行的一句话。
+_MISSING = []
+try:
+    import numpy as np
+except ImportError:          # noqa: N816
+    np = None
+    _MISSING.append("numpy")
+try:
+    from PIL import Image
+except ImportError:          # noqa: N816
+    Image = None
+    _MISSING.append("Pillow")
+if _MISSING:
+    sys.stderr.write(
+        "自检需要 %s，当前 Python（%s）没有装。\n"
+        "  Ubuntu：sudo apt install python3-numpy python3-pil  （或 pip3 install numpy pillow）\n"
+        "  Windows：pip install numpy pillow\n"
+        "装好后重新点「脚本自检」即可。\n" % ("、".join(_MISSING), sys.executable))
+    sys.exit(2)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
@@ -570,6 +588,14 @@ def main():
 
 
 # 模块级导入放在断言之前，供 7/6/8 节直接调用
+# 服务器上可能只同步了部分目录（例如没下发 engine/），缺文件时给一句人话而不是 traceback
+for _rel in ("post/postprocess.py", "engine/Content/Python/capture_math.py"):
+    if not os.path.exists(os.path.join(ROOT, _rel)):
+        sys.stderr.write(
+            "自检缺文件：%s\n"
+            "说明这台的仓库不完整。把仓库根目录（含 engine/、post/、tools/、config/）整体同步过来再跑：\n"
+            "  scp -r engine post tools config tools root@<服务器>:/opt/ue5_synth/\n" % _rel)
+        sys.exit(2)
 pp = load_module("dryrun_postprocess", "post/postprocess.py")
 cm = load_module("dryrun_capture_math", "engine/Content/Python/capture_math.py")
 

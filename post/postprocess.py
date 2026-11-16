@@ -17,8 +17,17 @@ import struct
 import sys
 import zlib
 
-import numpy as np
-from PIL import Image
+# 依赖缺失时给一句能照做的话，而不是 traceback（线上系统 python3 可能没装 numpy/Pillow）
+_DEP_HINT = ("  Ubuntu：sudo apt install python3-numpy python3-pil python3-opencv\n"
+             "  Windows：pip install numpy pillow opencv-python\n")
+try:
+    import numpy as np
+except ImportError:                      # noqa: N816
+    sys.exit("后处理需要 numpy，当前 Python（%s）没有装：\n%s" % (sys.executable, _DEP_HINT))
+try:
+    from PIL import Image
+except ImportError:                      # noqa: N816
+    sys.exit("后处理需要 Pillow，当前 Python（%s）没有装：\n%s" % (sys.executable, _DEP_HINT))
 
 try:                      # 可选依赖：只有 16bit RGB 才用到；缺失时该路径明确报错，不静默降级
     import cv2

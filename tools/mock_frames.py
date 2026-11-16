@@ -10,10 +10,19 @@ import json
 import os
 import random
 import struct
+import sys
 import zlib
 
-import numpy as np
-from PIL import Image
+_DEP_HINT = ("  Ubuntu：sudo apt install python3-numpy python3-pil\n"
+             "  Windows：pip install numpy pillow\n")
+try:
+    import numpy as np
+except ImportError:                      # noqa: N816
+    sys.exit("mock_frames 需要 numpy，当前 Python（%s）没有装：\n%s" % (sys.executable, _DEP_HINT))
+try:
+    from PIL import Image
+except ImportError:                      # noqa: N816
+    sys.exit("mock_frames 需要 Pillow，当前 Python（%s）没有装：\n%s" % (sys.executable, _DEP_HINT))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(ROOT, "config")

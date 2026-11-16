@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>UE5 出图操作台 · Synth Data Pipeline</title>
+<title>UE5 出图操作台 · Synth Data Pipeline v3</title>
 <style>
+  /* ===== v2 视觉 token 原样复用（参考 /opt/ad_mining/front.html 的 Dark Sci-Fi） ===== */
   :root {
     --primary: #00d4ff;
     --primary-dark: #0096c7;
@@ -27,92 +28,219 @@
     --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     --transition-all: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /* v3 布局量 */
+    --side-w: 248px;
+    --term-h: 236px;
   }
   * { box-sizing: border-box; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
   ::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.4); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(0, 212, 255, 0.7); }
+  html, body { height: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    margin: 0;
-    background: #01040f;
-    color: var(--text-main);
-    -webkit-font-smoothing: antialiased;
-    overflow-x: auto;
-    min-height: 100vh;
-    letter-spacing: 0.3px;
-    position: relative;
+    margin: 0; background: #01040f; color: var(--text-main); -webkit-font-smoothing: antialiased;
+    min-height: 100vh; letter-spacing: 0.3px; position: relative; overflow: hidden;
   }
-  /* 背景画在固定定位的伪元素上，而不是 background-attachment:fixed：
-     后者在长页面截图、iOS/部分 Chromium 版本下只覆盖首屏，页面下半会变白（已实测）。 */
+  /* 背景画在固定伪元素上，不在长页面上用 background-attachment:fixed（v2 已实测的坑） */
   body::before {
-    content: '';
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    content: ''; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     background: radial-gradient(circle at 50% 30%, #102a63 0%, #030b20 70%, #01040f 100%);
     pointer-events: none; z-index: -2;
   }
   body::after {
-    content: '';
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    content: ''; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     background-image:
       radial-gradient(rgba(255,255,255,0.12) 1px, transparent 1px),
       radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
-    background-size: 50px 50px, 90px 90px;
-    background-position: 0 0, 25px 25px;
+    background-size: 50px 50px, 90px 90px; background-position: 0 0, 25px 25px;
     opacity: 0.35; pointer-events: none; z-index: -1;
   }
-  header {
-    background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(16px);
-    border-bottom: 1px solid var(--border); padding: 12px 28px; position: sticky; top: 0; z-index: 100;
-    display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+
+  /* ===== 应用骨架：顶栏 / 左导航 / 主区 / 底部控制台 ===== */
+  .app {
+    display: grid; height: 100vh;
+    grid-template-columns: var(--side-w) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "brand topbar" "side main" "side term";
   }
-  .header-title { font-size: 20px; font-weight: 800; display: flex; align-items: center; gap: 12px; }
-  .header-title-text {
+  @media (max-width: 900px) {
+    .app {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      grid-template-areas: "topbar" "side" "main" "term";
+    }
+  }
+
+  /* ---- 品牌区（左上） ---- */
+  .brand {
+    grid-area: brand; display: flex; align-items: center; gap: 10px; padding: 12px 16px; min-height: 62px;
+    background: rgba(2, 6, 23, 0.92); backdrop-filter: blur(16px);
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  .brand-mark {
+    width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px; position: relative;
+    background: linear-gradient(135deg, rgba(0,212,255,0.35), rgba(138,43,226,0.35));
+    border: 1px solid var(--border-highlight); box-shadow: 0 0 16px rgba(0,212,255,0.45); display: grid; place-items: center;
+  }
+  .brand-mark::after { /* 十字准星 */
+    content: ''; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--primary);
+    box-shadow: inset 0 0 6px rgba(0,212,255,0.8); animation: pulse 2.4s ease-in-out infinite;
+  }
+  .brand-title {
+    font-size: 14px; font-weight: 800; letter-spacing: 1px; line-height: 1.2;
     background: linear-gradient(to right, #00d4ff, #8a2be2);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
+    -webkit-background-clip: text; background-clip: text; color: transparent; white-space: nowrap;
   }
-  .header-sub { font-size: 12px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
-  .project-switch-box {
-    display: flex; align-items: center; gap: 8px; background: rgba(0, 212, 255, 0.08);
-    padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-    font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+  .brand-sub { font-size: 10px; color: var(--text-muted); font-family: var(--mono); letter-spacing: 0.5px; margin-top: 2px; white-space: nowrap; }
+
+  /* ---- 顶栏：下一步提示 + 硬件状态条 ---- */
+  .topbar {
+    grid-area: topbar; display: flex; align-items: center; gap: 14px; padding: 10px 22px; min-height: 62px;
+    background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border); box-shadow: 0 4px 20px rgba(0,0,0,0.4);
   }
-  .container { padding: 28px; max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
-  .panel {
-    background: var(--surface); backdrop-filter: blur(16px); border-radius: var(--radius-lg);
-    border: 1px solid var(--border); padding: 28px; position: relative; overflow: hidden;
-    transition: var(--transition-all); box-shadow: var(--shadow-card);
-  }
-  .panel::before {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-    background: linear-gradient(to right, var(--primary), var(--accent)); opacity: 0.9;
-  }
-  .panel:hover { box-shadow: var(--shadow-glow-hover); border-color: var(--border-highlight); }
-  .section-label {
-    font-size: 13px; font-weight: 700; color: var(--primary); text-transform: uppercase;
-    letter-spacing: 2px; margin-bottom: 18px; display: flex; align-items: center; gap: 10px;
-    text-shadow: 0 0 8px rgba(0,212,255,0.4);
-  }
-  .section-label::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, var(--border-highlight), transparent); }
-  .widget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-  .widget {
-    background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: var(--radius-md); padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;
+  .next-box {
+    display: flex; align-items: center; gap: 12px; min-width: 220px; flex: 1 1 auto;
+    padding: 8px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-highlight);
+    background: rgba(0, 212, 255, 0.07); box-shadow: 0 0 20px rgba(0,212,255,0.14); cursor: pointer;
     transition: var(--transition-all);
   }
-  .widget:hover { border-color: rgba(0,212,255,0.35); background: rgba(0, 0, 0, 0.45); }
-  .widget-title { color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
-  .widget-value { font-size: 26px; font-weight: 800; font-family: var(--mono); color: var(--text-main); }
-  .widget-value.ok { color: var(--success); }
-  .widget-value.warn { color: var(--warning); }
-  .widget-value.bad { color: var(--danger); }
-  .stats-bar {
-    font-size: 14px; font-weight: 600; background: rgba(0, 212, 255, 0.06); padding: 14px 22px;
-    border-radius: var(--radius-sm); display: flex; align-items: center; gap: 14px;
-    border: 1px solid rgba(0,212,255,0.25); margin-top: 18px; flex-wrap: wrap;
+  .next-box:hover { border-color: var(--primary); box-shadow: 0 0 26px rgba(0,212,255,0.3); }
+  .next-box.warn { border-color: rgba(245,158,11,0.55); background: rgba(245,158,11,0.08); box-shadow: 0 0 20px rgba(245,158,11,0.14); }
+  .next-box.ok { border-color: rgba(16,185,129,0.55); background: rgba(16,185,129,0.08); box-shadow: 0 0 20px rgba(16,185,129,0.14); }
+  .next-tag {
+    flex: none; font-size: 11px; font-weight: 800; letter-spacing: 0.5px; padding: 4px 10px; border-radius: 20px;
+    background: rgba(0,212,255,0.2); border: 1px solid var(--primary); color: var(--primary);
+    font-family: var(--mono); white-space: nowrap;
   }
-  .stats-number { font-size: 18px; font-weight: 800; font-family: var(--mono); }
+  .next-box.warn .next-tag { color: var(--warning); border-color: rgba(245,158,11,0.7); background: rgba(245,158,11,0.15); }
+  .next-box.ok .next-tag { color: var(--success); border-color: rgba(16,185,129,0.7); background: rgba(16,185,129,0.15); }
+  .next-text {
+    font-size: 13px; font-weight: 600; line-height: 1.45; color: #dbeafe;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .statbar {
+    display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+    background: rgba(0, 0, 0, 0.42); border: 1px solid rgba(255,255,255,0.09); border-radius: var(--radius-sm);
+    padding: 6px 12px; font-family: var(--mono); font-size: 11px; color: var(--text-muted); white-space: nowrap;
+  }
+  .stat { display: inline-flex; align-items: baseline; gap: 5px; }
+  .stat b { font-weight: 700; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+  .stat.ok b { color: #6ee7a5; }
+  .stat.warn b { color: #fcd34d; }
+  .stat.bad b { color: #fca5a5; }
+  .stat-sep { width: 1px; height: 13px; background: rgba(255,255,255,0.12); }
+  .icon-btn {
+    width: 34px; height: 34px; padding: 0; flex: none; display: grid; place-items: center; font-size: 14px;
+    background: rgba(0, 212, 255, 0.1); border: 1px solid var(--border);
+    font-family: "Segoe UI Symbol", "Segoe UI", Arial, sans-serif; line-height: 1;
+  }
+  /* 关闭按钮用纯 CSS 画叉：不依赖字体里有没有 ✕ 这个字形（Windows 上会变方框） */
+  .icon-btn.close { position: relative; color: transparent; }
+  .icon-btn.close::before, .icon-btn.close::after {
+    content: ''; position: absolute; left: 50%; top: 50%; width: 14px; height: 1.5px;
+    background: var(--text-main); border-radius: 2px; box-shadow: 0 0 6px rgba(0,212,255,0.6);
+  }
+  .icon-btn.close::before { transform: translate(-50%, -50%) rotate(45deg); }
+  .icon-btn.close::after { transform: translate(-50%, -50%) rotate(-45deg); }
+  .icon-btn.close:hover { background: rgba(239,68,68,0.18); border-color: rgba(239,68,68,0.6); }
+  .icon-btn:hover { background: rgba(0,212,255,0.2); }
+
+  /* ---- 左导航：步骤条 ---- */
+  .side {
+    grid-area: side; display: flex; flex-direction: column; min-height: 0;
+    background: rgba(2, 8, 24, 0.72); backdrop-filter: blur(16px); border-right: 1px solid var(--border);
+  }
+  .side-scroll { flex: 1 1 auto; overflow-y: auto; padding: 16px 12px 8px; }
+  .side-label {
+    font-size: 10px; font-weight: 800; letter-spacing: 2px; color: rgba(0,212,255,0.75);
+    padding: 0 8px 10px; text-transform: uppercase;
+  }
+  .steplist { position: relative; display: flex; flex-direction: column; gap: 6px; }
+  .steplist::before { /* 竖向导轨 */
+    content: ''; position: absolute; left: 25px; top: 26px; bottom: 26px; width: 1px;
+    background: linear-gradient(to bottom, rgba(0,212,255,0.35), rgba(138,43,226,0.25));
+  }
+  .snav {
+    position: relative; display: grid; grid-template-columns: 28px minmax(0,1fr) 12px; gap: 10px; align-items: center;
+    width: 100%; max-width: 100%; text-align: left; padding: 10px 10px; border-radius: var(--radius-sm);
+    background: transparent; border: 1px solid transparent; color: var(--text-muted);
+    box-shadow: none; font-family: inherit; cursor: pointer; transition: var(--transition-all);
+  }
+  .snav:hover { background: rgba(0,212,255,0.08); border-color: rgba(0,212,255,0.3); color: var(--text-main); transform: none; box-shadow: none; }
+  .snum {
+    width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center;
+    font-family: var(--mono); font-size: 13px; font-weight: 800; z-index: 1;
+    background: rgba(2, 8, 24, 0.95); border: 1px solid rgba(0,212,255,0.35); color: rgba(148,163,184,0.9);
+    transition: var(--transition-all);
+  }
+  .snav-title {
+    display: block; font-size: 13px; font-weight: 700; line-height: 1.3;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .snav-sub { display: block; font-size: 10.5px; font-family: var(--mono); color: rgba(148,163,184,0.75); margin-top: 2px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sdot { width: 9px; height: 9px; border-radius: 50%; background: rgba(148,163,184,0.45); justify-self: end; }
+  .snav[data-state="done"] .snum { color: var(--success); border-color: rgba(16,185,129,0.65); background: rgba(16,185,129,0.14); }
+  .snav[data-state="done"] .sdot { background: var(--success); box-shadow: 0 0 8px rgba(16,185,129,0.8); }
+  .snav[data-state="running"] .snum { color: var(--primary); border-color: var(--border-highlight); background: rgba(0,212,255,0.16); box-shadow: 0 0 14px rgba(0,212,255,0.45); }
+  .snav[data-state="running"] .sdot { background: var(--primary); box-shadow: 0 0 10px var(--primary); animation: pulse 1.6s ease-in-out infinite; }
+  .snav[data-state="warn"] .snum { color: var(--warning); border-color: rgba(245,158,11,0.7); background: rgba(245,158,11,0.14); }
+  .snav[data-state="warn"] .sdot { background: var(--warning); box-shadow: 0 0 10px rgba(245,158,11,0.9); }
+  .snav[data-state="bad"] .snum { color: #fca5a5; border-color: rgba(239,68,68,0.7); background: rgba(239,68,68,0.14); }
+  .snav[data-state="bad"] .sdot { background: var(--danger); box-shadow: 0 0 10px rgba(239,68,68,0.9); }
+  .snav[data-state="todo"] .snum { border-style: dashed; }
+  .snav.active {
+    background: linear-gradient(135deg, rgba(0,212,255,0.16), rgba(138,43,226,0.12));
+    border-color: var(--border-highlight); color: var(--text-main);
+    box-shadow: 0 0 22px rgba(0,212,255,0.28), inset 0 0 14px rgba(0,212,255,0.08);
+  }
+  .snav.active .snav-title { text-shadow: 0 0 10px rgba(0,212,255,0.5); }
+  .side-foot { flex: none; padding: 10px 14px 14px; border-top: 1px solid rgba(0,212,255,0.12); }
+  .side-foot .rail-mini { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 10px; color: rgba(148,163,184,0.7); }
+  .rail-mini .mini-progress { flex: 1; height: 4px; border-radius: 3px; background: rgba(0,0,0,0.6); overflow: hidden; border: 1px solid rgba(0,212,255,0.18); }
+  .rail-mini .mini-progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--accent)); transition: width .5s ease; }
+
+  /* ---- 主区：单步工作区 ---- */
+  .main { grid-area: main; overflow-y: auto; min-height: 0; padding: 22px 26px 18px; }
+  .ws { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .ws-head { display: flex; gap: 16px; align-items: flex-start; }
+  .ws-num {
+    flex: 0 0 52px; height: 52px; border-radius: 14px; display: grid; place-items: center;
+    font-size: 22px; font-weight: 800; font-family: var(--mono);
+    background: linear-gradient(135deg, rgba(0,212,255,0.25), rgba(138,43,226,0.2));
+    border: 1px solid rgba(0,212,255,0.55); color: var(--primary);
+    box-shadow: 0 0 22px rgba(0,212,255,0.28), inset 0 0 10px rgba(0,212,255,0.12);
+    text-shadow: 0 0 10px rgba(0,212,255,0.8);
+  }
+  .ws-num.done { color: var(--success); border-color: rgba(16,185,129,0.6); background: linear-gradient(135deg, rgba(16,185,129,0.22), rgba(0,150,199,0.12)); box-shadow: 0 0 20px rgba(16,185,129,0.28); }
+  .ws-titlebar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  h2 { color: var(--text-main); font-size: 21px; margin: 0; letter-spacing: 0.5px; }
+  h3 { color: var(--text-main); font-size: 14px; margin: 0 0 8px; }
+  .desc { color: var(--text-muted); font-size: 13px; margin: 6px 0 0; line-height: 1.7; max-width: 780px; }
+  .panel {
+    background: var(--surface); backdrop-filter: blur(16px); border-radius: var(--radius-lg);
+    border: 1px solid var(--border); padding: 20px 22px; position: relative; overflow: hidden;
+    box-shadow: var(--shadow-card); transition: var(--transition-all);
+  }
+  .panel::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+                   background: linear-gradient(to right, var(--primary), var(--accent)); opacity: 0.9; }
+  .panel.flat { background: rgba(0,0,0,0.28); border-color: rgba(255,255,255,0.08); box-shadow: none; border-radius: var(--radius-md); }
+  .panel.flat::before { display: none; }
+  .grid-sum { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
+  .mini-kpi {
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-md);
+    padding: 13px 16px; display: flex; flex-direction: column; gap: 5px;
+  }
+  .mini-kpi:hover { border-color: rgba(0,212,255,0.35); }
+  .mini-kpi .t { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+  .mini-kpi .v { font-size: 21px; font-weight: 800; font-family: var(--mono); font-variant-numeric: tabular-nums; line-height: 1.15; word-break: keep-all; overflow-wrap: break-word; }
+  .mini-kpi .v.ok { color: var(--success); }
+  .mini-kpi .v.warn { color: var(--warning); }
+  .mini-kpi .v.bad { color: var(--danger); }
+  .mini-kpi .s { font-size: 10.5px; font-family: var(--mono); color: rgba(148,163,184,0.75); }
   input, select {
     background: rgba(0,0,0,0.5); border: 1px solid rgba(0,212,255,0.3); color: var(--text-main);
     border-radius: var(--radius-sm); padding: 10px 14px; font-size: 14px; width: 100%;
@@ -133,7 +261,7 @@
     border-color: var(--primary); transform: translateY(-2px); box-shadow: 0 6px 22px rgba(0, 212, 255, 0.4);
   }
   button:active { transform: translateY(0); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
   button.primary {
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.35), rgba(138, 43, 226, 0.25));
     border-color: var(--primary); font-weight: 700; letter-spacing: 1px;
@@ -143,7 +271,10 @@
   button.danger:hover { border-color: var(--danger); box-shadow: 0 6px 22px rgba(239,68,68,0.35); }
   button.secondary { background: transparent; border-color: rgba(255,255,255,0.15); color: var(--text-muted); box-shadow: none; }
   button.secondary:hover { border-color: var(--primary); color: var(--text-main); }
+  button.big { padding: 14px 26px; font-size: 15px; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .row.tight { margin-top: 0; }
+  .spacer { flex: 1 1 auto; }
   .pill {
     font-size: 12px; font-weight: 700; border-radius: 20px; padding: 4px 12px; letter-spacing: 1px;
     border: 1px solid rgba(255,255,255,0.15); color: var(--text-muted); white-space: nowrap;
@@ -155,220 +286,468 @@
   .pill.warn { color: #fcd34d; border-color: rgba(245,158,11,0.6); background: rgba(245,158,11,0.12); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
   .res { border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; margin-top: 12px; line-height: 1.6;
-         border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); white-space: pre-line; }
+         border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); white-space: pre-line; min-height: 0; }
+  .res:empty { display: none; }
   .res.ok { border-color: rgba(16,185,129,0.5); background: rgba(16,185,129,0.08); color: #a7f3d0; }
   .res.bad { border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); color: #fecaca; }
   .res.warn { border-color: rgba(245,158,11,0.5); background: rgba(245,158,11,0.08); color: #fde68a; }
   .res.run { border-color: var(--border-highlight); background: rgba(0,212,255,0.08); color: var(--primary); }
   .ready { border: 1px solid rgba(245,158,11,0.5); background: rgba(245,158,11,0.08); color: #fde68a;
-           border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; margin-top: 12px; white-space: pre-line; line-height: 1.6; }
+           border-radius: var(--radius-sm); padding: 12px 16px; font-size: 13px; margin-top: 12px; white-space: pre-line; line-height: 1.65; }
+  .ready b { color: #fcd34d; }
   .progress { height: 10px; background: rgba(0,0,0,0.6); border-radius: 6px; overflow: hidden; margin-top: 14px; border: 1px solid rgba(0,212,255,0.2); }
   .progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--success)); transition: width 0.4s ease; }
+  .progress.thin { height: 5px; margin-top: 6px; }
   .prog-label { font-size: 12px; color: var(--text-muted); font-family: var(--mono); margin-top: 5px; }
   pre { background: rgba(0,0,0,0.55); border: 1px solid rgba(0,212,255,0.18); border-radius: var(--radius-sm);
-        padding: 14px; max-height: 340px; overflow: auto; white-space: pre-wrap; font-size: 12px; color: #cbd5e1;
-        font-family: var(--mono); margin: 10px 0 0; line-height: 1.5; }
+        padding: 12px 14px; max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; color: #cbd5e1;
+        font-family: var(--mono); margin: 10px 0 0; line-height: 1.55; }
   details.mini-adv, details { margin-top: 12px; }
   details summary { color: var(--text-muted); cursor: pointer; font-size: 13px; transition: var(--transition-all); list-style: none; }
   details summary::-webkit-details-marker { display: none; }
   details summary::before { content: '▸ '; color: var(--primary); }
   details[open] summary::before { content: '▾ '; }
   details summary:hover { color: var(--primary); text-shadow: 0 0 8px rgba(0,212,255,0.4); }
-  .step-head { display: flex; gap: 16px; align-items: flex-start; }
-  .step-num {
-    flex: 0 0 44px; width: 44px; height: 44px; border-radius: 12px;
-    display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 800;
-    background: linear-gradient(135deg, rgba(0,212,255,0.25), rgba(138,43,226,0.2));
-    border: 1px solid rgba(0,212,255,0.55); color: var(--primary); font-family: var(--mono);
-    box-shadow: 0 0 18px rgba(0,212,255,0.25), inset 0 0 10px rgba(0,212,255,0.12);
-    text-shadow: 0 0 10px rgba(0,212,255,0.8);
-  }
-  .step-num.done { color: var(--success); border-color: rgba(16,185,129,0.6); background: linear-gradient(135deg, rgba(16,185,129,0.22), rgba(0,150,199,0.12)); box-shadow: 0 0 18px rgba(16,185,129,0.25); }
-  h2 { color: var(--text-main); font-size: 19px; margin: 0 0 4px; }
-  h3 { color: var(--text-main); font-size: 15px; margin: 0 0 6px; }
-  .desc { color: var(--text-muted); font-size: 13px; margin: 0; line-height: 1.7; }
-  .step-body { flex: 1; }
-  .banner {
-    display: flex; align-items: center; gap: 14px; padding: 16px 24px; border-radius: var(--radius-md); flex-wrap: wrap;
-    background: rgba(0, 212, 255, 0.08); border: 1px solid var(--border-highlight);
-    box-shadow: 0 0 24px rgba(0,212,255,0.18);
-  }
-  .banner.warn { background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.5); box-shadow: 0 0 24px rgba(245,158,11,0.15); }
-  .banner.ok { background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.5); box-shadow: 0 0 24px rgba(16,185,129,0.15); }
-  .banner .now {
-    font-size: 13px; font-weight: 800; letter-spacing: 1px; padding: 5px 14px; border-radius: 20px;
-    background: rgba(0,212,255,0.2); border: 1px solid var(--primary); color: var(--primary);
-    font-family: var(--mono); white-space: nowrap;
-  }
-  .banner.ok .now { color: var(--success); border-color: rgba(16,185,129,0.7); background: rgba(16,185,129,0.15); }
-  .banner.warn .now { color: var(--warning); border-color: rgba(245,158,11,0.7); background: rgba(245,158,11,0.15); }
-  .banner-text { font-size: 14px; font-weight: 600; line-height: 1.6; }
-  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
-  .adv-item { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-md); padding: 18px; }
+  .adv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; }
+  .adv-item { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-md); padding: 16px; }
   .adv-item p { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; line-height: 1.6; }
   .cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 16px; margin-top: 10px; }
   .cfg .key { font-size: 11px; color: rgba(148,163,184,0.5); font-family: var(--mono); margin-top: 2px; display: block; }
-  .job { padding: 10px 14px; border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-sm);
+  .job { padding: 9px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-sm);
          margin-top: 8px; cursor: pointer; background: rgba(0,0,0,0.25); font-size: 13px;
-         transition: var(--transition-all); font-family: var(--mono); }
+         transition: var(--transition-all); font-family: var(--mono); display: flex; align-items: center; gap: 10px; }
   .job:hover { background: rgba(0,212,255,0.08); border-color: rgba(0,212,255,0.45); transform: translateX(3px); }
+  .job.sel { border-color: var(--border-highlight); background: rgba(0,212,255,0.1); }
+  .job .st { flex: none; font-size: 11px; padding: 2px 8px; }
+  .job .an { flex: none; min-width: 78px; }
+  .job .jid { color: rgba(148,163,184,0.7); font-size: 11px; }
+  .job .when { margin-left: auto; color: rgba(148,163,184,0.7); font-size: 11px; }
   #ovimg { display: none; width: 100%; border-radius: var(--radius-md); border: 1px solid rgba(0,212,255,0.35);
            margin-top: 14px; cursor: zoom-in; box-shadow: 0 0 24px rgba(0,0,0,0.5); }
   .mini { font-size: 12px; color: var(--text-muted); font-family: var(--mono); }
-  footer { text-align: center; color: rgba(148,163,184,0.55); font-size: 12px; padding: 10px 0 28px; font-family: var(--mono); }
-  @media (max-width: 640px) {
-    .container { padding: 14px; gap: 16px; }
-    .panel { padding: 18px 16px; }
-    .widget-value { font-size: 21px; }
-    header { padding: 10px 14px; }
-    .header-sub { display: none; }
+  .nodesc { padding: 26px; text-align: center; color: var(--text-muted); font-size: 13px; }
+  .files { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .fileline { display: flex; gap: 10px; align-items: baseline; font-family: var(--mono); font-size: 11.5px;
+              padding: 7px 10px; border-radius: 6px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06); }
+  .fileline .k { color: var(--text-muted); flex: 0 0 132px; }
+  .fileline .p { color: #bfdbfe; word-break: break-all; }
+
+  /* ---- 底部：实时操作台 ---- */
+  .term {
+    grid-area: term; display: flex; flex-direction: column; min-height: 0;
+    background: rgba(2, 6, 23, 0.94); backdrop-filter: blur(18px);
+    border-top: 1px solid var(--border-highlight); box-shadow: 0 -8px 30px rgba(0,0,0,0.55);
+  }
+  .term-bar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; flex-wrap: nowrap; min-height: 42px; }
+  .term-led { width: 8px; height: 8px; border-radius: 50%; background: rgba(148,163,184,0.5); flex: none; }
+  .term-led.run { background: var(--primary); box-shadow: 0 0 10px var(--primary); animation: pulse 1.4s ease-in-out infinite; }
+  .term-led.ok { background: var(--success); box-shadow: 0 0 10px var(--success); }
+  .term-led.bad { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+  .term-title { font-size: 12px; font-weight: 800; letter-spacing: 1.5px; color: var(--primary); text-shadow: 0 0 8px rgba(0,212,255,0.4); white-space: nowrap; }
+  .term-stat { font-family: var(--mono); font-size: 12px; color: #cbd5e1; min-width: 0; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+  .term-stat .muted { color: rgba(148,163,184,0.8); }
+  .term-stat b { color: var(--primary); font-variant-numeric: tabular-nums; }
+  .term-track { flex: 0 0 150px; height: 6px; border-radius: 4px; background: rgba(0,0,0,0.65); overflow: hidden; border: 1px solid rgba(0,212,255,0.22); }
+  .term-track i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--accent)); transition: width .5s ease; }
+  .term-btn {
+    flex: none; padding: 5px 12px; font-size: 11.5px; font-family: var(--mono); letter-spacing: 0.5px;
+    background: transparent; border-color: rgba(0,212,255,0.32); color: var(--text-muted); box-shadow: none;
+  }
+  .term-btn:hover { transform: none; color: var(--text-main); border-color: var(--primary); background: rgba(0,212,255,0.1); box-shadow: none; }
+  .term-btn.on { color: var(--primary); border-color: var(--border-highlight); background: rgba(0,212,255,0.12); }
+  .term-body { border-top: 1px solid rgba(0,212,255,0.12); height: var(--term-h); overflow: hidden; transition: height .28s ease; }
+  /* 折叠：高度必须真的收成 0（这里用 .term .term-body 提高优先级，避免被上面的 height 规则压住） */
+  .term.collapsed .term-body { height: 0; border-top-color: transparent; }
+  #termout {
+    margin: 0; height: 100%; max-height: none; border: 0; border-radius: 0; background: rgba(0,0,0,0.5);
+    padding: 10px 16px 14px; font-size: 11.5px; line-height: 1.6; overflow: auto; white-space: pre-wrap; color: #cbd5e1;
+  }
+  #termout .ln { display: block; }
+  #termout .ln::before { content: ''; margin-right: 0; }
+  .ln-cmd { color: var(--primary); }
+  .ln-ok { color: #6ee7a5; }
+  .ln-err { color: #fca5a5; }
+  .ln-warn { color: #fcd34d; }
+  .ln-dim { color: rgba(148,163,184,0.85); }
+
+  /* ---- 设置抽屉 ---- */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(1, 4, 15, 0.62); backdrop-filter: blur(3px);
+    z-index: 900; opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  .scrim.show { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 94vw); z-index: 910;
+    background: rgba(4, 12, 30, 0.96); backdrop-filter: blur(20px); border-left: 1px solid var(--border-highlight);
+    box-shadow: -20px 0 60px rgba(0,0,0,0.7); transform: translateX(100%); transition: transform .3s cubic-bezier(0.4,0,0.2,1);
+    display: flex; flex-direction: column;
+  }
+  .drawer.show { transform: translateX(0); }
+  .drawer::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+                    background: linear-gradient(to bottom, var(--primary), var(--accent)); }
+  .drawer-head { display: flex; align-items: center; gap: 12px; padding: 16px 22px; border-bottom: 1px solid var(--border); flex: none; }
+  .drawer-head h2 { font-size: 17px; }
+  .drawer-body { flex: 1 1 auto; overflow-y: auto; padding: 16px 22px 28px; }
+  .drawer-sec { margin-bottom: 22px; }
+  .drawer-sec .sec-t { font-size: 11px; font-weight: 800; letter-spacing: 2px; color: var(--primary); text-transform: uppercase; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .drawer-sec .sec-t::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, var(--border-highlight), transparent); }
+  .drawer-sec .desc { font-size: 12px; margin: 0 0 10px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 24px); z-index: 999;
+    background: rgba(2, 6, 23, 0.96); border: 1px solid var(--border-highlight); border-radius: var(--radius-md);
+    padding: 12px 20px; font-size: 13px; box-shadow: 0 0 30px rgba(0,212,255,0.35); opacity: 0;
+    pointer-events: none; transition: var(--transition-all); max-width: 80vw;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.warn { border-color: rgba(245,158,11,0.7); box-shadow: 0 0 30px rgba(245,158,11,0.3); }
+  .toast.bad { border-color: rgba(239,68,68,0.7); box-shadow: 0 0 30px rgba(239,68,68,0.3); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---- 窄屏 900px 及以下：顶栏换行、侧栏变横向步骤条、控制台变矮 ---- */
+  @media (max-width: 900px) {
+    body { overflow: auto; }
+    .app { height: auto; min-height: 100vh; }
+    .brand { display: none; }
+    .topbar { flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+    .next-box { flex: 1 1 100%; order: 3; min-width: 0; }
+    .statbar { flex: 1 1 auto; overflow-x: auto; }
+    .icon-btn { margin-left: auto; }
+    .side { border-right: 0; border-bottom: 1px solid var(--border); }
+    .side-scroll { padding: 8px 10px; }
+    .side-label { display: none; }
+    .steplist { flex-direction: row; overflow-x: auto; gap: 8px; padding-bottom: 4px; }
+    .steplist::before { display: none; }
+    .snav { flex: 0 0 auto; width: auto; grid-template-columns: 24px auto auto; padding: 7px 10px; }
+    .snav-title { font-size: 12px; }
+    .snav-sub { display: none; }
+    .snum { width: 24px; height: 24px; font-size: 12px; }
+    .side-foot { display: none; }
+    .main { padding: 14px 12px; overflow: visible; }
+    .ws { gap: 12px; }
+    .panel { padding: 16px 14px; }
+    .term { position: sticky; bottom: 0; --term-h: 168px; }
+    .term-title { display: none; }
+    .term-track { flex: 0 0 80px; }
+    .drawer { width: 100vw; }
+  }
+  /* 900~1320px：一行放不下时，状态条折到第二行，别把「下一步」文字挤没 */
+  @media (max-width: 1320px) and (min-width: 901px) {
+    .topbar { flex-wrap: wrap; row-gap: 8px; }
+    .next-box { flex: 1 1 100%; order: 3; }
+    .statbar { flex: 1 1 auto; width: auto; max-width: calc(100% - 48px); overflow-x: auto; }
+    .icon-btn { margin-left: 0; }
   }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="header-title">
-    <span class="header-title-text">UE5 Synth Data</span>
-    <span class="header-sub">感知合成数据 · 出图流水线</span>
-  </div>
-  <div class="project-switch-box">
-    <span>状态</span><span id="clock">–</span>
-  </div>
-</header>
+<div class="app">
 
-<div class="container">
-
-  <div class="banner" id="banner">
-    <span class="now" id="nowStep">下一步</span>
-    <span class="banner-text" id="nextText">正在读取状态…</span>
-  </div>
-
-  <section class="panel">
-    <div class="section-label">运行总览</div>
-    <div class="widget-grid">
-      <div class="widget"><span class="widget-title">已出图 / 计划</span><span class="widget-value" id="ovDone">–</span></div>
-      <div class="widget"><span class="widget-title">渲染状态</span><span class="widget-value" id="ovRender">–</span></div>
-      <div class="widget"><span class="widget-title">显卡（显存 / 温度）</span><span class="widget-value" id="ovGpu">–</span></div>
-      <div class="widget"><span class="widget-title">磁盘剩余</span><span class="widget-value" id="ovDisk">–</span></div>
+  <!-- 品牌区 -->
+  <div class="brand">
+    <div class="brand-mark"></div>
+    <div>
+      <div class="brand-title">UE5 SYNTH DATA</div>
+      <div class="brand-sub" id="brandSub">感知合成数据 · 出图操作台</div>
     </div>
-    <div class="hint mini" id="advice" style="margin-top:14px">–</div>
-    <div class="progress"><i id="pRender"></i></div>
-    <div class="prog-label" id="pRenderTxt">0%</div>
-  </section>
+  </div>
 
-  <section class="panel step" id="s1">
-    <div class="step-head"><span class="step-num" id="n1">1</span><div class="step-body">
-      <h2>检查这台机器<span class="pill" id="p1">待做</span></h2>
-      <p class="desc">看看显卡、驱动、磁盘能不能用。第一次用必须点一次，几秒钟就好，不会改动任何东西（已经出过图的机器可以跳过）。</p>
-      <div class="row"><button onclick="doEnv()">开始检查</button></div>
-      <div class="out" id="r1"></div>
-    </div></div>
-  </section>
+  <!-- 顶栏：下一步提示 + 硬件状态条 -->
+  <div class="topbar">
+    <div class="next-box" id="nextBox" role="button" tabindex="0" title="点击跳到该步骤" onclick="gotoNext()">
+      <span class="next-tag" id="nextTag">载入中</span>
+      <span class="next-text" id="nextText">正在读取服务器状态…</span>
+    </div>
+    <div class="statbar" id="statbar">
+      <span class="stat" id="stGpu"><span>GPU</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stMem"><span>显存</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stUtil"><span>利用率</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stTemp"><span>温度</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stDisk"><span>磁盘</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stSession"><span>渲染会话</span><b>--</b></span>
+      <span class="stat-sep"></span>
+      <span class="stat" id="stClock"><b>--</b></span>
+    </div>
+    <button class="icon-btn" id="btnSettings" onclick="openDrawer()" title="设置 / 高级操作" aria-label="设置">⚙</button>
+  </div>
 
-  <section class="panel step" id="s2">
-    <div class="step-head"><span class="step-num" id="n2">2</span><div class="step-body">
-      <h2>生成拍摄清单<span class="pill" id="p2">待做</span></h2>
-      <p class="desc">决定这一批要拍哪些画面（路段、天气、目标、相机）。用默认配置直接点就行，不用改。</p>
-      <div class="row"><button onclick="doQueue()">生成清单</button><span class="mini" id="qinfo"></span></div>
-      <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
-        <label>配置目录（scenes/lights/targets/cameras 四个 json 所在目录）</label><input id="q_dir" placeholder="留空 = 用服务器配置">
-        <div class="row"><div style="flex:1"><label>随机种子（同一种子结果可复现）</label><input id="q_seed" placeholder="留空 = 20261113"></div>
-        <div style="flex:2"><label>清单输出文件</label><input id="q_out" placeholder="留空 = 用服务器配置"></div></div>
-      </details>
-      <div class="out" id="r2"></div>
-    </div></div>
-  </section>
-
-  <section class="panel step" id="s3">
-    <div class="step-head"><span class="step-num" id="n3">3</span><div class="step-body">
-      <h2>开始出图<span class="pill" id="p3">待做</span></h2>
-      <p class="desc">机器会一张一张渲染，很慢是正常的。可以关掉这个网页，出图不会停；下次打开点同一个按钮会接着上次继续，不会重拍。</p>
-      <div class="row">
-        <button class="primary" onclick="doRender()">开始出图 / 继续出图</button>
-        <button class="danger" onclick="doStop()">停止出图</button>
+  <!-- 左导航：步骤条 -->
+  <aside class="side">
+    <div class="side-scroll">
+      <div class="side-label">Pipeline · 流水线步骤</div>
+      <nav class="steplist" id="steplist"></nav>
+    </div>
+    <div class="side-foot">
+      <div class="rail-mini">
+        <span id="railPct">0%</span>
+        <span class="mini-progress"><i id="railBar"></i></span>
+        <span id="railCnt">0/0</span>
       </div>
-      <div class="ready" id="ready3" style="display:none"></div>
-      <div class="progress"><i id="pRender2"></i></div>
-      <div class="prog-label" id="pRender2Txt">0%</div>
-      <div class="out" id="r3"></div>
-    </div></div>
-  </section>
+    </div>
+  </aside>
 
-  <section class="panel step" id="s4">
-    <div class="step-head"><span class="step-num" id="n4">4</span><div class="step-body">
-      <h2>把原图变成“训练能用的照片”<span class="pill" id="p4">待做</span></h2>
-      <p class="desc">给渲染图加曝光、噪声、暗角、模糊，让它更像真车拍的。原图会保留，这一步可以反复跑。</p>
-      <div class="row"><button onclick="doPost()">开始处理</button></div>
-      <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
-        <div class="row"><div style="flex:1"><label>只处理前 N 张（0 或留空 = 全部）</label><input id="p_limit" value="0"></div>
-        <div style="flex:2"><label>实拍参考图目录（用于调色，可留空）</label><input id="p_real" placeholder="留空 = 跳过调色"></div></div>
-      </details>
-      <div class="progress"><i id="pPost"></i></div>
-      <div class="prog-label" id="pPostTxt">0%</div>
-      <div class="out" id="r4"></div>
-    </div></div>
-  </section>
+  <!-- 主区：单步工作区 -->
+  <main class="main" id="main">
+    <div class="ws">
 
-  <section class="panel step" id="s5">
-    <div class="step-head"><span class="step-num" id="n5">5</span><div class="step-body">
-      <h2>打包成训练集<span class="pill" id="p5">待做</span></h2>
-      <p class="desc">把标注整理成训练框架认识的格式，并自动分成“训练用”和“验证用”两份。</p>
-      <div class="row">
-        <select id="p_fmt" style="max-width:240px"><option value="coco">通用格式（COCO）</option><option value="yolo">YOLO 格式</option></select>
-        <button onclick="doPack()">打包训练集</button>
+      <!-- ===== 第 1 步：检查机器 ===== -->
+      <section class="ws-step" id="step-1" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-1">1</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>检查这台机器</h2><span class="pill" id="p1">待做</span>
+              <span class="mini" id="s1when"></span></div>
+            <p class="desc">看看显卡、驱动、磁盘能不能用。第一次用必须点一次，几秒钟就好，不会改动任何东西（已经出过图的机器可以跳过）。</p>
+          </div>
+        </div>
+        <div class="row tight" style="margin-top:4px">
+          <button class="primary big" onclick="doEnv()">开始检查</button>
+          <button class="secondary" onclick="doDryrun()">顺便跑脚本自检</button>
+          <span class="mini">自检约 10 秒，只验脚本本身，不会真的出图</span>
+        </div>
+        <div class="panel">
+          <div class="grid-sum">
+            <div class="mini-kpi"><span class="t">显卡</span><span class="v" id="k1gpu">–</span><span class="s" id="k1gpus">未读到</span></div>
+            <div class="mini-kpi"><span class="t">显存 / 温度</span><span class="v" id="k1mem">–</span><span class="s">nvidia-smi</span></div>
+            <div class="mini-kpi"><span class="t">磁盘剩余</span><span class="v" id="k1disk">–</span><span class="s" id="k1disks">/data</span></div>
+            <div class="mini-kpi"><span class="t">内存可用</span><span class="v" id="k1ram">–</span><span class="s" id="k1rams">/proc/meminfo</span></div>
+          </div>
+          <div id="r1"></div>
+        </div>
+      </section>
+
+      <!-- ===== 第 2 步：生成拍摄清单 ===== -->
+      <section class="ws-step" id="step-2" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-2">2</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>生成拍摄清单</h2><span class="pill" id="p2">待做</span>
+              <span class="mini" id="s2when"></span></div>
+            <p class="desc">决定这一批要拍哪些画面（路段、天气、目标、相机）。用默认配置直接点就行，不用改。</p>
+          </div>
+        </div>
+        <div class="row tight" style="margin-top:4px">
+          <button class="primary big" onclick="doQueue()">生成清单</button>
+          <span class="mini" id="qinfo"></span>
+        </div>
+        <div class="panel">
+          <div class="grid-sum">
+            <div class="mini-kpi"><span class="t">计划拍摄</span><span class="v" id="k2total">–</span><span class="s" id="k2file">清单文件</span></div>
+            <div class="mini-kpi"><span class="t">清单里共</span><span class="v" id="k2unit">–</span><span class="s">按行计数</span></div>
+            <div class="mini-kpi"><span class="t">配置目录</span><span class="v" id="k2cfg" style="font-size:12px;word-break:break-all">–</span><span class="s">scenes / lights / targets / cameras</span></div>
+          </div>
+          <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+            <label>配置目录（scenes/lights/targets/cameras 四个 json 所在目录）</label><input id="q_dir" placeholder="留空 = 用服务器配置">
+            <div class="row"><div style="flex:1"><label>随机种子（同一种子结果可复现）</label><input id="q_seed" placeholder="留空 = 20261113"></div>
+            <div style="flex:2"><label>清单输出文件</label><input id="q_out" placeholder="留空 = 用服务器配置"></div></div>
+          </details>
+          <div id="r2"></div>
+        </div>
+      </section>
+
+      <!-- ===== 第 3 步：开始出图 ===== -->
+      <section class="ws-step" id="step-3" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-3">3</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>开始出图</h2><span class="pill" id="p3">待做</span>
+              <span class="mini" id="s3when"></span></div>
+            <p class="desc">机器会一张一张渲染，很慢是正常的。可以关掉这个网页，出图不会停；下次打开点同一个按钮会接着上次继续，不会重拍。</p>
+          </div>
+        </div>
+        <div class="ready" id="ready3" style="display:none"></div>
+        <div class="row tight" style="margin-top:4px">
+          <button class="primary big" onclick="doRender()">开始出图 / 继续出图</button>
+          <button class="danger" onclick="doStop()">停止出图</button>
+          <span class="mini" id="renderHint"></span>
+        </div>
+        <div class="panel">
+          <div class="grid-sum">
+            <div class="mini-kpi"><span class="t">已完成 / 计划</span><span class="v" id="k3done">–</span><span class="s" id="k3sub">帧进度</span></div>
+            <div class="mini-kpi"><span class="t">预计剩余</span><span class="v" id="k3left">–</span><span class="s" id="k3lefts">按最近速度估算</span></div>
+            <div class="mini-kpi"><span class="t">渲染会话</span><span class="v" id="k3sess">–</span><span class="s">tmux: ue5_render</span></div>
+            <div class="mini-kpi"><span class="t">当前帧</span><span class="v" id="k3frame" style="font-size:14px">–</span><span class="s" id="k3frames">实时日志尾</span></div>
+          </div>
+          <div class="progress"><i id="pRender"></i></div>
+          <div class="prog-label" id="pRenderTxt">渲染进度 0%</div>
+          <div id="r3"></div>
+        </div>
+      </section>
+
+      <!-- ===== 第 4 步：后处理 ===== -->
+      <section class="ws-step" id="step-4" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-4">4</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>把原图变成“训练能用的照片”</h2><span class="pill" id="p4">待做</span>
+              <span class="mini" id="s4when"></span></div>
+            <p class="desc">给渲染图加曝光、噪声、暗角、模糊，让它更像真车拍的。原图会保留，这一步可以反复跑。</p>
+          </div>
+        </div>
+        <div class="row tight" style="margin-top:4px">
+          <button class="primary big" onclick="doPost()">开始处理</button>
+          <span class="mini" id="postHint"></span>
+        </div>
+        <div class="panel">
+          <div class="grid-sum">
+            <div class="mini-kpi"><span class="t">需处理（原图）</span><span class="v" id="k4raw">–</span><span class="s" id="k4raws">raw 目录</span></div>
+            <div class="mini-kpi"><span class="t">已处理</span><span class="v" id="k4fin">–</span><span class="s" id="k4fins">final 目录 .png</span></div>
+            <div class="mini-kpi"><span class="t">处理进度</span><span class="v" id="k4pct">–</span><span class="s">final ÷ 需处理</span></div>
+          </div>
+          <div class="progress"><i id="pPost"></i></div>
+          <div class="prog-label" id="pPostTxt">后处理进度 0%</div>
+          <details class="mini-adv"><summary>要改参数？（不懂就留空）</summary>
+            <div class="row"><div style="flex:1"><label>只处理前 N 张（0 或留空 = 全部）</label><input id="p_limit" value="0"></div>
+            <div style="flex:2"><label>实拍参考图目录（用于调色，可留空）</label><input id="p_real" placeholder="留空 = 跳过调色"></div></div>
+          </details>
+          <div id="r4"></div>
+        </div>
+      </section>
+
+      <!-- ===== 第 5 步：打包训练集 ===== -->
+      <section class="ws-step" id="step-5" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-5">5</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>打包成训练集</h2><span class="pill" id="p5">待做</span>
+              <span class="mini" id="s5when"></span></div>
+            <p class="desc">把标注整理成训练框架认识的格式，并自动分成“训练用”和“验证用”两份。</p>
+          </div>
+        </div>
+        <div class="row tight" style="margin-top:4px">
+          <select id="p_fmt" style="max-width:240px"><option value="coco">通用格式（COCO）</option><option value="yolo">YOLO 格式</option></select>
+          <button class="primary big" onclick="doPack()">打包训练集</button>
+          <span class="mini" id="packHint"></span>
+        </div>
+        <div class="panel">
+          <div class="grid-sum">
+            <div class="mini-kpi"><span class="t">训练集</span><span class="v" id="k5ready">–</span><span class="s" id="k5dir">dataset 目录</span></div>
+            <div class="mini-kpi"><span class="t">可用于打包的图</span><span class="v" id="k5final">–</span><span class="s">final 目录 .png</span></div>
+          </div>
+          <div id="r5"></div>
+        </div>
+      </section>
+
+      <!-- ===== 第 6 步：抽检 ===== -->
+      <section class="ws-step" id="step-6" hidden>
+        <div class="ws-head">
+          <span class="ws-num" id="wnum-6">6</span>
+          <div style="flex:1;min-width:0">
+            <div class="ws-titlebar"><h2>抽几张看看框得准不准</h2><span class="pill" id="p6">待做</span>
+              <span class="mini" id="s6when"></span></div>
+            <p class="desc">把标注框画到图上、拼成一张 20 张的图。框贴不贴边、有没有跑偏，一眼就能看出来。</p>
+          </div>
+        </div>
+        <div class="row tight" style="margin-top:4px">
+          <button class="primary big" onclick="doOverlay()">生成抽检图</button>
+          <span class="mini" id="oinfo"></span>
+        </div>
+        <div class="panel">
+          <img id="ovimg" alt="抽检拼图" onclick="window.open(this.src,'_blank')">
+          <div class="nodesc" id="ovempty">还没有抽检图。先完成第 4 步处理，再回来点「生成抽检图」。</div>
+          <details class="mini-adv"><summary>要改数量？</summary><label>抽检多少张</label><input id="o_limit" value="20"></details>
+          <div id="r6"></div>
+        </div>
+      </section>
+
+      <!-- 步骤间导航 -->
+      <div class="row" style="margin-top:2px">
+        <button class="secondary" id="btnPrev" onclick="moveStep(-1)">← 上一步</button>
+        <button class="secondary" id="btnNext" onclick="moveStep(1)">下一步 →</button>
+        <span class="spacer"></span>
+        <span class="mini" id="stepCount">1 / 6</span>
+        <button class="secondary" onclick="openDrawer()">⚙ 高级与设置</button>
       </div>
-      <div class="out" id="r5"></div>
-    </div></div>
-  </section>
 
-  <section class="panel step" id="s6">
-    <div class="step-head"><span class="step-num" id="n6">6</span><div class="step-body">
-      <h2>抽几张看看框得准不准<span class="pill" id="p6">待做</span></h2>
-      <p class="desc">把标注框画到图上、拼成一张 20 张的图。框贴不贴边、有没有跑偏，一眼就能看出来。</p>
-      <div class="row"><button onclick="doOverlay()">生成抽检图</button><span class="mini" id="oinfo"></span></div>
-      <details class="mini-adv"><summary>要改数量？</summary><label>抽检多少张</label><input id="o_limit" value="20"></details>
-      <img id="ovimg" alt="抽检拼图" onclick="window.open(this.src,'_blank')">
-      <div class="out" id="r6"></div>
-    </div></div>
-  </section>
-
-  <section class="panel">
-    <div class="section-label">出问题了？看这里</div>
-    <p class="desc">红字看不懂没关系，把下面的内容复制发给出图的人就行。先看“渲染日志”和“单帧错误”。</p>
-    <div class="row">
-      <button class="secondary" onclick="loadLog('batch.log')">渲染日志</button>
-      <button class="secondary" onclick="loadLog('capture_errors.log')">单帧错误</button>
-      <button class="secondary" onclick="loadLog('gpu_watch.csv')">显卡记录</button>
     </div>
-    <pre id="logout">点上面的按钮查看日志</pre>
-    <details><summary>最近的作业记录（点一条看输出，也可以停止它）</summary>
-      <div id="jobs" class="mini">还没有作业记录</div>
-      <div class="row"><span class="mini" id="seljob">未选择</span><button class="danger" onclick="killSel()">停止所选作业</button></div>
-      <pre id="jobout">点上面一条记录看它的输出</pre>
-    </details>
+  </main>
+
+  <!-- 底部：实时操作台 -->
+  <section class="term" id="term">
+    <div class="term-bar">
+      <span class="term-led" id="termLed"></span>
+      <span class="term-title">LIVE CONSOLE</span>
+      <span class="term-stat" id="termStat"><span class="muted">还没有作业。点任意步骤的按钮，日志会实时出现在这里。</span></span>
+      <span class="term-track"><i id="termBar"></i></span>
+      <button class="term-btn" id="btnTermJobs" onclick="openDrawer('jobs')">作业记录</button>
+      <button class="term-btn" id="btnTermLog" onclick="openDrawer('logs')">日志文件</button>
+      <button class="term-btn" id="btnTermFollow" onclick="toggleFollow()">跟随 ON</button>
+      <button class="term-btn" id="btnTermToggle" onclick="toggleTerm()">▼ 收起</button>
+    </div>
+    <div class="term-body">
+      <pre id="termout" aria-live="polite">[操作台就绪] 这里显示当前作业的日志尾，默认自动跟随最新行。</pre>
+    </div>
   </section>
 
-  <details class="panel">
-    <summary style="font-size:15px;font-weight:700;color:var(--text-main)">高级操作（不懂就别点）</summary>
-    <div class="adv-grid">
-      <div class="adv-item"><h3>编译引擎（只做一次）</h3><p>第一次用才需要，要 1~3 小时，会把内存吃满。编译时不要出图。</p>
-        <button class="secondary" onclick="doCompile()">开始编译</button><div class="out" id="radv"></div></div>
-      <div class="adv-item"><h3>工程检查</h3><p>从 Windows 拷过来的工程有没有大小写不一致（否则 Ubuntu 加载会报资产找不到）。</p>
-        <button class="secondary" onclick="doCaseCheck()">检查工程</button><div class="out" id="radv2"></div></div>
-      <div class="adv-item"><h3>脚本自检</h3><p>检查脚本本身有没有坏，不会真的出图，约 10 秒。</p>
-        <button class="secondary" onclick="doDryrun()">跑自检</button><div class="out" id="radv3"></div></div>
-      <div class="adv-item"><h3>显卡记录</h3><p>每秒记一次显存和温度，出图卡顿时用来看是不是显存爆了。</p>
-        <button class="secondary" onclick="doGpuWatch()">开始记录</button><div class="out" id="radv4"></div></div>
-    </div>
-    <h3 style="margin-top:24px">配置（一般不用改，改完记得保存）</h3>
-    <div class="cfg-grid" id="cfgfields"></div>
-    <div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div>
-    <p class="mini" style="margin-top:10px">下面小灰字是配置项的真实名字，方便对照文档。</p>
-  </details>
-
-  <footer>UE5 感知合成数据 · 操作台（零依赖单文件）｜每 5 秒自动刷新 · 关掉网页不影响后台作业</footer>
 </div>
+
+<!-- 设置抽屉 -->
+<div class="scrim" id="scrim" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" aria-label="设置与高级操作">
+  <div class="drawer-head">
+    <h2>设置与高级操作</h2>
+    <span class="pill" id="drawerCfgBadge">默认隐藏</span>
+    <span class="spacer"></span>
+    <button class="icon-btn close" onclick="closeDrawer()" aria-label="关闭" title="关闭 (Esc)">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-sec">
+      <div class="sec-t">高级操作（不懂就别点）</div>
+      <p class="desc">这些动作平时用不到，出问题时或首次部署才需要。</p>
+      <div class="adv-grid">
+        <div class="adv-item"><h3>编译引擎（只做一次）</h3><p>第一次用才需要，要 1~3 小时，会把内存吃满。编译时不要出图。</p>
+          <button class="secondary" onclick="doCompile()">开始编译</button><div class="out" id="radv"></div></div>
+        <div class="adv-item"><h3>工程检查</h3><p>从 Windows 拷过来的工程有没有大小写不一致（否则 Ubuntu 加载会报资产找不到）。</p>
+          <button class="secondary" onclick="doCaseCheck()">检查工程</button><div class="out" id="radv2"></div></div>
+        <div class="adv-item"><h3>脚本自检</h3><p>检查脚本本身有没有坏，不会真的出图，约 10 秒。</p>
+          <button class="secondary" onclick="doDryrun()">跑自检</button><div class="out" id="radv3"></div></div>
+        <div class="adv-item"><h3>显卡记录</h3><p>每秒记一次显存和温度，出图卡顿时用来看是不是显存爆了。</p>
+          <button class="secondary" onclick="doGpuWatch()">开始记录</button><div class="out" id="radv4"></div></div>
+      </div>
+    </div>
+
+    <div class="drawer-sec" id="secJobs">
+      <div class="sec-t">作业记录（最近 12 条）</div>
+      <p class="desc">点一条把它的日志打到下面，或灌进底部操作台。停止作业需要二次确认。</p>
+      <div id="jobs" class="mini">还没有作业记录</div>
+      <div class="row"><span class="mini" id="seljob">未选择</span>
+        <button class="secondary" onclick="tailSel()">灌进操作台</button>
+        <button class="danger" onclick="killSel()">停止所选作业</button></div>
+      <pre id="jobout">点上面一条记录看它的输出</pre>
+    </div>
+
+    <div class="drawer-sec" id="secLogs">
+      <div class="sec-t">日志文件</div>
+      <p class="desc">红字看不懂没关系，把下面的内容复制发给出图的人就行。先看“渲染日志”和“单帧错误”。</p>
+      <div class="row tight">
+        <button class="secondary" onclick="loadLog('batch.log')">渲染日志</button>
+        <button class="secondary" onclick="loadLog('capture_errors.log')">单帧错误</button>
+        <button class="secondary" onclick="loadLog('gpu_watch.csv')">显卡记录</button>
+      </div>
+      <pre id="logout">点上面的按钮查看日志</pre>
+    </div>
+
+    <div class="drawer-sec">
+      <div class="sec-t">配置（一般不用改，改完记得保存）</div>
+      <div class="cfg-grid" id="cfgfields"></div>
+      <div class="row"><button onclick="saveCfg()">保存配置</button><span class="mini" id="cfgst"></span></div>
+      <p class="mini" style="margin-top:10px">下面小灰字是配置项的真实名字，方便对照文档。</p>
+    </div>
+
+    <div class="drawer-sec">
+      <div class="sec-t">产物位置</div>
+      <div class="files" id="filePaths"></div>
+    </div>
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
 
 <script>
 var $=function(i){return document.getElementById(i)};
@@ -376,11 +755,31 @@ var $v=function(i){return ($(i)&&$(i).value||'').trim()};
 function api(p,m,b){return fetch(p,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json()})}
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
+/* ===== 状态 ===== */
 var S={cfg:{},jobs:[]}, CFG_DONE=false, JOB_CACHE={}, ACTIVE={}, SELJOB=null;
+var CUR=1, NSTEP=6, NEXTN=1, TERM_JID='', TERM_FOLLOW=true, TERM_LAST='', TERM_TIMER=null;
+var STEP_DESC={
+  1:{title:'检查机器',sub:'显卡 / 磁盘 / 驱动'},
+  2:{title:'生成拍摄清单',sub:'场景 × 天气 × 目标'},
+  3:{title:'开始出图',sub:'UE 逐帧渲染'},
+  4:{title:'后处理',sub:'曝光 / 噪声 / 暗角'},
+  5:{title:'打包训练集',sub:'COCO / YOLO'},
+  6:{title:'抽检标注',sub:'框准不准'}
+};
 var CFG_LABELS={scripts_dir:'脚本目录',queue_file:'拍摄清单文件',done_dir:'已完成标记目录',raw_dir:'原始图目录',meta_dir:'标注真值目录',final_dir:'处理后的图目录',dataset_dir:'训练集目录',uproject:'UE 工程文件',ue_dir:'UE 引擎目录',logs_dir:'日志目录',queue_cfg_dir:'拍摄配置目录',project_dir:'工程目录',real_dir:'实拍参考图目录（可空）',overlay_dir:'抽检图目录'};
 var ACTION_NAMES={envcheck:'检查机器',queue_gen:'生成清单',render_start:'开始出图',render_stop:'停止出图',post:'处理图',pack:'打包训练集',overlay:'生成抽检图',compile:'编译引擎',case_check:'工程检查',dryrun:'脚本自检',gpu_watch:'显卡记录'};
+/* 动作用在哪个步骤（控制台状态行要显示「哪一步在跑」） */
+var ACTION_STEP={envcheck:1,queue_gen:2,render_start:3,render_stop:3,post:4,pack:5,overlay:6,compile:0,case_check:0,dryrun:0,gpu_watch:0};
+/* 结果写到哪个容器（契约与原 v2 一致：radv 系列在设置抽屉里） */
+var RES_EL={envcheck:'r1',queue_gen:'r2',post:'r4',pack:'r5',overlay:'r6',compile:'radv',case_check:'radv2',dryrun:'radv3',gpu_watch:'radv4'};
 
 function actionName(a){return ACTION_NAMES[a]||a}
+/* 数值字段的统一渲染：-1 / null / undefined 一律当「这台机器读不到」，显示成 N/A，而不是 -- / undefined。
+   /api/status 在 Windows 或缺少 nvidia-smi 时正是这么返回的（mem_*_g = -1、gpu = null）。 */
+function num(v,dec,unit){
+  if(v===null||v===undefined||v===''||typeof v!=='number'||isNaN(v)||v<0)return 'N/A';
+  return (dec?(+v).toFixed(dec):String(v))+(unit||'');
+}
 function latest(action){for(var i=0;i<S.jobs.length;i++){if(S.jobs[i].action===action)return S.jobs[i]}return null}
 function newestOf(list){
   var best=null;
@@ -391,13 +790,19 @@ function newestOf(list){
   return best;
 }
 function pill(id,txt,cls){var e=$(id);if(!e)return;e.textContent=txt;e.className='pill '+(cls||'')}
-function setStepNum(id,done){var e=$(id);if(e)e.className='step-num'+(done?' done':'')}
 function setProgress(barId,txtId,pct,label){
   var b=$(barId);if(b)b.style.width=pct+'%';
   var t=$(txtId);if(t)t.textContent=(label||'')+' '+pct+'%';
 }
+function toast(msg,cls){
+  var t=$('toast');if(!t)return;
+  t.textContent=msg;t.className='toast show '+(cls||'');
+  clearTimeout(t.__tm);t.__tm=setTimeout(function(){t.className='toast '+(cls||'');},3200);
+}
 
+/* ===== 结果块 ===== */
 function setResult(el,cls,txt,out){
+  if(!el)return;
   el.innerHTML='';
   var d=document.createElement('div');d.className='res '+(cls||'');d.textContent=txt;el.appendChild(d);
   if(out){var det=document.createElement('details');var s=document.createElement('summary');s.textContent='技术细节（出问题才需要看）';
@@ -441,6 +846,181 @@ function summarize(action,j){
   return {cls:ok?'ok':'bad',text:ok?'完成。':'出错了，看下面原因。'};
 }
 
+/* ===== 底部操作台 ===== */
+function classifyLine(s){
+  if(/^\$ /.test(s)||/^\[启动 /.test(s))return 'ln-cmd';
+  if(/FAIL|Error|error|Traceback|失败|错误|Exception/.test(s))return 'ln-err';
+  if(/PASS|通过|完成|done|OK\b|ok\b/.test(s))return 'ln-ok';
+  if(/WARN|warn|警告|跳过|skip/.test(s))return 'ln-warn';
+  return 'ln-dim';
+}
+function renderTerm(out){
+  out=(out==null||out==='')?'（暂无输出）':String(out);
+  if(out===TERM_LAST)return;
+  TERM_LAST=out;
+  var box=$('termout');if(!box)return;
+  var atBottom=(box.scrollHeight-box.scrollTop-box.clientHeight)<40;
+  var lines=out.split('\n');
+  var h='';
+  for(var i=0;i<lines.length;i++){h+='<span class="ln '+classifyLine(lines[i])+'">'+esc(lines[i])+'</span>';}
+  box.innerHTML=h;
+  if(TERM_FOLLOW||atBottom)box.scrollTop=box.scrollHeight;
+  /* 日志有变化就顺手刷「当前帧」：不用等下一个 5 秒轮询，控制台和步骤面板始终一致 */
+  paintFrameKpi();
+}
+/* 当前帧：最近一次出图作业的日志尾里抓 "<frame_id> (n/total)"，抓不到再退回操作台正在跟的那份 */
+function paintFrameKpi(){
+  var fr='',sub='实时日志尾';
+  var rjs=newestOf([latest('render_start'),latest('render_stop')]);
+  if(rjs&&JOB_CACHE[rjs.id]){
+    var tlf=termLines(JOB_CACHE[rjs.id].out);
+    if(tlf.frame)fr=tlf.frame;
+    else if(rjs.status==='running'){fr='等待首帧日志…';sub='渲染进程已启动';}
+  }
+  if(!fr){
+    var tlc=termLines(TERM_LAST);
+    if(tlc.frame){fr=tlc.frame;sub='操作台日志尾';}
+  }
+  var e=$('k3frame');if(e)e.textContent=fr||'–';
+  var s2=$('k3frames');if(s2)s2.textContent=sub;
+}
+function termLed(cls){var e=$('termLed');if(e)e.className='term-led '+(cls||'')}
+function setTermStat(html){var e=$('termStat');if(e)e.innerHTML=html}
+function setTermBar(pct){var e=$('termBar');if(e)e.style.width=Math.max(0,Math.min(100,pct))+'%'}
+
+function watchJob(id){
+  TERM_JID=id;TERM_LAST='';
+  if(TERM_TIMER){clearTimeout(TERM_TIMER);TERM_TIMER=null}
+  function tick(){
+    api('/api/job?id='+id).then(function(j){
+      JOB_CACHE[j.id]=j;
+      renderTerm(j.out);
+      var st=j.status;
+      if(st==='running'){termLed('run');setTimeout(tick,1500);}
+      else{termLed(st==='ok'?'ok':'bad');}
+    })['catch'](function(e){
+      termLed('bad');
+      setTermStat('<span class="muted">读取作业 '+esc(id)+' 失败：'+esc(String(e))+'</span>');
+    });
+  }
+  tick();
+}
+function toggleFollow(){
+  TERM_FOLLOW=!TERM_FOLLOW;
+  var b=$('btnTermFollow');if(b)b.textContent='跟随 '+(TERM_FOLLOW?'ON':'OFF');
+  if(TERM_FOLLOW){var box=$('termout');if(box)box.scrollTop=box.scrollHeight;}
+}
+function toggleTerm(force){
+  var t=$('term');if(!t)return;
+  var collapse=(typeof force==='boolean')?force:!t.classList.contains('collapsed');
+  t.classList.toggle('collapsed',collapse);
+  var b=$('btnTermToggle');if(b)b.textContent=collapse?'▲ 展开':'▼ 收起';
+}
+function termLines(out){
+  /* 从日志尾里找「当前帧」和百分比（出图时最有用的一行） */
+  var r={frame:'',pct:null,left:null};
+  if(!out)return r;
+  var fr=out.match(/([A-Za-z0-9_\-]+)\s+\(\d+\s*\/\s*\d+\)/g);
+  if(fr&&fr.length)r.frame=fr[fr.length-1].replace(/\s+/g,' ');
+  var m1=out.match(/(\d+)\s*\/\s*(\d+)/g);
+  if(m1&&m1.length){var a=m1[m1.length-1].match(/(\d+)\s*\/\s*(\d+)/);if(a)r.pct={a:parseInt(a[1],10),b:parseInt(a[2],10)};}
+  return r;
+}
+function updateTermHead(){
+  var jobs=S.jobs||[];
+  var running=null;
+  for(var i=0;i<jobs.length;i++){if(jobs[i].status==='running'){running=jobs[i];break;}}
+  /* 展示优先级：正在跑的作业 > 操作台当前锁定的作业 > 最近一条作业 */
+  var locked=null;
+  for(var k=0;k<jobs.length;k++){if(jobs[k].id===TERM_JID){locked=jobs[k];break;}}
+  var target=running||locked||jobs[0]||null;
+  /* /api/status 只给最近 12 条；操作台跟的作业可能已经被挤出列表，但 /api/job 还拿得到，
+     这种情况仍要显示它，否则一启动就"没有作业"、状态行消失。 */
+  if(!target&&TERM_JID&&JOB_CACHE[TERM_JID]){
+    var c=JOB_CACHE[TERM_JID];
+    target={id:c.id,action:c.action,status:c.status,started:c.started};
+  }
+  if(!target){
+    termLed('');
+    setTermStat('<span class="muted">还没有作业。点任意步骤的按钮，日志会实时出现在这里。</span>');
+    setTermBar(0);
+    return;
+  }
+  var det=JOB_CACHE[target.id];
+  if(!det){api('/api/job?id='+target.id).then(function(d){JOB_CACHE[d.id]=d;if(d.id===target.id)updateTermHead();})['catch'](function(){});}
+  var tl=det?termLines(det.out):{frame:''};
+  var done=S.tasks_done||0,total=S.tasks_total||0;
+  var pct=total?Math.min(100,Math.round(done*100/total)):0;
+  var remain=Math.max(0,total-done);
+  var isRender=(target.action==='render_start'||target.action==='render_stop');
+  var stTxt=target.status==='running'?'运行中':(target.status==='ok'?'已完成':'失败');
+  if(target.status==='running')termLed('run');
+  else if(target.id!==TERM_JID)termLed('');   /* 非用户刚发起的旧作业，不点亮灯 */
+  var h='<b>'+esc(actionName(target.action))+'</b> <span class="muted">· '+esc(stTxt)+' · '+esc(target.id)+'</span>';
+  if(isRender&&total){
+    /* 需求里的那一行：av_000123 渲染中 42% · 剩余 210 张 */
+    if(tl.frame)h+=' · <b>'+esc(tl.frame)+'</b>';
+    h+=' · <span>'+(target.status==='running'?'渲染中':'已停止')+'</span> <b>'+pct+'%</b>';
+    if(remain)h+=' · 剩余 <b>'+remain+'</b> 张';
+    setTermBar(pct);
+  }else if(target.status==='running'){
+    h+=' <span class="muted">· 日志跟随中…</span>';
+    setTermBar(0);
+  }else{
+    setTermBar(100);
+  }
+  var others=jobs.filter(function(x){return x.status==='running'&&x.id!==target.id});
+  if(others.length)h+=' <span class="muted">（另外 '+others.length+' 个作业在跑）</span>';
+  setTermStat(h);
+}
+
+/* ===== 步骤导航 & 工作区 ===== */
+function buildNav(){
+  var h='';
+  for(var i=1;i<=NSTEP;i++){
+    h+='<button class="snav" id="nav-'+i+'" data-step="'+i+'" data-state="todo" onclick="showStep('+i+')" title="'+esc(STEP_DESC[i].title)+'">'
+      +'<span class="snum" id="navnum-'+i+'">'+i+'</span>'
+      +'<span style="min-width:0"><span class="snav-title">'+esc(STEP_DESC[i].title)+'</span><span class="snav-sub" id="navsub-'+i+'">'+esc(STEP_DESC[i].sub)+'</span></span>'
+      +'<span class="sdot"></span></button>';
+  }
+  $('steplist').innerHTML=h;
+}
+function showStep(n){
+  if(!(n>=1&&n<=NSTEP))return;
+  CUR=n;
+  for(var i=1;i<=NSTEP;i++){
+    var sec=$('step-'+i);if(sec)sec.hidden=(i!==n);
+    var b=$('nav-'+i);if(b)b.classList.toggle('active',i===n);
+    var nm=$('wnum-'+i);
+    if(nm)nm.classList.toggle('done',b?b.getAttribute('data-state')==='done':false);
+  }
+  $('btnPrev').disabled=(n===1);
+  $('btnNext').disabled=(n===NSTEP);
+  $('stepCount').textContent=n+' / '+NSTEP;
+  var m=$('main');if(m)m.scrollTop=0;
+  try{history.replaceState(null,'','#'+n)}catch(e){}
+}
+function moveStep(d){showStep(CUR+d)}
+function gotoNext(){showStep(NEXTN)}
+
+/* ===== 设置抽屉 ===== */
+function openDrawer(sec){
+  $('scrim').classList.add('show');
+  $('drawer').classList.add('show');
+  if(sec){setTimeout(function(){var e=$(sec.indexOf('sec')===0?sec:'sec'+sec.charAt(0).toUpperCase()+sec.slice(1));
+    if(e)e.scrollIntoView({block:'start',behavior:'smooth'});},80);}
+}
+function closeDrawer(){
+  $('scrim').classList.remove('show');
+  $('drawer').classList.remove('show');
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape')closeDrawer();
+  if(e.key==='ArrowLeft'&&e.altKey)moveStep(-1);
+  if(e.key==='ArrowRight'&&e.altKey)moveStep(1);
+});
+
+/* ===== 执行作业 ===== */
 function pollJob(id,action,el){
   ACTIVE[action]=true;
   function tick(){
@@ -448,10 +1028,13 @@ function pollJob(id,action,el){
       JOB_CACHE[j.id]=j;
       var sm=summarize(action,j);
       setResult(el,sm.cls,sm.text,j.out);
+      /* 底部操作台：只有当前展示的作业才往里灌，避免串台 */
+      if(id===TERM_JID){renderTerm(j.out);termLed(j.status==='running'?'run':(j.status==='ok'?'ok':'bad'));}
       if(j.status==='running'){setTimeout(tick,1500);}
       else{
         ACTIVE[action]=false;
         if(action==='overlay'&&j.status==='ok')reloadOverlay();
+        if(id===TERM_JID)updateTermHead();
         refresh();
       }
     })['catch'](function(e){ACTIVE[action]=false;setResult(el,'bad','和服务器断了连接：'+e)});
@@ -460,13 +1043,33 @@ function pollJob(id,action,el){
 }
 
 function runStep(action,params,elId){
-  var el=$(elId);
+  var el=$(elId||RES_EL[action]);
   setResult(el,'run','已提交，正在启动…');
+  watchJob('');
   api('/api/run','POST',{action:action,params:params||{}}).then(function(r){
-    if(r.error){setResult(el,'bad',friendlyError(r.error));return;}
+    if(r.error){
+      setResult(el,'bad',friendlyError(r.error));
+      termLed('bad');
+      setTermStat('<b>'+esc(actionName(action))+'</b> <span class="muted">· 没能启动</span>');
+      renderTerm('[没能启动] '+actionName(action)+'\n'+friendlyError(r.error));
+      toast(friendlyError(r.error).split('\n')[0],'warn');
+      return;
+    }
+    /* 用户主动发起的这个作业 → 接管底部操作台 */
+    TERM_LAST='';
+    renderTerm('$ '+actionName(action)+'  已提交（作业 '+r.id+'）\n等待输出…');
+    setTermStat('<b>'+esc(actionName(action))+'</b> <span class="muted">· 运行中 · '+esc(r.id)+'</span>');
+    termLed('run');
+    setTermBar(0);
+    toggleTerm(false);  /* 有作业就把操作台展开：让"做什么"和"发生了什么"同屏 */
     pollJob(r.id,action,el);
+    watchJob(r.id);
     refresh();
-  })['catch'](function(e){setResult(el,'bad','连不上服务器：'+e)});
+  })['catch'](function(e){
+    setResult(el,'bad','连不上服务器：'+e);
+    termLed('bad');
+    renderTerm('[连接失败] '+e);
+  });
 }
 
 function doEnv(){runStep('envcheck',{},'r1')}
@@ -488,74 +1091,171 @@ function doDryrun(){runStep('dryrun',{},'radv3')}
 function doGpuWatch(){runStep('gpu_watch',{},'radv4')}
 
 function reloadOverlay(){$('ovimg').src='/api/overlay?t='+Date.now();$('ovimg').style.display='block';}
+function reloadOverlayNow(){reloadOverlay();toast('抽检图已刷新，点图可放大')}
 
+/* ===== 主刷新 ===== */
 function refresh(){
   api('/api/status').then(function(s){
     S=s;S.jobs=s.jobs||[];
-    if(!CFG_DONE){CFG_DONE=true;renderCfg(s.cfg);}
+    if(!CFG_DONE){CFG_DONE=true;renderCfg(s.cfg);renderPaths(s.cfg);}
     var done=s.tasks_done||0,total=s.tasks_total||0,fin=s.final_count||0;
-    $('clock').textContent=s.time;
+    var postReady=done>0&&fin>=done;
 
-    $('ovDone').textContent=total?(done+' / '+total):'—';
-    $('ovRender').textContent=s.render_running?'ON':'IDLE';
-    $('ovRender').className='widget-value '+(s.render_running?'warn':(total&&done>=total?'ok':''));
-    var g=s.gpu,adv=[],gpuCls='';
+    /* --- 顶栏硬件状态条 --- */
+    $('stClock').innerHTML='<b>'+esc((s.time||'--').replace(/^\d{4}-/,'').replace(/:\d\d$/,''))+'</b>';
+    var g=s.gpu;
     if(g){
-      $('ovGpu').textContent=g.mem_mb+'M / '+g.temp+'°C';
-      if(g.temp>=85){adv.push('显卡有点烫（'+g.temp+'°C），最好先停一会儿散热。');gpuCls='bad';}
-      else if(g.mem_mb>=10500){adv.push('显存快满了（'+g.mem_mb+'M），出图可能变慢或失败。');gpuCls='warn';}
-      else if(g.util>0){adv.push('显卡正在干活，正常。');gpuCls='ok';}
-      else adv.push('显卡空闲。');
+      $('stGpu').innerHTML='<span>GPU</span><b>'+esc(String(g.name||'').replace(/^NVIDIA\s+/,'').replace(/GeForce\s+/,''))+'</b>';
+      $('stGpu').className='stat ok';
+      $('stMem').innerHTML='<span>显存</span><b>'+(g.mem_mb/1024).toFixed(1)+'G</b>';
+      $('stUtil').innerHTML='<span>利用率</span><b>'+g.util+'%</b>';
+      $('stTemp').innerHTML='<span>温度</span><b>'+g.temp+'°C</b>';
+      var memBad=g.mem_mb>=10500;
+      $('stMem').className='stat '+(memBad?'bad':'');
+      $('stTemp').className='stat '+(g.temp>=85?'bad':(g.temp>=78?'warn':''));
+      $('stUtil').className='stat '+(g.util>0?'ok':'');
     }else{
-      $('ovGpu').textContent='N/A';
-      gpuCls='bad';
-      adv.push('看不到显卡信息（可能没装驱动，或这不是服务器本机）。');
+      $('stGpu').innerHTML='<span>GPU</span><b>N/A</b>';$('stGpu').className='stat bad';
+      $('stMem').innerHTML='<span>显存</span><b>N/A</b>';$('stMem').className='stat';
+      $('stUtil').innerHTML='<span>利用率</span><b>N/A</b>';$('stUtil').className='stat';
+      $('stTemp').innerHTML='<span>温度</span><b>N/A</b>';$('stTemp').className='stat';
     }
-    $('ovGpu').className='widget-value '+gpuCls;
+    /* 磁盘：优先 /data，读不到（Windows 本地 / 没挂 data 盘）就退回 / */
     var disk=s.disk_data_free_g>=0?s.disk_data_free_g:s.disk_root_free_g;
-    $('ovDisk').textContent=disk>=0?disk+' G':'—';
-    $('ovDisk').className='widget-value '+(disk>=0&&disk<50?'bad':'');
-    if(disk>=0&&disk<50)adv.push('磁盘快满了（剩 '+disk+'G），先清理再继续出图。');
-    var envAdv=latest('envcheck');
-    if(envAdv&&envAdv.status==='fail')adv.push('上次机器检查有项目没通过，见第 1 步红字。');
-    $('advice').textContent=adv.join(' ');
+    var diskPath=s.disk_data_free_g>=0?'/data':'/';
+    $('stDisk').innerHTML='<span>磁盘'+esc(diskPath)+'</span><b>'+(disk>=0?disk+'G':'N/A')+'</b>';
+    $('stDisk').className='stat '+(disk>=0&&disk<50?'bad':(disk>=0&&disk<150?'warn':''));
+    $('stSession').innerHTML='<span>渲染会话</span><b>'+(s.render_running?'RUNNING':'IDLE')+'</b>';
+    $('stSession').className='stat '+(s.render_running?'ok':'');
 
+    /* --- 左导航状态点 --- */
+    var state={},sub={};
+    var env=latest('envcheck'),envOk=env&&env.status==='ok',envBad=env&&env.status==='fail';
+    state[1]=envBad?'bad':(env?(envOk?'done':'todo'):'todo');
+    sub[1]=env?(envOk?'已通过':'没通过'):'待做';
+    state[2]=total?'done':'todo';
+    sub[2]=total?('已生成 '+total+' 张'):'待做';
+    state[3]=s.render_running?'running':(total&&done>=total?'done':(done>0?'warn':'todo'));
+    sub[3]=total?(done+' / '+total+' 帧'):'待做';
+    state[4]=done?(fin>=done?'done':(fin>0?'warn':'todo')):'todo';
+    sub[4]=done?(fin+' / '+done+' 张'):'待做';
+    state[5]=(s.dataset_ready&&postReady)?'done':'todo';
+    sub[5]=(s.dataset_ready&&postReady)?'已完成':'待做';
+    state[6]=(s.overlay_ready&&postReady)?'done':'todo';
+    sub[6]=(s.overlay_ready&&postReady)?'已生成':'待做';
+    for(var i=1;i<=NSTEP;i++){
+      var b=$('nav-'+i),sb=$('navsub-'+i),nm=$('s'+i),wn=$('wnum-'+i);
+      if(b)b.setAttribute('data-state',state[i]);
+      if(sb)sb.textContent=sub[i];
+      if(nm){var cls={done:'ok',running:'run',warn:'warn',bad:'bad',todo:''}[state[i]]||'';
+              nm.textContent={done:'完成',running:'进行中',warn:'部分完成',bad:'没通过',todo:'待做'}[state[i]]||'待做';
+              nm.className='pill '+cls;}
+      if(wn)wn.classList.toggle('done',state[i]==='done');
+      var w=$('s'+i+'when');
+      if(w){
+        var lj=null,acts=[[1,'envcheck'],[2,'queue_gen'],[4,'post'],[5,'pack'],[6,'overlay']];
+        for(var k=0;k<acts.length;k++){if(acts[k][0]===i)lj=latest(acts[k][1]);}
+        if(i===3)lj=newestOf([latest('render_start'),latest('render_stop')]);
+        w.textContent=lj?('上次：'+lj.started+' · '+(lj.status==='running'?'进行中':(lj.status==='ok'?'成功':'失败'))):'';
+      }
+    }
     var pct=total?Math.min(100,Math.round(done*100/total)):0;
-    setProgress('pRender','pRenderTxt',pct,'渲染进度');
-    setProgress('pRender2','pRender2Txt',pct,'渲染进度');
-    var pct2=done?Math.min(100,Math.round(fin*100/done)):0;
-    setProgress('pPost','pPostTxt',pct2,'后处理进度');
+    $('railPct').textContent=pct+'%';
+    $('railBar').style.width=pct+'%';
+    $('railCnt').textContent=done+'/'+total;
 
-    var env=latest('envcheck');
-    var envOk=env&&env.status==='ok';
-    pill('p1',env?(env.status==='ok'?'已通过':(env.status==='running'?'检查中':'没通过')):'待做',env?(env.status==='ok'?'ok':(env.status==='running'?'run':'bad')):'');
-    pill('p2',total?('已生成 '+total+' 张'):'待做',total?'ok':'');
-    pill('p3',s.render_running?'出图中':(total&&done>=total?'已完成':(done>0?'未完成':'待做')),s.render_running?'run':(total&&done>=total?'ok':(done>0?'warn':'')));
+    /* --- 第 1 步 KPI --- */
+    if(g){
+      $('k1gpu').textContent=String(g.name||'未知型号').replace(/^NVIDIA\s+/,'').replace(/^GeForce\s+/,'');
+      $('k1gpu').className='v ok';
+      $('k1gpu').style.fontSize='16px';
+      $('k1gpu').style.lineHeight='1.3';
+      $('k1gpus').textContent='nvidia-smi 已读到';
+      $('k1mem').textContent=(g.mem_mb/1024).toFixed(1)+'G / '+g.temp+'°C';
+      $('k1mem').className='v '+(g.temp>=85||g.mem_mb>=10500?'bad':(g.temp>=78?'warn':''));
+    }else{
+      $('k1gpu').textContent='N/A';$('k1gpu').className='v bad';
+      $('k1gpus').textContent='nvidia-smi 没读到（驱动 / 本机环境）';
+      $('k1mem').textContent='N/A';$('k1mem').className='v bad';
+    }
+    $('k1disk').textContent=disk>=0?disk+' G':'N/A';
+    $('k1disk').className='v '+(disk>=0&&disk<50?'bad':(disk>=0&&disk<150?'warn':'ok'));
+    $('k1disks').textContent=diskPath+' 剩余';
+    if(s.mem_avail_g>=0){
+      $('k1ram').textContent=s.mem_avail_g+' / '+s.mem_total_g+' G';
+      $('k1ram').className='v '+(s.mem_avail_g<4?'warn':'');
+      $('k1rams').textContent=s.swap_on?'swap 已开':'swap 未开';
+    }else{
+      $('k1ram').textContent='N/A';$('k1ram').className='v';
+      $('k1rams').textContent='Windows 本机无 /proc/meminfo';
+    }
+
+    /* --- 第 2 步 KPI --- */
+    $('k2total').textContent=total||'0';
+    $('k2total').className='v '+(total?'ok':'');
+    $('k2file').textContent=s.cfg.queue_file||'清单文件';
+    $('k2unit').textContent=total?(total+' 张'):'还没有清单';
+    $('k2unit').className='v '+(total?'':'');
+    $('k2cfg').textContent=s.cfg.queue_cfg_dir||'–';
+    $('qinfo').textContent=total?('清单里共 '+total+' 张图'):'';
+
+    /* --- 第 3 步 --- */
+    var remain=Math.max(0,total-done);
+    $('k3done').textContent=done+' / '+total;
+    $('k3done').className='v '+(s.render_running?'warn':(total&&done>=total?'ok':''));
+    $('k3sub').textContent=total?('已完成 '+pct+'%'):'还没有清单';
+    $('k3left').textContent=total?(s.render_running?remain+' 张':'暂停中 · '+remain+' 张'):'–';
+    $('k3lefts').textContent=s.render_running?'渲染中':'暂停 / 未启动';
+    $('k3sess').textContent=s.render_running?'RUNNING':'IDLE';
+    $('k3sess').className='v '+(s.render_running?'ok':'');
+    /* 当前帧：交给 paintFrameKpi，和操作台日志保持同一套取值 */
+    paintFrameKpi();
+    setProgress('pRender','pRenderTxt',pct,'渲染进度');
     var ready='';
     if(!s.uproject_exists){
-      ready='⚠️ 服务器上还没有工程文件：'+s.cfg.uproject+'\n先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；工程在别的目录时，去「高级操作 → 配置」把 uproject / project_dir 改成实际路径。';
+      ready='⚠️ 服务器上还没有工程文件：'+s.cfg.uproject+'\n先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；工程在别的目录时，去「⚙ 设置 → 配置」把 uproject / project_dir 改成实际路径。';
     }else if(!s.capture_script_exists){
       ready='⚠️ 工程里没有批量捕获脚本：'+s.cfg.project_dir+'/Content/Python/batch_capture.py\n把仓库 engine/Content/Python/ 下的 batch_capture.py 和 capture_math.py 复制到 Windows 工程再下发。';
     }else if(!s.ue_ready){
-      ready='⚠️ 引擎还没编译好：'+s.cfg.ue_dir+'/Engine/Binaries/Linux/UnrealEditor-Cmd 不存在\n先去「高级操作 → 编译引擎」（1~3 小时，内存吃满，选空闲窗口）。';
+      ready='⚠️ 引擎还没编译好：'+s.cfg.ue_dir+'/Engine/Binaries/Linux/UnrealEditor-Cmd 不存在\n先去「⚙ 设置 → 编译引擎」（1~3 小时，内存吃满，选空闲窗口）。';
     }
     $('ready3').textContent=ready;
     $('ready3').style.display=ready?'block':'none';
+    $('renderHint').textContent=ready?'（前置条件未满足，点下去会被拦下并说明原因）':(s.render_running?'渲染会话正在跑':(total?'引擎与工程就绪：可以点开始出图':'先在第 2 步生成清单'));
+    $('ready3').onclick=function(){openDrawer('jobs')};
 
-    var postReady=done>0&&fin>=done;
-    pill('p4',done?(fin>=done?'已完成':(fin>0?'做了一部分':'待做')):'待做',done&&fin>=done?'ok':(fin>0?'warn':''));
-    pill('p5',(s.dataset_ready&&postReady)?'已完成':'待做',(s.dataset_ready&&postReady)?'ok':'');
-    pill('p6',(s.overlay_ready&&postReady)?'已生成':'待做',(s.overlay_ready&&postReady)?'ok':'');
+    /* --- 第 4 步 --- */
+    var pct2=done?Math.min(100,Math.round(fin*100/done)):0;
+    $('k4raw').textContent=done;
+    $('k4raws').textContent=s.cfg.raw_dir||'raw 目录';
+    $('k4fin').textContent=fin;
+    $('k4fin').className='v '+(round2(done,fin)?'ok':'');
+    $('k4pct').textContent=done?(pct2+'%'):'–';
+    $('k4pct').className='v '+(done&&pct2>=100?'ok':(pct2>0?'warn':''));
+    setProgress('pPost','pPostTxt',pct2,'后处理进度');
+    $('postHint').textContent=done?(fin>=done?'已全部处理完，可重复跑':'还有 '+(done-fin)+' 张没处理'):'先在第 3 步出图';
 
-    $('qinfo').textContent=total?('清单里共 '+total+' 张图'):'';
+    /* --- 第 5 步 --- */
+    $('k5ready').textContent=s.dataset_ready?'READY':'EMPTY';
+    $('k5ready').className='v '+(s.dataset_ready?'ok':'');
+    $('k5dir').textContent=s.cfg.dataset_dir||'dataset 目录';
+    $('k5final').textContent=fin;
+    $('packHint').textContent=postReady?'处理后的图齐了，可以打包':'建议先完成第 4 步';
+
+    /* --- 第 6 步 --- */
     $('oinfo').textContent=(s.overlay_ready&&postReady)?'（已有抽检图，重新生成会覆盖）':'';
+    var ovimg=$('ovimg'),ovempty=$('ovempty');
     if(s.overlay_ready&&postReady){
-      if(!$('ovimg').getAttribute('src'))reloadOverlay();
-      $('ovimg').style.display='block';
+      if(!ovimg.getAttribute('src'))reloadOverlay();
+      ovimg.style.display='block';
+      if(ovempty)ovempty.style.display='none';
     }else{
-      $('ovimg').style.display='none';
+      ovimg.style.display='none';
+      if(ovempty){ovempty.style.display='block';
+        ovempty.textContent=postReady?'还没生成抽检图。点上面的「生成抽检图」。':'还没有抽检图。先完成第 4 步处理，再回来点「生成抽检图」。';}
     }
 
+    /* --- 各步骤结果块回填（原 v2 逻辑保留） --- */
     [['envcheck','r1'],['queue_gen','r2'],['post','r4'],['pack','r5'],['overlay','r6'],
      ['compile','radv'],['case_check','radv2'],['dryrun','radv3'],['gpu_watch','radv4']].forEach(function(pair){
       var action=pair[0],elId=pair[1];
@@ -575,20 +1275,27 @@ function refresh(){
       }
     }
 
+    /* --- 下一步提示（顶栏，可点击跳转） --- */
     var nx=computeNext(s,done,total,fin);
-    $('nowStep').textContent='STEP '+nx.n;
+    NEXTN=nx.n;
+    $('nextTag').textContent='STEP '+nx.n+' · 下一步';
     $('nextText').textContent=nx.text;
-    $('banner').className='banner '+(nx.cls||'');
-    setStepNum('n1',envOk);
-    setStepNum('n2',total>0);
-    setStepNum('n3',total>0&&done>=total);
-    setStepNum('n4',postReady);
-    setStepNum('n5',s.dataset_ready&&postReady);
-    setStepNum('n6',s.overlay_ready&&postReady);
+    $('nextBox').className='next-box '+(nx.cls||'');
 
     renderJobs(S.jobs);
-  })['catch'](function(e){$('clock').textContent='OFFLINE：'+e});
+    updateTermHead();
+    /* 第一次进来：直接落在"下一步该做的"那个步骤上 */
+    if(!refresh.__placed){refresh.__placed=true;
+      var h=parseInt((location.hash||'').replace('#',''),10);
+      showStep(h>=1&&h<=NSTEP?h:nx.n);
+    }
+  })['catch'](function(e){
+    $('stClock').innerHTML='<b>OFFLINE</b>';
+    termLed('bad');
+    setTermStat('<span class="muted">连不上服务器：'+esc(String(e))+'</span>');
+  });
 }
+function round2(done,fin){return done>0&&fin>=done}
 
 function computeNext(s,done,total,fin){
   var env=latest('envcheck');
@@ -599,8 +1306,8 @@ function computeNext(s,done,total,fin){
     return {n:2,text:'机器没问题。点第 2 步「生成清单」，决定这一批要拍哪些画面。',cls:''};
   }
   if(done<total){
-    if(!s.uproject_exists)return {n:3,text:'工程还没下发到服务器（'+s.cfg.uproject+' 不存在）。先在 Windows 上跑 sync_project.ps1，或去配置里改路径。',cls:'warn'};
-    if(!s.ue_ready)return {n:3,text:'引擎还没编译好。先去「高级操作 → 编译引擎」（1~3 小时，内存吃满）。',cls:'warn'};
+    if(!s.uproject_exists)return {n:3,text:'工程还没下发到服务器（'+s.cfg.uproject+' 不存在）。先在 Windows 上跑 sync_project.ps1，或去设置里改路径。',cls:'warn'};
+    if(!s.ue_ready)return {n:3,text:'引擎还没编译好。先去「⚙ 设置 → 编译引擎」（1~3 小时，内存吃满）。',cls:'warn'};
     if(s.render_running)return {n:3,text:'正在出图：已完成 '+done+' / '+total+' 张，放着别管就行（可以关网页）。',cls:''};
     return {n:3,text:'还没出完（'+done+' / '+total+' 张）。点第 3 步「开始出图」，会自动接着上次继续。',cls:'warn'};
   }
@@ -610,6 +1317,7 @@ function computeNext(s,done,total,fin){
   return {n:6,text:'全部做完了。训练集在 '+(s.cfg.dataset_dir||'')+'，抽检图在 '+(s.cfg.overlay_dir||'')+'。',cls:'ok'};
 }
 
+/* ===== 抽屉里的：日志文件 / 作业记录 / 配置 / 产物 ===== */
 function loadLog(name){
   $('logout').textContent='读取中…';
   api('/api/log?name='+encodeURIComponent(name)+'&lines=200').then(function(r){
@@ -618,23 +1326,35 @@ function loadLog(name){
 }
 
 function renderJobs(list){
-  if(!list||!list.length){$('jobs').textContent='还没有作业记录';return}
-  $('jobs').innerHTML=list.map(function(j){
+  var box=$('jobs');
+  if(!box)return;
+  if(!list||!list.length){box.textContent='还没有作业记录';return}
+  box.innerHTML=list.map(function(j){
     var st=j.status==='running'?'跑着':(j.status==='ok'?'完成':'出错');
     var cls=j.status==='running'?'run':(j.status==='ok'?'ok':'bad');
-    return '<div class="job" onclick="viewJob(\''+j.id+'\')"><span class="pill '+cls+'" style="font-size:11px;padding:2px 8px">'+st+'</span> '+esc(actionName(j.action))+' · '+esc(j.started)+'</div>';
+    return '<div class="job'+(j.id===SELJOB?' sel':'')+'" onclick="viewJob(\''+j.id+'\')">'
+      +'<span class="pill st '+cls+'">'+st+'</span><span class="an">'+esc(actionName(j.action))+'</span>'
+      +'<span class="jid">'+esc(j.id)+'</span><span class="when">'+esc(j.started)+'</span></div>';
   }).join('');
 }
 function viewJob(id){
   SELJOB=id;$('seljob').textContent='已选择：'+id;
+  renderJobs(S.jobs||[]);
   api('/api/job?id='+id).then(function(j){
     $('jobout').textContent='【'+actionName(j.action)+'】'+(j.status==='running'?'正在跑…':'已结束')+'\n\n'+(j.out||'');
   });
 }
+function tailSel(){
+  if(!SELJOB){$('seljob').textContent='先点上面一条记录';return;}
+  watchJob(SELJOB);
+  toggleTerm(false);
+  setTermStat('<b>'+esc(actionName((JOB_CACHE[SELJOB]||{}).action||''))+'</b> <span class="muted">· 作业 '+esc(SELJOB)+' 的日志</span>');
+  closeDrawer();
+}
 function killSel(){
   if(!SELJOB){$('seljob').textContent='先点上面一条记录';return;}
   if(!confirm('确定停止这个作业吗？停止后可以重新点按钮再跑。'))return;
-  api('/api/kill','POST',{id:SELJOB}).then(function(r){$('seljob').textContent=r.killed?'已停止':'没停成（可能已经结束了）'});
+  api('/api/kill','POST',{id:SELJOB}).then(function(r){$('seljob').textContent=r.killed?'已停止':'没停成（可能已经结束了）';refresh()});
 }
 
 var CFGKEYS=[];
@@ -644,11 +1364,23 @@ function renderCfg(c){
     return '<div class="cfg"><label>'+esc(CFG_LABELS[k]||k)+'</label><input id="cfg_'+k+'" value="'+esc(c[k])+'"><span class="key">'+esc(k)+'</span></div>';
   }).join('');
 }
+function renderPaths(c){
+  var rows=[['拍摄清单',c.queue_file],['原图 raw',c.raw_dir],['真值 meta',c.meta_dir],['成品 final',c.final_dir],['训练集 dataset',c.dataset_dir],['抽检图 overlay',c.overlay_dir],['日志 logs',c.logs_dir]];
+  $('filePaths').innerHTML=rows.map(function(r){
+    return '<div class="fileline"><span class="k">'+esc(r[0])+'</span><span class="p">'+esc(r[1]||'')+'</span></div>';
+  }).join('');
+}
 function saveCfg(){
   var p={};CFGKEYS.forEach(function(k){p[k]=$v('cfg_'+k)});
-  api('/api/config','POST',p).then(function(c){renderCfg(c);$('cfgst').textContent='已保存（立即生效）';refresh();});
+  api('/api/config','POST',p).then(function(c){
+    renderCfg(c);renderPaths(c);
+    $('cfgst').textContent='已保存（立即生效）';
+    toast('配置已保存，立即生效');
+    refresh();
+  });
 }
 
+buildNav();
 refresh();setInterval(refresh,5000);
 </script>
 </body>

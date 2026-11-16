@@ -11,7 +11,11 @@ import json
 import os
 import sys
 
-from PIL import Image, ImageDraw
+try:
+    from PIL import Image, ImageDraw
+except ImportError:                      # noqa: N816
+    sys.exit("抽检图需要 Pillow，当前 Python（%s）没有装：\n"
+             "  Ubuntu：sudo apt install python3-pil\n  Windows：pip install pillow\n" % sys.executable)
 
 # 类别 → 框颜色（RGB）；与语义模板值无关，只为目检好区分
 CLASS_COLORS = {
