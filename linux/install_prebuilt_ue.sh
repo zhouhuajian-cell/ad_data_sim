@@ -47,14 +47,28 @@ say "zip 完整性 OK"
 ROOT_LISTING="$(unzip -Z1 "$ZIP" | sed 's#\\#/#g' | awk -F/ 'NF>0 && $1!="" {print $1}' | sort -u | head -10)"
 echo "  zip 顶层条目：$(echo "$ROOT_LISTING" | tr '\n' ' ')"
 echo "$ROOT_LISTING" | grep -qx 'Engine' || die "zip 顶层没有 Engine/ 目录，不像 UE 引擎包"
-# 包内路径可能用 Windows 反斜杠（例如在 Windows 上重新打包过），两种分隔符都要认
-LISTING="$(unzip -Z1 "$ZIP" | sed 's#\\#/#g')"
-echo "$LISTING" | grep -qE '(^|/)Engine/Binaries/Linux/UnrealEditor-Cmd$' \
-  || die "找不到 Engine/Binaries/Linux/UnrealEditor-Cmd" \
-    "这个包可能是 Windows 版引擎；请到 Epic 的 Linux 页面下载 Linux 版"
-if echo "$LISTING" | grep -qE '(^|/)Engine/Binaries/Win64/UnrealEditor.exe$'; then
-  say "注意：包内同时含 Win64 二进制（跨平台包属正常，Linux 端只用到 Linux 目录）"
+# ⚠️ 不要用 unzip -Z1 的输出做 grep 判断：它有 79 字符的行宽限制，超过就按行折断
+#    （实测 Engine/Plugins/.../torch/... 这种长路径把后续条目切碎，"Engine/Binaries/Linux/UnrealEditor-Cmd"
+#     那条因此永远匹配不上）。这里改用 Python zipfile 读真实条目名。
+if ! command -v python3 >/dev/null 2>&1; then
+  die "缺少 python3（用来读取 zip 条目）" "apt-get install -y python3 后重跑"
 fi
+python3 - "$ZIP" <<'PY' || die "找不到 Engine/Binaries/Linux/UnrealEditor-Cmd" \
+    "这个包可能是 Windows 版引擎；请到 Epic 的 Linux 页面下载 Linux 版"
+import sys, zipfile
+need = "engine/binaries/linux/unrealeditor-cmd"
+have_win = False
+for info in zipfile.ZipFile(sys.argv[1]).infolist():
+    name = info.filename.replace("\\", "/").strip("/").lower()
+    if name == need:
+        print("  zip 内含 Engine/Binaries/Linux/UnrealEditor-Cmd")
+        sys.exit(0)
+    if name.endswith("engine/binaries/win64/unrealeditor.exe"):
+        have_win = True
+if have_win:
+    print("  注意：包里只有 Win64 的 UnrealEditor.exe（Windows 版引擎）", file=sys.stderr)
+sys.exit(1)
+PY
 
 # ---------- 2. 解压 -----------------------------------------------------------------
 if [ -x "$UE_DIR/Engine/Binaries/Linux/UnrealEditor-Cmd" ]; then

@@ -188,6 +188,41 @@ def to_yolo(frames, images_dir, out_dir, val_ratio, seed):
     return len(usable), n_boxes, len(train), len(val)
 
 
+def _hardcase_policy(rows, hardcase_csv, ratio, seed):
+    """把难例帧按策略纳入/排除训练集。
+
+    rows: [(frame_id, is_hardcase)]；ratio 语义：
+      1.0  = 全部保留（默认，难例本身就是要补的数据）
+      0.0  = 全部排除（只训练"干净"数据时用）
+      0<r<1 = 按比例保留难例帧（防止训练集被难例淹没）
+    返回 (保留的 frame_id 集合, 排除的 frame_id 集合)，以及一份统计说明。
+    """
+    if not hardcase_csv or not os.path.exists(hardcase_csv):
+        return None, None, "未提供难例清单，全部帧保留"
+    hard_frames = set()
+    try:
+        import csv
+        with open(hardcase_csv, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if row.get("frame_id"):
+                    hard_frames.add(row["frame_id"])
+    except Exception as e:
+        return None, None, "难例清单读取失败（全部保留）：%s" % e
+
+    if not hard_frames:
+        return None, None, "难例清单为空，全部帧保留"
+
+    if ratio >= 1.0:
+        return None, None, "难例帧 %d 个，策略=全部保留" % len(hard_frames)
+    rnd = random.Random(seed)
+    ordered = sorted(hard_frames)
+    rnd.shuffle(ordered)
+    keep = set(ordered[:int(round(len(ordered) * ratio))])
+    drop = hard_frames - keep
+    return keep, drop, "难例帧 %d 个，策略=保留 %d / 排除 %d（ratio=%.2f）" % (
+        len(hard_frames), len(keep), len(drop), ratio)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--meta", required=True)
@@ -196,17 +231,43 @@ def main():
     ap.add_argument("--format", choices=["coco", "yolo"], default="coco")
     ap.add_argument("--val-ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=20261113)
+    ap.add_argument("--hardcase-csv", default="",
+                    help="hardcase_list.csv（post/hardcase_export.py 的产物）；不给则不做难例过滤")
+    ap.add_argument("--hardcase-ratio", type=float, default=1.0,
+                    help="难例帧保留比例 0~1（1=全保留，0=全排除）")
     a = ap.parse_args()
     if not (0.0 <= a.val_ratio < 0.9):
         raise SystemExit("--val-ratio 必须在 [0, 0.9)：留出训练集")
+    if not (0.0 <= a.hardcase_ratio <= 1.0):
+        raise SystemExit("--hardcase-ratio 必须在 [0, 1]")
     frames = load_frames(a.meta)
     if not frames:
         raise SystemExit("meta 下没有真值 JSON")
+
+    keep, drop, note = _hardcase_policy(frames, a.hardcase_csv, a.hardcase_ratio, a.seed)
+    if drop:
+        before = len(frames)
+        frames = [f for f in frames if f.get("frame_id") not in drop]
+        print("难例过滤：%d 帧 → %d 帧（%s）" % (before, len(frames), note))
+        if not frames:
+            raise SystemExit("难例过滤后没有剩余帧；把 --hardcase-ratio 调高")
+    else:
+        print("难例策略：%s" % note)
+
     os.makedirs(a.out, exist_ok=True)
     if a.format == "coco":
         to_coco(frames, a.images, a.out, a.val_ratio, a.seed)
     else:
         to_yolo(frames, a.images, a.out, a.val_ratio, a.seed)
+
+    # 把难例清单复制一份进数据集目录，训练侧能直接看到（运维不用回头找原始路径）
+    if a.hardcase_csv and os.path.exists(a.hardcase_csv):
+        try:
+            import shutil
+            shutil.copy2(a.hardcase_csv, os.path.join(a.out, "hardcase_list.csv"))
+            print("难例清单已复制到 %s" % os.path.join(a.out, "hardcase_list.csv"))
+        except Exception as e:
+            print("WARN 难例清单复制失败：%s" % e, file=sys.stderr)
     return 0
 
 

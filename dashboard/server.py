@@ -41,6 +41,9 @@ DEFAULT_CONFIG = {
     "project_dir": "/data/avsynth",
     "real_dir": "",
     "overlay_dir": "/data/render/overlay",
+    # 方案模块 5/6 的产物位置：VOC XML 目录与难例清单（pack 会自动读取清单做过滤）
+    "voc_dir": "/data/render/dataset/voc",
+    "hardcase_csv": "/data/render/dataset/hardcase_list.csv",
     # 渲染参数（界面上只暴露这两个；其余用脚本默认值，改这里即可）
     "render_queue": "/data/queue/tasks.jsonl",
     "render_resolution": "1920x1080",
@@ -152,14 +155,31 @@ def build_cmd(action, p, cfg):
                 raise ValueError("limit 不能是负数，收到 %r" % limit)
             cmd += ["--limit", str(limit)]
         return cmd
+    if action == "voc":
+        # 方案模块 5：导出 PASCAL VOC XML（与图像同名，额外产出 ImageSets）
+        return [py, os.path.join(s, "post/voc_export.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", p.get("out") or cfg.get("voc_dir") or os.path.join(cfg["dataset_dir"], "voc")]
+    if action == "hardcase":
+        # 方案模块 5+6：难例判定与清单（pack 会读取它做过滤）
+        return [py, os.path.join(s, "post/hardcase_export.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", p.get("out") or cfg.get("hardcase_csv")
+                or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")]
     if action == "pack":
         fmt = str(p.get("format") or "coco")
         if fmt not in ("coco", "yolo"):
             raise ValueError("format 只能是 coco 或 yolo，收到 %r" % fmt)
-        return [py, os.path.join(s, "post/pack_dataset.py"),
-                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
-                "--out", p.get("out") or cfg["dataset_dir"],
-                "--format", fmt, "--seed", str(int_param(p, "seed", 20261113))]
+        cmd = [py, os.path.join(s, "post/pack_dataset.py"),
+               "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+               "--out", p.get("out") or cfg["dataset_dir"],
+               "--format", fmt, "--seed", str(int_param(p, "seed", 20261113))]
+        # 难例清单存在时自动纳入打包（ratio 默认 1.0 = 全保留，难例本身就是要补的数据）
+        hc_csv = cfg.get("hardcase_csv") or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")
+        if os.path.exists(hc_csv):
+            cmd += ["--hardcase-csv", hc_csv,
+                    "--hardcase-ratio", str(float(p.get("hardcase_ratio", 1.0)))]
+        return cmd
     if action == "dryrun":
         # 链路自检：工具本体的参数契约由它自己管，这里只保证解释器与脚本路径
         return [py, os.path.join(s, "tools/dryrun_check.py")]
@@ -406,7 +426,7 @@ def auto_pipeline_tick():
     if time.time() - AUTO_STATE["idle_since"] < AUTO_POST_IDLE_SEC:
         AUTO_STATE["phase"] = "waiting"
         return
-    for action in ("post", "pack", "overlay"):
+    for action in ("post", "voc", "hardcase", "pack", "overlay"):
         if action_running(action):
             AUTO_STATE["phase"] = "running:" + action
             return
@@ -415,11 +435,16 @@ def auto_pipeline_tick():
     lp_end = (_ended_ts(lp) if post_ok else 0.0) or AUTO_STATE["idle_since"]
     sheet = os.path.join(cfg["overlay_dir"], "contact_sheet.jpg")
     need_post = (not post_ok) or fin < done
-    need_pack = not need_post and (not has_entries(cfg["dataset_dir"])
-                                   or _mtime(cfg["dataset_dir"]) < lp_end)
-    need_overlay = not need_post and not need_pack and (
+    # 方案模块 5：VOC XML 与难例清单也要跟着真值更新（缺产物或比 post 旧就重跑）
+    voc_ann = os.path.join(cfg.get("voc_dir") or os.path.join(cfg["dataset_dir"], "voc"), "Annotations")
+    hc_csv = cfg.get("hardcase_csv") or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")
+    need_voc = not need_post and (not has_entries(voc_ann) or _mtime(voc_ann) < lp_end)
+    need_hc = not need_post and (not os.path.exists(hc_csv) or _mtime(hc_csv) < lp_end)
+    need_pack = not need_post and not need_voc and not need_hc and (
+        not has_entries(cfg["dataset_dir"]) or _mtime(cfg["dataset_dir"]) < lp_end)
+    need_overlay = not need_post and not need_voc and not need_hc and not need_pack and (
         not os.path.exists(sheet) or _mtime(sheet) < lp_end)
-    if not (need_post or need_pack or need_overlay):
+    if not (need_post or need_voc or need_hc or need_pack or need_overlay):
         AUTO_STATE["phase"] = "done"
         if not AUTO_STATE.get("_done_logged"):
             AUTO_STATE["_done_logged"] = True
@@ -435,6 +460,14 @@ def auto_pipeline_tick():
             AUTO_STATE["phase"] = "dispatched:post"
             AUTO_STATE["last_try"] = time.time()
             AUTO_STATE["last_done"] = done
+        return
+    if need_voc:
+        if _dispatch("voc", {}, "自动导出 VOC"):
+            AUTO_STATE["phase"] = "dispatched:voc"
+        return
+    if need_hc:
+        if _dispatch("hardcase", {}, "自动难例清单"):
+            AUTO_STATE["phase"] = "dispatched:hardcase"
         return
     if need_pack:
         if _dispatch("pack", {"format": "coco"}, "自动打包"):

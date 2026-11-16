@@ -45,20 +45,54 @@ CAPTURE="$PROJECT_DIR/Content/Python/batch_capture.py"
   "先在操作台「高级操作 → 编译引擎」跑 compile_ue5.sh（1~3 小时、内存吃满，选空闲窗口）。" \
   "引擎装在别处时，改操作台配置里的 ue_dir，或给本脚本第 3 个参数。"
 
+# ⚠️ UE 编辑器拒绝以 root 运行（"Refusing to run with the root privileges." 然后 core dumped）。
+#    面板是 root 起的，这里统一降权到 RUN_AS 用户跑渲染；输出目录也要交给该用户写。
+RUN_AS="${AD_UE_RUN_AS:-algo}"
+mkdir -p "$LOG_DIR" "$RAW" "$META" "$DONE"
+if [ "$(id -u)" = "0" ]; then
+  if ! id "$RUN_AS" >/dev/null 2>&1; then
+    die "需要非 root 用户跑 UE，但 $RUN_AS 不存在" \
+      "指定一个已存在用户：AD_UE_RUN_AS=<用户名> bash run_batch.sh ..."
+  fi
+  # 引擎、工程、输出目录都交给运行用户（幂等，几秒）
+  chown -R "$RUN_AS":"$RUN_AS" "$UE_ROOT" "$PROJECT_DIR" "$LOG_DIR" "$RAW" "$META" "$DONE" 2>/dev/null || true
+  UE_CMD_AS="runuser -u $RUN_AS -- $UE_CMD"
+  BUILD_AS="runuser -u $RUN_AS --"
+else
+  UE_CMD_AS="$UE_CMD"
+  BUILD_AS=""
+  RUN_AS="$(id -un)"
+fi
+
 # 工程模块没编译过时 UnrealEditor-Cmd 会以「缺模块」退出；先增量编译一次工程（只编本工程）
-if ! ls "$PROJECT_DIR/Binaries/Linux/"UnrealEditor-avsynth* >/dev/null 2>&1; then
-  echo "== 工程模块尚未编译，先增量编译（首次几分钟，不动引擎）"
-  "$UE_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" avsynthEditor Linux Development \
+# ⚠️ Linux 下模块产物是 libUnrealEditor-<模块>.so（不是 UnrealEditor-<模块>.so）：
+#    之前按 Windows 命名去找，编译明明成功（Target is up to date）仍被判失败。
+MODULE_NAME="$(python3 - "$UPROJECT" <<'PY'
+import json, sys
+try:
+    mods = json.load(open(sys.argv[1], encoding="utf-8-sig")).get("Modules") or []
+    print(mods[0]["Name"] if mods else "avsynth")
+except Exception:
+    print("avsynth")
+PY
+)"
+module_built() {
+  ls "$PROJECT_DIR/Binaries/Linux/libUnrealEditor-$MODULE_NAME"*.so >/dev/null 2>&1 \
+    || ls "$PROJECT_DIR/Binaries/Linux/UnrealEditor-$MODULE_NAME"*.so >/dev/null 2>&1
+}
+if ! module_built; then
+  echo "== 工程模块 $MODULE_NAME 尚未编译，先增量编译（首次几分钟，不动引擎）"
+  $BUILD_AS "$UE_ROOT/Engine/Build/BatchFiles/Linux/Build.sh" avsynthEditor Linux Development \
     -Project="$UPROJECT" -Progress 2>&1 | tail -20 || true
-  ls "$PROJECT_DIR/Binaries/Linux/"UnrealEditor-avsynth* >/dev/null 2>&1 || die \
+  module_built || die \
     "工程模块编译失败（见上面日志）" \
-    "把上面最后 30 行发给人看：常见是 clang 版本不对或 Source 里的 C++ 文件缺失。"
+    "期望产物：$PROJECT_DIR/Binaries/Linux/libUnrealEditor-$MODULE_NAME.so"
+else
+  echo "== 工程模块已就绪：$(ls "$PROJECT_DIR/Binaries/Linux/libUnrealEditor-$MODULE_NAME".so 2>/dev/null || ls "$PROJECT_DIR/Binaries/Linux/UnrealEditor-$MODULE_NAME"*.so)"
 fi
 
 [ -f "$QUEUE" ] || die "任务清单不存在：$QUEUE" \
   "先在操作台第 2 步「生成拍摄清单」（或跑 common/queue_gen.py）。"
-
-mkdir -p "$LOG_DIR" "$RAW" "$META" "$DONE"
 
 if tmux has-session -t "$SESS" 2>/dev/null; then
   echo "会话 $SESS 已在跑，不重复启动（附日志: $LOG_DIR/batch.log）"; exit 0
@@ -66,12 +100,12 @@ fi
 
 # RenderOffscreen：保留 Vulkan 设备但不创建窗口；-Vulkan 显式指定后端
 # 无 X11 会话时 Vulkan 设备可能创建失败 → 注释里备了 xvfb-run 兜底（环境兜底，非性能优化）
-CMD="$UE_CMD $UPROJECT -ExecutePythonScript=$CAPTURE \
+CMD="$UE_CMD_AS $UPROJECT -ExecutePythonScript=$CAPTURE \
  -RenderOffscreen -unattended -nosplash -noSound -NoLiveView -Vulkan \
  -log=$LOG_DIR/batch.log"
 
 # 把目录也传进引擎脚本（batch_capture.py 认这些环境变量），避免两边路径约定不一致
 ENV_PREFIX="AD_UE_QUEUE=$QUEUE AD_UE_RAW=$RAW AD_UE_META=$META AD_UE_DONE=$DONE AD_UE_ERRLOG=$ERRLOG"
 tmux new-session -d -s "$SESS" "$ENV_PREFIX bash -c '$CMD; echo EXIT=\$? >> $LOG_DIR/batch.log; sleep 300'"
-echo "已启动 tmux 会话 $SESS；查看: tmux attach -t $SESS  或  tail -f $LOG_DIR/batch.log"
-echo "若 Vulkan 设备创建失败: tmux kill-session -t $SESS 后改用 xvfb-run -a --server-args='-screen 0 1920x1080x24' 包裹 $UE_CMD 再跑"
+echo "已启动 tmux 会话 $SESS（以 $RUN_AS 身份运行 UE）；查看: tmux attach -t $SESS  或  tail -f $LOG_DIR/batch.log"
+echo "若 Vulkan 设备创建失败: tmux kill-session -t $SESS 后改用 xvfb-run -a --server-args='-screen 0 1920x1080x24' 包裹 再跑"

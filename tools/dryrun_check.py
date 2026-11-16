@@ -574,6 +574,93 @@ def main():
         assert count_files(out, ".jpg") == 7, "逐帧抽检图数量不对（6 帧 + 1 张拼图）"
     check("overlay_boxes 真值抽检拼图", t_overlay)
 
+    # ---------- 13. 方案新链路：VOC XML + 难例清单 + 打包过滤 ----------
+    def t_voc_hardcase():
+        voc = os.path.join(base, "voc")
+        run(["post/voc_export.py", "--meta", meta8, "--images", final8, "--out", voc])
+        ann = os.path.join(voc, "Annotations")
+        assert count_files(ann, ".xml") == a.frames, "VOC XML 数量不对"
+        # 抽一帧解析，核对标准节点与扩展节点
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(os.path.join(ann, "av_000000.xml"))
+        root = tree.getroot()
+        assert root.tag == "annotation"
+        size = root.find("size")
+        assert size is not None and int(size.find("width").text) > 0
+        objs = root.findall("object")
+        assert objs, "XML 里没有 object"
+        for ob in objs:
+            bb = ob.find("bndbox")
+            x1, y1, x2, y2 = [int(bb.find(k).text) for k in ("xmin", "ymin", "xmax", "ymax")]
+            assert 1 <= x1 < x2 <= 320 and 1 <= y1 < y2 <= 180, "VOC 坐标越界: %s" % (x1, y1, x2, y2)
+            assert ob.find("difficult") is not None
+            # 方案模块 5 的扩展节点必须在
+            for k in ("distance", "occlusion", "visible_ratio"):
+                assert ob.find(k) is not None, "缺扩展节点 %s" % k
+    check("voc_export 标准节点 + 扩展节点", t_voc_hardcase)
+
+    def t_hardcase_csv():
+        csv_path = os.path.join(base, "hardcase_list.csv")
+        run(["post/hardcase_export.py", "--meta", meta8, "--images", final8, "--out", csv_path])
+        assert os.path.exists(csv_path), "难例清单未生成"
+        import csv as _csv
+        with open(csv_path, encoding="utf-8-sig") as f:
+            rows = list(_csv.DictReader(f))
+        assert rows, "难例清单为空（mock 帧含逆光/夜间，应该至少有光照难例）"
+        for r in rows:
+            for k in ("frame_id", "class_name", "rules", "difficult_level"):
+                assert k in r, "清单缺列 %s" % k
+            assert r["rules"], "rules 列不应为空"
+    check("hardcase_export 清单列齐全", t_hardcase_csv)
+
+    def t_pack_hardcase_filter():
+        csv_path = os.path.join(base, "hardcase_list.csv")
+        ds = os.path.join(base, "ds_hc")
+        run(["post/pack_dataset.py", "--meta", meta8, "--images", final8, "--out", ds,
+             "--hardcase-csv", csv_path, "--hardcase-ratio", "1.0"])
+        assert os.path.exists(os.path.join(ds, "hardcase_list.csv")), "难例清单未复制进数据集"
+        allj = read_json(os.path.join(ds, "annotations", "instances_all.json"))
+        assert len(allj["images"]) == a.frames, "全保留时应包含全部帧"
+        # ratio=0 时若所有帧都是难例 → 应明确报错而不是产出空集
+        p = subprocess.run([PY, "post/pack_dataset.py", "--meta", meta8, "--images", final8,
+                            "--out", os.path.join(base, "ds_hc0"),
+                            "--hardcase-csv", csv_path, "--hardcase-ratio", "0.0"],
+                           cwd=ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=_env())
+        import csv as _csv
+        with open(csv_path, encoding="utf-8-sig") as f:
+            n_hard = len({r["frame_id"] for r in _csv.DictReader(f)})
+        if n_hard >= a.frames:
+            assert p.returncode != 0, "全部帧都是难例且 ratio=0 时应报错"
+        else:
+            assert p.returncode == 0, "ratio=0 应能正常排除难例帧"
+    check("pack_dataset 难例过滤与清单复制", t_pack_hardcase_filter)
+
+    # ---------- 14. 难例定向批次生成器 ----------
+    def t_hardcase_gen():
+        out = os.path.join(base, "hc_queue.jsonl")
+        p = run(["common/hardcase_gen.py", "--kind", "all", "--count", "2", "-o", out])
+        lines = [json.loads(x) for x in open(out, encoding="utf-8").read().strip().splitlines()]
+        kinds = set((r.get("_hardcase") or {}).get("kind") for r in lines)
+        assert len(kinds) >= 8, "应覆盖至少 8 类难例，实际 %s" % kinds
+        for r in lines:
+            assert r["id"] and r["map"] and r["targets"] and r["camera"], "任务行字段不全"
+        # 幂等
+        out2 = os.path.join(base, "hc_queue2.jsonl")
+        run(["common/hardcase_gen.py", "--kind", "all", "--count", "2", "-o", out2])
+        assert open(out, "rb").read() == open(out2, "rb").read(), "同 seed 两次生成不一致"
+        # 自定义场景入口
+        custom = os.path.join(base, "custom.json")
+        with open(custom, "w", encoding="utf-8") as f:
+            json.dump({"name": "my_crossing", "count": 3, "light_condition": "backlight",
+                       "targets": [{"class": "traffic_sign", "distance_m": 35.0}]}, f)
+        out3 = os.path.join(base, "custom.jsonl")
+        run(["common/hardcase_gen.py", "--custom", custom, "-o", out3])
+        crows = [json.loads(x) for x in open(out3, encoding="utf-8").read().strip().splitlines()]
+        assert len(crows) == 3, "自定义场景应生成 3 条"
+        assert crows[0]["lighting"]["condition"] == "backlight", "自定义光照未生效"
+    check("hardcase_gen 定向生成/幂等/自定义场景", t_hardcase_gen)
+
     print("-" * 60)
     if FAIL:
         print("自检失败：PASS %d / FAIL %d / SKIP %d" % (len(PASS), len(FAIL), len(SKIP)))
