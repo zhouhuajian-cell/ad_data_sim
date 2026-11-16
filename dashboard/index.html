@@ -353,31 +353,14 @@
   <main class="main" id="main">
     <div class="ws">
 
-      <!-- 第 1 步：检查机器 -->
+      <!-- 原「检查机器」已取消：显卡/磁盘在顶栏常显，工程/引擎/清单在出图前由预检一键提示 -->
+
+      <!-- 第 1 步：生成清单 -->
       <section class="ws-step" id="step-1" hidden>
         <div class="ws-head">
           <span class="ws-num" id="wnum-1">1</span>
           <div style="min-width:0">
-            <div class="ws-titlebar"><h2>检查这台机器</h2><span class="pill" id="p1">待做</span></div>
-            <p class="desc">确认显卡、驱动、磁盘可用（只读，不改任何东西）。</p>
-          </div>
-        </div>
-        <div class="grid-kpi">
-          <div class="kpi"><span class="t">显卡</span><span class="v" id="k1gpu">–</span><span class="s" id="k1gpus">未读到</span></div>
-          <div class="kpi"><span class="t">显存 / 温度</span><span class="v" id="k1mem">–</span><span class="s">nvidia-smi</span></div>
-          <div class="kpi"><span class="t">磁盘剩余</span><span class="v" id="k1disk">–</span><span class="s" id="k1disks">/data</span></div>
-          <div class="kpi"><span class="t">内存可用</span><span class="v" id="k1ram">–</span><span class="s" id="k1rams">/proc/meminfo</span></div>
-        </div>
-        <div class="row"><button class="primary big" onclick="doEnv()">开始检查</button><span class="mini" id="envHint"></span></div>
-        <div id="r1"></div>
-      </section>
-
-      <!-- 第 2 步：生成清单 -->
-      <section class="ws-step" id="step-2" hidden>
-        <div class="ws-head">
-          <span class="ws-num" id="wnum-2">2</span>
-          <div style="min-width:0">
-            <div class="ws-titlebar"><h2>生成拍摄清单</h2><span class="pill" id="p2">待做</span></div>
+            <div class="ws-titlebar"><h2>生成拍摄清单</h2><span class="pill" id="p1">待做</span></div>
             <p class="desc">按默认配置展开本批要拍的画面（场景 × 工况 × 目标 × 相机）。</p>
           </div>
         </div>
@@ -396,12 +379,12 @@
         <div id="r2"></div>
       </section>
 
-      <!-- 第 3 步：开始出图 -->
-      <section class="ws-step" id="step-3" hidden>
+      <!-- 第 2 步：开始出图 -->
+      <section class="ws-step" id="step-2" hidden>
         <div class="ws-head">
-          <span class="ws-num" id="wnum-3">3</span>
+          <span class="ws-num" id="wnum-2">2</span>
           <div style="min-width:0">
-            <div class="ws-titlebar"><h2>开始出图</h2><span class="pill" id="p3">待做</span></div>
+            <div class="ws-titlebar"><h2>开始出图</h2><span class="pill" id="p2">待做</span></div>
             <p class="desc">逐帧渲染，可关网页；再点同一按钮会从断点继续，不会重拍。</p>
           </div>
         </div>
@@ -422,12 +405,12 @@
         <div id="r3"></div>
       </section>
 
-      <!-- 第 4 步：后处理（自动） -->
-      <section class="ws-step" id="step-4" hidden>
+      <!-- 第 3 步：后处理（自动） -->
+      <section class="ws-step" id="step-3" hidden>
         <div class="ws-head">
-          <span class="ws-num" id="wnum-4">4</span>
+          <span class="ws-num" id="wnum-3">3</span>
           <div style="min-width:0">
-            <div class="ws-titlebar"><h2>处理成训练照片</h2><span class="pill" id="p4">待做</span></div>
+            <div class="ws-titlebar"><h2>处理成训练照片</h2><span class="pill" id="p3">待做</span></div>
             <p class="desc">出图结束后自动执行（最后一张出完后约 1 分钟启动）。原图保留，可重复运行。</p>
           </div>
         </div>
@@ -448,12 +431,12 @@
         <div id="r4"></div>
       </section>
 
-      <!-- 第 5 步：打包（自动） -->
-      <section class="ws-step" id="step-5" hidden>
+      <!-- 第 4 步：打包（自动） -->
+      <section class="ws-step" id="step-4" hidden>
         <div class="ws-head">
-          <span class="ws-num" id="wnum-5">5</span>
+          <span class="ws-num" id="wnum-4">4</span>
           <div style="min-width:0">
-            <div class="ws-titlebar"><h2>打包训练集</h2><span class="pill" id="p5">待做</span></div>
+            <div class="ws-titlebar"><h2>打包训练集</h2><span class="pill" id="p4">待做</span></div>
             <p class="desc">处理完成后自动打包，并自动切分训练 / 验证集。</p>
           </div>
         </div>
@@ -469,12 +452,12 @@
         <div id="r5"></div>
       </section>
 
-      <!-- 第 6 步：抽检（自动） -->
-      <section class="ws-step" id="step-6" hidden>
+      <!-- 第 5 步：抽检（自动） -->
+      <section class="ws-step" id="step-5" hidden>
         <div class="ws-head">
-          <span class="ws-num" id="wnum-6">6</span>
+          <span class="ws-num" id="wnum-5">5</span>
           <div style="min-width:0">
-            <div class="ws-titlebar"><h2>抽检标注</h2><span class="pill" id="p6">待做</span></div>
+            <div class="ws-titlebar"><h2>抽检标注</h2><span class="pill" id="p5">待做</span></div>
             <p class="desc">自动生成 20 帧标注拼图；框贴不贴边一眼可见。</p>
           </div>
         </div>
@@ -490,7 +473,7 @@
         <button class="secondary" id="btnPrev" onclick="moveStep(-1)">← 上一步</button>
         <button class="secondary" id="btnNext" onclick="moveStep(1)">下一步 →</button>
         <span style="flex:1 1 auto"></span>
-        <span class="mini" id="stepCount">1 / 6</span>
+        <span class="mini" id="stepCount">1 / 5</span>
       </div>
 
     </div>
@@ -584,13 +567,14 @@ var S = { cfg: {}, jobs: [], auto: {} }, CFG_DONE = false, JOB_CACHE = {}, ACTIV
 var CUR = 1, FOLLOW = true;
 var ACTION_NAMES = { envcheck: '检查机器', queue_gen: '生成清单', render_start: '开始出图', render_stop: '停止出图', post: '处理照片', pack: '打包训练集', overlay: '生成抽检图', compile: '编译引擎', case_check: '工程检查', dryrun: '脚本自检', gpu_watch: '显卡记录' };
 var CFG_LABELS = { scripts_dir: '脚本目录', queue_file: '拍摄清单文件', done_dir: '已完成标记目录', raw_dir: '原始图目录', meta_dir: '标注真值目录', final_dir: '处理后的图目录', dataset_dir: '训练集目录', uproject: 'UE 工程文件', ue_dir: 'UE 引擎目录', logs_dir: '日志目录', queue_cfg_dir: '拍摄配置目录', project_dir: '工程目录', real_dir: '实拍参考图目录', overlay_dir: '抽检图目录', render_queue: '本批清单文件', render_resolution: '渲染分辨率' };
-var STEP_TITLE = { 1: '检查机器', 2: '生成清单', 3: '开始出图', 4: '处理照片', 5: '打包训练集', 6: '抽检标注' };
-var STEP_EL = { 1: 'r1', 2: 'r2', 3: 'r3', 4: 'r4', 5: 'r5', 6: 'r6' };
+var STEP_TITLE = { 1: '生成清单', 2: '开始出图', 3: '处理照片', 4: '打包训练集', 5: '抽检标注' };
+var NSTEPS = 5;
+var STEP_EL = { 1: 'r2', 2: 'r3', 3: 'r4', 4: 'r5', 5: 'r6' };
 
 /* ---------- 步骤切换 ---------- */
 function buildNav() {
   var h = '';
-  for (var i = 1; i <= 6; i++) {
+  for (var i = 1; i <= NSTEPS; i++) {
     h += '<button class="snav" id="nav-' + i + '" data-step="' + i + '" data-state="todo" onclick="showStep(' + i + ')">' +
       '<span class="snum">' + i + '</span>' +
       '<span><div class="snav-title">' + STEP_TITLE[i] + '</div><div class="snav-sub" id="nsub-' + i + '">待做</div></span>' +
@@ -599,9 +583,9 @@ function buildNav() {
   $('steplist').innerHTML = h;
 }
 function showStep(n, silent) {
-  n = Math.max(1, Math.min(6, n));
+  n = Math.max(1, Math.min(NSTEPS, n));
   CUR = n;
-  for (var i = 1; i <= 6; i++) {
+  for (var i = 1; i <= NSTEPS; i++) {
     var el = $('step-' + i);
     if (el) {
       // 双保险：内联 display + .active 类（后者由 CSS 控制，任何遗留样式都盖不掉）
@@ -612,9 +596,9 @@ function showStep(n, silent) {
     var nav = $('nav-' + i); if (nav) nav.classList.toggle('active', i === n);
   }
   if (silent) return;          // 只做可见性同步（refresh 里调用），不要再动滚动位和 URL
-  $('stepCount').textContent = n + ' / 6';
+  $('stepCount').textContent = n + ' / ' + NSTEPS;
   $('btnPrev').disabled = (n === 1);
-  $('btnNext').disabled = (n === 6);
+  $('btnNext').disabled = (n === NSTEPS);
   if (location.hash !== '#' + n) history.replaceState(null, '', '#' + n);
   $('main').scrollTop = 0;
 }
@@ -748,7 +732,6 @@ function runStep(action, params, elId) {
     pollJob(r.id, action, elId); refresh();
   })['catch'](function (e) { setResult(elId, 'bad', '连不上服务器：' + e); });
 }
-function doEnv() { runStep('envcheck', {}, 'r1') }
 function doQueue() { runStep('queue_gen', { seed: $v('q_seed'), out: $v('q_out') }, 'r2') }
 function doRender() { runStep('render_start', {}, 'r3') }
 function doStop() {
@@ -813,19 +796,17 @@ function saveCfg() {
 /* ---------- 计算下一步（决定首屏落地 + 顶栏提示） ---------- */
 var TARGET_STEP = 1, FIRST_LOAD = true;
 function computeNext(s, done, total, fin) {
-  var env = latest('envcheck');
-  if (!env && total === 0) return { n: 1, text: '先检查这台机器', cls: '' };
-  if (total === 0) return { n: 2, text: '还没有清单，先生成拍摄清单', cls: '' };
-  if (!s.uproject_exists) return { n: 3, text: '工程未下发：先在 Windows 跑 sync_project.ps1', cls: 'warn' };
-  if (!s.ue_ready) return { n: 3, text: '引擎未安装：去设置里编译引擎', cls: 'warn' };
+  if (total === 0) return { n: 1, text: '还没有清单，先点「生成清单」', cls: '' };
+  if (!s.uproject_exists) return { n: 2, text: '工程未下发：先在 Windows 跑 sync_project.ps1', cls: 'warn' };
+  if (!s.ue_ready) return { n: 2, text: '引擎未安装：去设置里编译引擎', cls: 'warn' };
   if (done < total) {
-    if (s.render_running) return { n: 3, text: '出图中 ' + done + '/' + total, cls: '' };
-    return { n: 3, text: '还有 ' + (total - done) + ' 帧未出，点「开始出图」继续', cls: 'warn' };
+    if (s.render_running) return { n: 2, text: '出图中 ' + done + '/' + total, cls: '' };
+    return { n: 2, text: '还有 ' + (total - done) + ' 帧未出，点「开始出图」继续', cls: 'warn' };
   }
-  if (fin < done) return { n: 4, text: '出图完成，正在自动处理（' + fin + '/' + done + '）', cls: '' };
-  if (!s.dataset_ready) return { n: 5, text: '等待自动打包训练集', cls: '' };
-  if (!s.overlay_ready) return { n: 6, text: '等待自动生成抽检图', cls: '' };
-  return { n: 6, text: '全部完成 · 训练集已就绪', cls: 'ok' };
+  if (fin < done) return { n: 3, text: '出图完成，正在自动处理（' + fin + '/' + done + '）', cls: '' };
+  if (!s.dataset_ready) return { n: 4, text: '等待自动打包训练集', cls: '' };
+  if (!s.overlay_ready) return { n: 5, text: '等待自动生成抽检图', cls: '' };
+  return { n: 5, text: '全部完成 · 训练集已就绪', cls: 'ok' };
 }
 
 /* ---------- 主刷新 ---------- */
@@ -852,21 +833,6 @@ function refresh() {
     $('stDisk').className = 'stat' + (disk >= 0 && disk < 50 ? ' bad' : (disk >= 0 && disk < 150 ? ' warn' : ''));
     $('stSession').innerHTML = '<b>' + (s.render_running ? 'RENDER' : 'IDLE') + '</b>';
     $('stSession').className = 'stat' + (s.render_running ? ' ok' : '');
-
-    /* 第 1 步卡片：读不到的项整张隐藏，不留一片 "--" */
-    function setKpi(valueId, subId, val, sub, cls, hideIfBad, rootId) {
-      var box = $(rootId) ? $(rootId).parentNode : null;
-      if (box) box.style.display = hideIfBad ? 'none' : '';
-      if (!hideIfBad) {
-        $(valueId).textContent = val;
-        $(valueId).className = 'v' + (cls || '');
-        if (subId) $(subId).textContent = sub;
-      }
-    }
-    setKpi('k1gpu', 'k1gpus', g ? g.name.replace('NVIDIA GeForce ', '') : '', g ? 'nvidia-smi' : '', '', !g, 'k1gpu');
-    setKpi('k1mem', null, g ? g.mem_mb + 'M / ' + g.temp + '°C' : '', '', (g && g.temp >= 85) ? ' bad' : ((g && g.temp >= 78) ? ' warn' : ''), !g, 'k1mem');
-    setKpi('k1disk', 'k1disks', disk >= 0 ? disk + ' G' : '', s.disk_data_free_g >= 0 ? '/data' : '/', (disk >= 0 && disk < 50) ? ' bad' : ((disk >= 0 && disk < 150) ? ' warn' : ''), disk < 0, 'k1disk');
-    setKpi('k1ram', 'k1rams', s.mem_avail_g > 0 ? s.mem_avail_g + ' G' : '', '/proc/meminfo', '', !(s.mem_avail_g > 0), 'k1ram');
 
     $('k2total').textContent = total ? total + ' 帧' : '--';
     $('k2file').textContent = s.cfg.queue_file || '';
@@ -909,35 +875,31 @@ function refresh() {
     $('ready3').textContent = ready;
     $('ready3').style.display = ready ? 'block' : 'none';
 
-    /* 侧栏状态 */
-    var env = latest('envcheck');
+    /* 侧栏状态（5 步：1 生成清单 → 2 出图 → 3 处理 → 4 打包 → 5 抽检） */
     var states = {
-      1: env ? (env.status === 'ok' ? 'ok' : (env.status === 'running' ? 'run' : 'bad')) : '',
-      2: total ? 'ok' : '',
-      3: s.render_running ? 'run' : (total && done >= total ? 'ok' : (done > 0 ? 'warn' : '')),
-      4: done && fin >= done ? 'ok' : (fin > 0 ? 'warn' : ''),
-      5: s.dataset_ready ? 'ok' : '',
-      6: s.overlay_ready ? 'ok' : ''
+      1: total ? 'ok' : '',
+      2: s.render_running ? 'run' : (total && done >= total ? 'ok' : (done > 0 ? 'warn' : '')),
+      3: done && fin >= done ? 'ok' : (fin > 0 ? 'warn' : ''),
+      4: s.dataset_ready ? 'ok' : '',
+      5: s.overlay_ready ? 'ok' : ''
     };
     var subs = {
-      1: env ? (env.status === 'ok' ? '已通过' : (env.status === 'running' ? '检查中' : '未通过')) : '待做',
-      2: total ? total + ' 帧' : '待做',
-      3: s.render_running ? '出图中' : (done + '/' + total),
-      4: done ? fin + '/' + done : '待做',
-      5: s.dataset_ready ? '已就绪' : '待做',
-      6: s.overlay_ready ? '已生成' : '待做'
+      1: total ? total + ' 帧' : '待做',
+      2: s.render_running ? '出图中' : (done + '/' + total),
+      3: done ? fin + '/' + done : '待做',
+      4: s.dataset_ready ? '已就绪' : '待做',
+      5: s.overlay_ready ? '已生成' : '待做'
     };
-    for (var i = 1; i <= 6; i++) {
+    for (var i = 1; i <= NSTEPS; i++) {
       var nav = $('nav-' + i); if (nav) nav.setAttribute('data-state', states[i] || 'todo');
       var sub = $('nsub-' + i); if (sub) sub.textContent = subs[i];
       var wn = $('wnum-' + i); if (wn) wn.className = 'ws-num' + (states[i] === 'ok' ? ' done' : '');
     }
-    pillSet('p1', env ? (env.status === 'ok' ? '已通过' : (env.status === 'running' ? '检查中' : '未通过')) : '待做', states[1]);
-    pillSet('p2', total ? '已生成' : '待做', states[2]);
-    pillSet('p3', s.render_running ? '出图中' : (total && done >= total ? '已完成' : '待做'), states[3]);
-    pillSet('p4', done && fin >= done ? '已完成' : (fin > 0 ? '进行中' : '待做'), states[4]);
-    pillSet('p5', s.dataset_ready ? '已就绪' : '待做', states[5]);
-    pillSet('p6', s.overlay_ready ? '已生成' : '待做', states[6]);
+    pillSet('p1', total ? '已生成' : '待做', states[1]);
+    pillSet('p2', s.render_running ? '出图中' : (total && done >= total ? '已完成' : '待做'), states[2]);
+    pillSet('p3', done && fin >= done ? '已完成' : (fin > 0 ? '进行中' : '待做'), states[3]);
+    pillSet('p4', s.dataset_ready ? '已就绪' : '待做', states[4]);
+    pillSet('p5', s.overlay_ready ? '已生成' : '待做', states[5]);
 
     $('qinfo').textContent = total ? '当前清单 ' + total + ' 帧' : '';
     $('oinfo').textContent = s.overlay_ready ? '（已有抽检图，重新生成会覆盖）' : '';
@@ -946,7 +908,7 @@ function refresh() {
     }
 
     /* 已结束作业的结论回填（轮询中的不覆盖） */
-    [['envcheck', 'r1'], ['queue_gen', 'r2'], ['post', 'r4'], ['pack', 'r5'], ['overlay', 'r6'],
+    [['queue_gen', 'r2'], ['post', 'r4'], ['pack', 'r5'], ['overlay', 'r6'],
      ['compile', 'radv'], ['case_check', 'radv2'], ['dryrun', 'radv3']].forEach(function (pair) {
       var action = pair[0], elId = pair[1];
       if (ACTIVE[action]) return;
@@ -975,7 +937,7 @@ function refresh() {
     $('nextText').textContent = nx.text;
     $('nextBox').className = 'next-box ' + (nx.cls || '');
     TARGET_STEP = nx.n;
-    if (FIRST_LOAD) { FIRST_LOAD = false; var h = parseInt((location.hash || '').replace('#', ''), 10); showStep(h >= 1 && h <= 6 ? h : nx.n); }
+    if (FIRST_LOAD) { FIRST_LOAD = false; var h = parseInt((location.hash || '').replace('#', ''), 10); showStep(h >= 1 && h <= NSTEPS ? h : nx.n); }
     // 每轮都强同步一次可见性：别的路径（比如首次渲染前的默认态）改了 CUR 也不会出现"多步同屏"
     showStep(CUR, true);
 
