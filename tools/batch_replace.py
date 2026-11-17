@@ -134,13 +134,19 @@ def detect_shape(image, bbox):
 
 
 def shape_matches(sign_shape, target_shape):
-    """图案形状是否能贴到该目标上。"""
+    """图案形状是否允许贴到该目标上 —— **严格同形状**。
+
+    为什么严格：
+      1) 几何上必然正确：圆对圆边缘完全重合，三角对三角三个角精确对应，不会露边露角。
+         之前宽松放行「矩形目标」时，实测圆图案贴到椭圆广告牌上露出一圈椭圆边。
+      2) 符合真实：道路标牌形状由国标规定（圆形=限速/禁止、三角=警告、矩形=指路），
+         同一位置换同形状的牌，物理上就是合理的。
+      3) 训练安全：硬把圆图案裁成三角形会产生现实中不存在的形状，反而给模型带偏。
+    判不出目标形状时（unknown）不拦，避免因为检测失败而全部跳过。
+    """
     if target_shape == "unknown":
-        return True          # 判不出形状就不拦
-    if sign_shape == target_shape:
         return True
-    # 矩形目标比较宽容：圆形/三角图案贴到方形牌上不算错（有的牌就是方底圆图）
-    return target_shape == "rect"
+    return sign_shape == target_shape
 
 
 def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):

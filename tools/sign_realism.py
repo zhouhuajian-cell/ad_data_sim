@@ -29,18 +29,45 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # 参照区域的统计量
 # ---------------------------------------------------------------------------
+def plate_mask(ref_patch):
+    """估计「标牌本体」的掩码：把亮的/高对比的那一块抠出来，排除背景。
+
+    为什么需要：实测直接用整框均值会让替换后偏亮 20~30——
+    框里混了墙、天空、电线这些背景，它们比标牌暗，把均值拉低了，
+    而我按这个偏低的均值去对齐，结果新标牌比原来的亮。
+
+    做法：Otsu 分割取「与中心同色」的那一半，再做一次开运算去掉细碎噪点。
+    """
+    g = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    h, w = th.shape
+    if h < 4 or w < 4:
+        return np.full((h, w), 255, np.uint8)
+    # 中心像素落在哪一半，就以哪一半为前景
+    if th[h // 2, w // 2] == 0:
+        th = cv2.bitwise_not(th)
+    k = np.ones((3, 3), np.uint8)
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+    if th.sum() < 10:
+        return np.full((h, w), 255, np.uint8)
+    return th
+
+
 def ref_stats(ref_patch, mask=None):
-    """提取参照区域的亮度/对比度/饱和度/锐度/噪声，作为劣化参数的依据。"""
+    """提取参照区域的亮度/对比度/饱和度/锐度/噪声，作为劣化参数的依据。
+
+    mask 为空时自动抠出标牌本体（见 plate_mask），避免背景拉低均值。
+    """
+    if mask is None or mask.sum() < 10:
+        mask = plate_mask(ref_patch)
+
     g = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
     hsv = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2HSV)
     s = hsv[:, :, 1].astype(np.float32)
 
-    if mask is not None and mask.sum() > 0:
-        gm = g[mask > 0]
-        sm = s[mask > 0]
-    else:
-        gm = g.reshape(-1)
-        sm = s.reshape(-1)
+    gm = g[mask > 0]
+    sm = s[mask > 0]
 
     # 锐度：用 float32 输入（OpenCV 5.0 不接受 Laplacian(CV_64F)）
     lap_var = float(cv2.Laplacian(g, -1).var())
@@ -59,18 +86,31 @@ def ref_stats(ref_patch, mask=None):
 # ---------------------------------------------------------------------------
 # 各步骤（参数都由 stats 驱动）
 # ---------------------------------------------------------------------------
-def match_tone(sign_bgr, stats, keep_contrast=0.92):
-    """亮度平移到参照水平，对比度按参照缩放（保留不低于原图案的 keep_contrast 倍）。"""
+def match_tone(sign_bgr, stats, keep_contrast=0.92, min_brightness=88.0,
+               brightness_gain=1.25):
+    """亮度与对比度对齐。
+
+    两个目标在打架，这里取折中：
+      - 视觉融合：要和周围亮度接近，不然像贴纸
+      - 训练可辨识：标牌本身反光强，不该被压到和周围一样暗
+    实测：原标牌本体亮度只有 46~70（背光/阴影/镜头衰减），
+    直接按它对齐会让新标牌也变暗，模型更难学。
+    所以目标亮度 = max(参照亮度 × gain, min_brightness)，
+    既跟随环境，又给可辨识度兜底。
+
+    对比度同理：取参照对比度与「原图案对比度 × keep_contrast」中较大者。
+    """
     p = sign_bgr.astype(np.float32)
     cur_mean = float(p.mean())
     cur_std = float(p.std())
     if cur_std < 1e-3:
         return p
 
-    target_std = max(stats["std"] * 0.90, cur_std * keep_contrast)
+    target_bright = max(stats["mean"] * brightness_gain, min_brightness)
+    target_std = max(stats["std"] * 0.92, cur_std * keep_contrast)
     scale = target_std / cur_std
 
-    out = (p - cur_mean) * scale + stats["mean"]
+    out = (p - cur_mean) * scale + target_bright
     return np.clip(out, 0, 255)
 
 
