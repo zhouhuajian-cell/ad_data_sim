@@ -35,8 +35,10 @@ TSR_CATALOG = {
         "shape": "circle",
         "size_cm": {"diameter": 60},
         "subtypes": {
-            "40": "限速40", "50": "限速50", "60": "限速60",
-            "70": "限速70", "80": "限速80", "100": "限速100", "120": "限速120",
+            # 数字取自 traffic-signs.pt 的细分（20~120），覆盖实拍库常见值
+            "20": "限速20", "30": "限速30", "40": "限速40", "50": "限速50",
+            "60": "限速60", "70": "限速70", "80": "限速80", "90": "限速90",
+            "100": "限速100", "120": "限速120",
         },
     },
     "prohibition": {
@@ -46,8 +48,9 @@ TSR_CATALOG = {
         "subtypes": {
             "no_right": "禁止右转", "no_left": "禁止左转",
             "no_entry": "禁止驶入", "no_parking": "禁止停车",
-            "no_stopping": "禁止长停", "no_u_turn": "禁止掉头",
-            "no_horn": "禁止鸣笛",
+            "no_stopping": "禁止长停", "no_waiting": "禁止等候",
+            "no_u_turn": "禁止掉头", "no_horn": "禁止鸣笛",
+            "stop": "停车让行",
         },
     },
     "warning": {
@@ -59,6 +62,7 @@ TSR_CATALOG = {
             "curve_right": "向右急弯", "pedestrian": "注意行人",
             "children": "注意儿童", "crossroad": "十字交叉",
             "slippery": "易滑", "narrow": "窄路",
+            "roadwork": "施工", "roundabout": "环岛",
         },
     },
     "mandatory": {
@@ -69,6 +73,7 @@ TSR_CATALOG = {
             "go_straight": "直行", "turn_left": "左转", "turn_right": "右转",
             "keep_left": "靠左行驶", "keep_right": "靠右行驶",
             "roundabout": "环岛行驶", "min_speed": "最低限速",
+            "u_turn": "允许掉头",
         },
     },
     "guide": {
@@ -77,7 +82,7 @@ TSR_CATALOG = {
         "size_cm": {"w": 120, "h": 60},
         "subtypes": {
             "direction": "方向指路", "place": "地名", "distance": "距离",
-            "highway": "高速入口", "exit": "出口",
+            "highway": "高速入口", "exit": "出口", "parking": "停车指示",
         },
     },
     "signal": {
@@ -90,7 +95,8 @@ TSR_CATALOG = {
         "label": "人行横道",
         "shape": "rect",
         "size_cm": {"w": 70, "h": 70},
-        "subtypes": {"zebra": "斑马线", "sign": "人行横道标志"},
+        "subtypes": {"zebra": "斑马线", "sign": "人行横道标志",
+                     "pedestrian_crossing": "人行横道预告"},
     },
 }
 
