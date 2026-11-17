@@ -488,21 +488,21 @@ def main():
 
         class _FallbackLib:
             @staticmethod
-            def export_render_target(world, rt, path):
-                with open(path, "wb") as f:
+            def export_render_target(world, rt, directory, name):
+                with open(os.path.join(directory, name), "wb") as f:
                     f.write(b"fake-rt")
 
-        bc._render_lib = lambda: _FallbackLib()
+        bc.unreal.RenderingLibrary = _FallbackLib()
         bc.unreal.ImageWriteBlueprintLibrary = None
         bc._save_render_target({"rt": 1}, out)
         assert open(out, "rb").read() == b"fake-rt", "兜底落盘内容不对"
 
         class _DeadLib:
             @staticmethod
-            def export_render_target(world, rt, path):
+            def export_render_target(world, rt, directory, name):
                 return None
 
-        bc._render_lib = lambda: _DeadLib()
+        bc.unreal.RenderingLibrary = _DeadLib()
         try:
             bc._save_render_target({"rt": 1}, os.path.join(base, "never.png"))
         except RuntimeError:

@@ -7,6 +7,9 @@
 # ⚠️ 后台自动化：显卡记录随面板常驻；渲染结束（或停止）后自动处理+打包+抽检，
 #    失败重试与跳过已完成都在这层做，界面上不再提供对应按钮（见 AUTO_* 常量）。
 import json
+import csv
+import datetime
+import re
 import os
 import shutil
 import subprocess
@@ -104,6 +107,70 @@ def save_config(patch):
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     return cfg
 
+def read_metrics(minutes=10):
+    """Read the actual GPU watcher CSV. Missing measurements stay absent."""
+    cfg = load_config()
+    result = {"gpu_mem": [], "mem_used": [], "gpu_util": []}
+    path = os.path.join(cfg["logs_dir"], "gpu_watch.csv")
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    ts = datetime.datetime.strptime(row["ts"], "%Y-%m-%d_%H:%M:%S")
+                    if ts < cutoff:
+                        continue
+                    result["gpu_mem"].append([row["ts"], round(float(row["gpu_mem_mb"]) / 1024, 3)])
+                    result["gpu_util"].append([row["ts"], float(row["gpu_util_pct"])])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return result
+
+def read_dataset_stats():
+    cfg = load_config()
+    result = {"total_frames": 0, "by_class": {}, "hardcase_count": 0,
+              "hardcase_by_rule": {}, "datasets": []}
+    path = os.path.join(cfg["dataset_dir"], "instances_all.json")
+    if not os.path.isfile(path):
+        path = os.path.join(cfg["dataset_dir"], "annotations", "instances_all.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        result["total_frames"] = len(data.get("images", []))
+        classes = {c["id"]: c["name"] for c in data.get("categories", [])}
+        for ann in data.get("annotations", []):
+            name = classes.get(ann.get("category_id"), "unknown")
+            result["by_class"][name] = result["by_class"].get(name, 0) + 1
+        result["datasets"].append({"name": os.path.basename(cfg["dataset_dir"]),
+                                   "frames": result["total_frames"], "path": path})
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        with open(cfg["hardcase_csv"], newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        result["hardcase_count"] = len(set(r.get("frame_id") for r in rows if r.get("frame_id")))
+        for row in rows:
+            for rule in (row.get("rules") or "").split(";"):
+                if rule:
+                    result["hardcase_by_rule"][rule] = result["hardcase_by_rule"].get(rule, 0) + 1
+    except OSError:
+        pass
+    return result
+
+def image_inbox():
+    return os.path.join(load_config()["project_dir"], "AssetInbox")
+
+def list_images():
+    folder = image_inbox()
+    if not os.path.isdir(folder):
+        return []
+    return [{"name": n, "bytes": os.path.getsize(os.path.join(folder, n))}
+            for n in sorted(os.listdir(folder))
+            if re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", n, re.I)
+            and os.path.isfile(os.path.join(folder, n))]
+
 def int_param(p, key, default=None):
     """取整型参数：缺省/空串用 default，非法值抛 ValueError（由 /api/run 转成 400）。"""
     v = p.get(key)
@@ -130,6 +197,12 @@ def build_cmd(action, p, cfg):
                 "--cameras", os.path.join(d, "cameras.json"),
                 "-o", p.get("out") or cfg["queue_file"],
                 "--seed", str(int_param(p, "seed", 20261113))]
+    if action == "setup_assets":
+        return ["bash", os.path.join(cfg["scripts_dir"], "linux", "run_setup.sh"),
+                cfg["uproject"], cfg["ue_dir"]]
+    if action == "preview":
+        return ["bash", os.path.join(cfg["scripts_dir"], "linux", "run_setup.sh"),
+                cfg["uproject"], cfg["ue_dir"], "preview_scene.py"]
     if action == "case_check":
         return [py, os.path.join(s, "common/case_check.py"),
                 p.get("project_dir") or cfg["project_dir"]]
@@ -198,6 +271,13 @@ def precheck(action, cfg):
     为什么要这层：脚本自己报错时人已经点完按钮了，看到的是 tmux/bash 的英文报错；
     无人值守场景下，缺工程/缺引擎是最常见的"看起来点得动其实跑不了"。
     """
+    if action in ("setup_assets", "preview"):
+        if render_session_running():
+            return "渲染正在运行，先停止渲染再制作验证资产"
+        if not os.path.isfile(os.path.join(cfg["project_dir"], "Content", "Python", "setup_assets.py")):
+            return "工程缺少 setup_assets.py，先同步工程脚本"
+        if not os.path.isfile(cfg["uproject"]):
+            return "UE 工程文件不存在"
     if action == "render_start":
         up = cfg["uproject"]
         if not os.path.exists(up):
@@ -626,6 +706,43 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
         if u.path == "/api/status":
             return self._send(200, probe_status())
+        if u.path == "/api/config":
+            return self._send(200, load_config())
+        if u.path == "/api/metrics":
+            try:
+                minutes = max(1, min(1440, int((q.get("minutes") or ["10"])[0])))
+            except ValueError:
+                return self._send(400, {"error": "invalid minutes"})
+            return self._send(200, read_metrics(minutes))
+        if u.path == "/api/dataset_stats":
+            return self._send(200, read_dataset_stats())
+        if u.path == "/api/assets":
+            content = os.path.join(load_config()["project_dir"], "Content")
+            return self._send(200, {"images": list_images(),
+                                    "map": "/Game/Maps/codex_validation",
+                                    "map_exists": os.path.isfile(os.path.join(content, "Maps", "codex_validation.umap")),
+                                    "materials": [
+                                        {"path": "/Game/Validation/M_LinearDepth",
+                                         "exists": os.path.isfile(os.path.join(content, "Validation", "M_LinearDepth.uasset"))},
+                                        {"path": "/Game/Validation/M_SemanticMask",
+                                         "exists": os.path.isfile(os.path.join(content, "Validation", "M_SemanticMask.uasset"))}]})
+        if u.path == "/api/preview/image":
+            path = os.path.join(load_config()["project_dir"], "Saved", "web_preview.png")
+            try:
+                with open(path, "rb") as f:
+                    return self._send(200, f.read(), "image/png")
+            except OSError:
+                return self._send(404, {"error": "尚无预览图"})
+        if u.path == "/api/asset/image":
+            name = (q.get("name") or [""])[0]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", name, re.I):
+                return self._send(400, {"error": "invalid image name"})
+            try:
+                with open(os.path.join(image_inbox(), name), "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "image not found"})
+            return self._send(200, blob, "image/png" if name.lower().endswith(".png") else "image/jpeg")
         if u.path == "/api/job":
             jid = (q.get("id") or [""])[0]
             with JOBS_LOCK:
@@ -634,6 +751,27 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no job"})
             return self._send(200, dict(rec, out=tail(rec["log"], 300)))
         if u.path == "/api/log":
+            jid = (q.get("job") or [""])[0]
+            if jid:
+                with JOBS_LOCK:
+                    rec = JOBS.get(jid)
+                if not rec:
+                    return self._send(404, {"error": "no job"})
+                try:
+                    offset = max(0, int((q.get("offset") or ["0"])[0]))
+                except ValueError:
+                    return self._send(400, {"error": "invalid offset"})
+                try:
+                    with open(rec["log"], "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        size = f.tell()
+                        offset = min(offset, size)
+                        f.seek(offset)
+                        blob = f.read(65536)
+                except OSError:
+                    blob = b""
+                return self._send(200, {"job": jid, "out": blob.decode("utf-8", "replace"),
+                                        "offset": offset + len(blob)})
             name = (q.get("name") or ["batch.log"])[0]
             if "/" in name or "\\" in name or ".." in name:
                 return self._send(400, {"error": "bad name"})
@@ -658,6 +796,25 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/api/preview":
+            rec, err = start_job("preview", {})
+            return self._send(400, {"error": err}) if err else self._send(200, {"id": rec["id"]})
+        if u.path == "/api/assets/upload":
+            name = self.headers.get("X-Filename", "")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", name, re.I):
+                return self._send(400, {"error": "文件名仅允许英数字、点、下划线、连字符及 PNG/JPEG 扩展名"})
+            size = int(self.headers.get("Content-Length") or 0)
+            if not 0 < size <= 20 * 1024 * 1024:
+                return self._send(400, {"error": "图片须小于 20 MB"})
+            blob = self.rfile.read(size)
+            if not (blob.startswith(b"\x89PNG\r\n\x1a\n") if name.lower().endswith(".png")
+                    else blob.startswith(b"\xff\xd8\xff")):
+                return self._send(400, {"error": "图片内容与扩展名不符"})
+            folder = image_inbox()
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(blob)
+            return self._send(200, {"name": name, "bytes": len(blob)})
         p = self._body()
         if u.path == "/api/run":
             # 前端发的是 {action, params:{...}}；也兼容平铺的 {action, limit, ...} 老调用

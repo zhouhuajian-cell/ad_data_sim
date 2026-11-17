@@ -29,7 +29,8 @@ try:
 except ImportError:                      # noqa: N816
     sys.exit("后处理需要 Pillow，当前 Python（%s）没有装：\n%s" % (sys.executable, _DEP_HINT))
 
-try:                      # 可选依赖：只有 16bit RGB 才用到；缺失时该路径明确报错，不静默降级
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+try:                      # 可选依赖：16bit PNG 与 EXR 用到；缺失时明确报错
     import cv2
 except Exception:         # pragma: no cover - 环境相关
     cv2 = None
@@ -78,6 +79,13 @@ def load_linear_rgb(path):
     8bit：Pillow；16bit：OpenCV（IMREAD_UNCHANGED，BGR→RGB）。位深按 IHDR 判定，
     不再用「像素最大值是否 >255」猜——夜间/弱光线性图的 max 可能小于 255。
     """
+    if path.lower().endswith(".exr"):
+        if cv2 is None:
+            raise RawFormatError("EXR 需要 OpenCV 解码: %s" % path)
+        bgr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if bgr is None or bgr.ndim != 3 or bgr.shape[2] < 3 or bgr.dtype not in (np.float16, np.float32):
+            raise RawFormatError("OpenCV 无法解码线性 RGB EXR: %s" % path)
+        return np.ascontiguousarray(bgr[..., :3][..., ::-1], dtype=np.float32), 16 if bgr.dtype == np.float16 else 32
     _w, _h, bit_depth, color_type = png_info(path)
     if bit_depth == 8:
         arr = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
@@ -243,7 +251,7 @@ def process_one(src, dst, p, ref, rng):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--raw", required=True, help="16bit 线性图目录（含 *_rgb.png）")
+    ap.add_argument("--raw", required=True, help="线性图目录（含 *_rgb.png 或 *_rgb.exr）")
     ap.add_argument("--meta", required=True, help="逐帧真值 JSON 目录（同主文件名）")
     ap.add_argument("--out", required=True, help="8bit 成品目录（写 <frame_id>.png）")
     ap.add_argument("--params", default="", help="参数 json（显式键优先于工况表）")
@@ -262,18 +270,25 @@ def main():
             print("WARN 忽略未知参数键: %s" % ", ".join(unknown), file=sys.stderr)
         explicit = {k: v for k, v in raw_params.items() if k in DEFAULT_PARAMS}
     os.makedirs(a.out, exist_ok=True)
-    frames = sorted(f for f in os.listdir(a.raw) if f.endswith("_rgb.png"))
+    # 同一帧两种格式并存时优先保留高动态范围 EXR。
+    by_stem = {}
+    for f in sorted(os.listdir(a.raw)):
+        if f.endswith(("_rgb.png", "_rgb.exr")):
+            stem = f[:-8]
+            if stem not in by_stem or f.endswith(".exr"):
+                by_stem[stem] = f
+    frames = [by_stem[k] for k in sorted(by_stem)]
     if a.limit:
         frames = frames[:a.limit]
     if not frames:
-        raise SystemExit("raw 目录没有 *_rgb.png: %s" % a.raw)
+        raise SystemExit("raw 目录没有 *_rgb.png 或 *_rgb.exr: %s" % a.raw)
 
     # 先探查首帧位深：16bit 缺 OpenCV 时在批处理前给出可执行的处置，而不是每帧刷同一条错误
     first = os.path.join(a.raw, frames[0])
-    _w, _h, first_depth, _ct = png_info(first)
+    first_depth = 16 if first.endswith(".exr") else png_info(first)[2]
     if first_depth == 16 and cv2 is None:
         raise SystemExit(
-            "首帧是 16bit RGB PNG，但当前 Python 没有 OpenCV，Pillow 会静默截断成 8bit。\n"
+            "首帧是 16bit RGB PNG 或 EXR，但当前 Python 没有 OpenCV。\n"
             "  Ubuntu: sudo apt install python3-opencv\n"
             "  Windows: pip install opencv-python\n"
             "  （深度通道的 16bit 灰度不受影响；只有 RGB 16bit 需要）")

@@ -578,7 +578,10 @@ def skip_existing(frame_id):
     严格四条都齐才算「已存在」：少任何一条（例如 kill 在写 meta 之前）都要重跑，
     因为半成品帧既不能训练也不能当跳过依据。
     """
-    return all(os.path.exists(p) for p in frame_paths(frame_id))
+    paths = frame_paths(frame_id)
+    return os.path.exists(paths[3]) and all(
+        os.path.exists(p) or os.path.exists(os.path.splitext(p)[0] + ".exr")
+        for p in paths[:3])
 
 
 def write_manifest(manifest, path):
@@ -851,8 +854,8 @@ def place_camera(cam_spec, condition=None):
     if comp is not None:
         _try_set_editor_property(comp, "current_focal_length", cam_state["focal_length"], "cam")
         _try_set_editor_property(comp, "current_aperture", cam_state["aperture"], "cam")
-        _try_set_editor_property(comp, "current_shutter_speed",
-                                 shutter_deg_to_speed_seconds(cam_state["shutter_deg"]), "cam")
+        # UE 5.3 CineCameraComponent 没有 current_shutter_speed；运动模糊由
+        # 后处理按任务行 shutter_deg 计算，避免每帧刷无效属性告警。
         _try_set_editor_property(comp, "constrain_aspect_ratio", True, "cam")
         # 胶片背板：CameraFilmbackSettings 是结构体，整体 set 进去
         # TODO(阶段三): 核对 CameraFilmbackSettings 的字段名（sensor_width/sensor_height）
@@ -1066,11 +1069,17 @@ def _save_render_target(rt, path):
         stem = os.path.splitext(tmp)[0]
         produced = [p for p in _glob.glob(stem + ".*") if p != tmp]
         if produced:
-            # 优先要 EXR（保留 16bit）；其次 PNG
-            produced.sort(key=lambda p: (not p.endswith(".exr"), p))
-            os.replace(produced[0], tmp)
-            if produced[0].endswith(".exr"):
-                _log("⚠️ 兜底路径按 RT 格式写成了 EXR（16bit），已改名为 %s" % path)
+            # EXR 的内容不能伪装成 PNG：下游按 PNG 解码和读取文件头。
+            png = next((p for p in produced if p.lower().endswith(".png")), None)
+            if png:
+                os.replace(png, tmp)
+            else:
+                exr = next((p for p in produced if p.lower().endswith(".exr")), None)
+                if exr:
+                    actual = os.path.splitext(path)[0] + ".exr"
+                    os.replace(exr, actual)
+                    return actual
+                raise RuntimeError("RT 兜底导出格式未知: %s" % produced[0])
     if not os.path.exists(tmp):
         raise RuntimeError("渲染目标落盘失败（两条路径都没产出文件）: %s" % path)
     os.replace(tmp, path)
@@ -1121,11 +1130,18 @@ def _capture_and_save(comp, rt, channel, cam_state, path):
     used = _configure_capture(comp, rt, channel, cam_state)
     if not hasattr(comp, "capture_scene"):
         raise RuntimeError("SceneCaptureComponent2D.capture_scene 不存在（阶段三核对）")
-    # TODO(阶段三): 首帧着色器编译可能产出黑帧（附录 C「首帧耗时极长」），阶段三考虑预热捕获
-    #   1~2 帧后丢弃；当前不预热，靠抽样人工校验发现。
+    # 每个通道首次捕获先预热两帧，丢弃着色器/RT 初始化阶段的结果。
+    warm_key = (id(comp), channel)
+    if warm_key not in _CAPTURE_WARMED:
+        comp.capture_scene()
+        comp.capture_scene()
+        _CAPTURE_WARMED.add(warm_key)
     comp.capture_scene()
-    _save_render_target(rt, path)
-    return used
+    actual = _save_render_target(rt, path)
+    return used, actual
+
+
+_CAPTURE_WARMED = set()
 
 
 def capture_channels(frame_id, cam_actor, cam_state):
@@ -1147,7 +1163,7 @@ def capture_channels(frame_id, cam_actor, cam_state):
     #   需要自定义后处理材质直接取 SceneColor 并关掉 tone curve，再配 RTF_RGBA16F。
     # 通道名固定（不带 frame_id）→ 同一批次复用同一个 RT，避免每帧新建撑爆显存（见 _create_render_target）
     rgb_rt = _create_render_target("rgb", w, h, "RTF_RGBA16F")
-    used_rgb = _capture_and_save(comp, rgb_rt, "rgb", cam_state, rgb_p)
+    used_rgb, rgb_p = _capture_and_save(comp, rgb_rt, "rgb", cam_state, rgb_p)
     _log_once("rgb_src", "RGB 捕获源 = %s" % used_rgb)
 
     # 2) 深度：捕获源切到场景深度；0~200m 线性化 + 归一化在材质里做，Python 只给配置参照
@@ -1158,17 +1174,69 @@ def capture_channels(frame_id, cam_actor, cam_state):
     #   本函数目前只切捕获源，材质参数（DepthFarMeters=200、EncodeMax=65535）待接。
     depth_rt = _create_render_target("depth", w, h, "RTF_RGBA16F")
     _log_once("depth_ref", "深度编码参照 米→0~65535: %s" % depth_encode_reference())
-    _capture_and_save(comp, depth_rt, "depth", cam_state, depth_p)
+    _apply_post_material(comp, DEPTH_MATERIAL_PATH, "depth")
+    _, depth_p = _capture_and_save(comp, depth_rt, "depth", cam_state, depth_p)
 
     # 3) 语义：CustomDepth 模板值经后处理材质写成灰度图
-    # TODO(阶段三): 语义通道目前只切到最终颜色 + R8 目标，真正取 stencil 需要
-    #   (a) 后处理材质采样 SceneTexture:CustomStencil 并直接输出（不做颜色变换）；
-    #   (b) 确认 SceneCapture2D 的 post_process_settings 能挂该材质；
-    #   (c) 天空 255 的取法（sky actor/天空材质单独给 stencil）。
+    # 做法：关卡里每个感知 Actor 设好 RenderCustomDepth + CustomDepthStencilValue（类别号 1~7），
+    #   再用后处理材质采样 SceneTexture:CustomStencil 并 /255 输出到 Emissive。
+    # 材质路径见 SEMANTIC_MATERIAL_PATH（由 setup_assets.py 生成）。
     # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8，模板值走 R 通道。
     sem_rt = _create_render_target("sem", w, h, "RTF_RGBA8")
-    _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
+    _apply_post_material(comp, SEMANTIC_MATERIAL_PATH, "sem")
+    _, sem_p = _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
+    # 捕获完成，清掉后处理材质，避免影响后续帧的其它通道
+    _apply_post_material(comp, None, "clear")
     return (rgb_p, depth_p, sem_p)
+
+
+# 后处理材质路径（setup_assets.py 生成在 /Game/Validation/ 下）。
+# 找不到时只告警不中断 —— 老环境没有这两个材质也能跑出 RGB。
+DEPTH_MATERIAL_PATH = "/Game/Validation/M_LinearDepth"
+SEMANTIC_MATERIAL_PATH = "/Game/Validation/M_SemanticMask"
+
+
+def _apply_post_material(comp, material_path, channel):
+    """把后处理材质挂到/摘离 SceneCapture 的 post_process_settings。
+
+    为什么必须挂：深度通道拿到的是非线性 NDC 深度、语义通道拿到的是渲染颜色，
+    都靠后处理材质在 GPU 端换算成 0~1 的可用值；不挂的话输出是原始值，
+    转 8bit 后通常全白或全红（实测现象）。
+    """
+    try:
+        if material_path is None:
+            settings = comp.get_editor_property("post_process_settings")
+            try:
+                settings.set_editor_property("weighted_blendables", unreal.WeightedBlendables())
+                comp.set_editor_property("post_process_settings", settings)
+            except Exception:
+                pass
+            return True
+
+        mat = unreal.load_asset(material_path)
+        if mat is None:
+            _log_once("mat_" + channel,
+                      "⚠️ 后处理材质缺失 %s，%s 通道将输出原始值（转 8bit 后可能过曝）"
+                      % (material_path, channel))
+            return False
+
+        settings = comp.get_editor_property("post_process_settings")
+        # ⚠️ 实测：直接构造 WeightedBlendables 并 set 进去不生效（读回 len=0）；
+        #   必须取出 array → append → 回写，最后整体 set 回组件。
+        blend = settings.get_editor_property("weighted_blendables")
+        arr = blend.get_editor_property("array")
+        entry = unreal.WeightedBlendable()
+        _try_set_editor_property(entry, "weight", 1.0, "post")
+        _try_set_editor_property(entry, "object", mat, "post")
+        arr.append(entry)
+        blend.set_editor_property("array", arr)
+        settings.set_editor_property("weighted_blendables", blend)
+        comp.set_editor_property("post_process_settings", settings)
+        _log_once("mat_" + channel, "%s 通道已挂后处理材质 %s" % (channel, material_path))
+        return True
+    except Exception as e:
+        _log_once("mat_err_" + channel, "⚠️ 后处理材质挂载失败(%s): %s" % (channel, e))
+        return False
 
 
 _LOG_ONCE = set()
@@ -1190,8 +1258,10 @@ def capture_frame(row, cam_actor, cam_state, plans, pairs=None):
     pairs = [(actor, plan)]（实际生成的）；生成失败的目标按计划兜底进真值，宁可近似也不丢帧。
     """
     frame_id = frame_id_of(row)
-    rgb_p, _depth_p, _sem_p = capture_channels(frame_id, cam_actor, cam_state)
-    actual_bit = png_header_bit_depth(rgb_p) or BIT_DEPTH
+    rgb_p, depth_p, sem_p = capture_channels(frame_id, cam_actor, cam_state)
+    actual_bit = 16 if rgb_p.lower().endswith(".exr") else png_header_bit_depth(rgb_p)
+    if actual_bit is None:
+        raise RuntimeError("RGB 输出格式无法识别: %s" % rgb_p)
     if actual_bit != BIT_DEPTH:
         _log_once("bitdepth", "⚠️ RGB 实际落盘 %dbit（期望 %dbit）：16bit 链路未打通，"
                               "见文件头 TODO(阶段三)，真值已按实际位深记录" % (actual_bit, BIT_DEPTH))
@@ -1215,6 +1285,9 @@ def capture_frame(row, cam_actor, cam_state, plans, pairs=None):
     timestamp = _as_float(row.get("timestamp"), 0.0)
     manifest = build_manifest(row, cam_state, objects, timestamp=timestamp,
                               bit_depth=actual_bit)
+    manifest["image_files"].update(rgb=os.path.basename(rgb_p),
+                                   depth=os.path.basename(depth_p),
+                                   semantic=os.path.basename(sem_p))
     _rgb_p, _depth_p, _sem_p, meta_p = frame_paths(frame_id)
     write_manifest(manifest, meta_p)
     return manifest
