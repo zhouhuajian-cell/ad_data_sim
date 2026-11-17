@@ -1026,17 +1026,18 @@ def _save_render_target(rt, path):
     if writer is not None and hasattr(writer, "export_to_disk"):
         try:
             options = unreal.ImageWriteOptions()
-            # TODO(阶段三): 核对 ImageWriteOptions 的字段（format / compression_quality / overwrite_file /
-            #   async）与 PNG 是否保留 16bit；export_to_disk 的首参是 world context，可传 None。
+            # UE 5.3 实测签名：export_to_disk(texture, filename, options) —— 只有 3 个参数，
+            # 没有 world context（早期版本/文档里写 4 个是错的，传 4 个会报
+            # "export_to_disk() takes at most 3 arguments"）。
             fmt_enum = getattr(unreal, "ImageWriteFormat", None)
             if fmt_enum is not None:
                 _try_set_editor_property(options, "format", getattr(fmt_enum, "PNG", None),
                                          "ImageWriteOptions")
             _try_set_editor_property(options, "overwrite_file", True, "ImageWriteOptions")
             _try_set_editor_property(options, "compression_quality", 100, "ImageWriteOptions")
-            # 有的版本默认走异步排队写盘：强制同步（属性名不对只告警），再给 0.5s 让文件出现
-            _try_set_editor_property(options, "async", False, "ImageWriteOptions")
-            writer.export_to_disk(None, rt, tmp, options)
+            # 5.3 的字段名是 async_（不是 async）；强制同步写盘，再给 0.5s 让文件出现
+            _try_set_editor_property(options, "async_", False, "ImageWriteOptions")
+            writer.export_to_disk(rt, tmp, options)
             deadline = time.time() + 0.5
             while not os.path.exists(tmp) and time.time() < deadline:
                 time.sleep(0.02)
@@ -1044,41 +1045,87 @@ def _save_render_target(rt, path):
             _log("⚠️ ImageWriteBlueprintLibrary 落盘失败(%s): %s（退回 export_render_target）"
                  % (path, e))
     if not os.path.exists(tmp):
-        lib = _render_lib()
+        # 兜底：RenderingLibrary.export_render_target(world_context, texture, filename)
+        # （5.3 里模块名是 RenderingLibrary，不是 KismetRenderingLibrary）
+        lib = getattr(unreal, "RenderingLibrary", None) or getattr(
+            unreal, "KismetRenderingLibrary", None)
         exporter = getattr(lib, "export_render_target", None) if lib is not None else None
         if exporter is None:
-            raise RuntimeError("没有可用的 RT 落盘接口（阶段三核对 ImageWriteBlueprintLibrary）")
+            raise RuntimeError("没有可用的 RT 落盘接口（ImageWriteBlueprintLibrary 与 "
+                               "RenderingLibrary 都不可用）")
         # TODO(阶段三): export_render_target 产出多为 8bit、且可能带 sRGB 编码 —— 与「16bit 线性」冲突，
         #   只当兜底用；正式路径必须是 16bit（否则整批高光动态范围永久丢失，方案 3.4）。
-        exporter(_editor_world(), rt, tmp)
+        # UE 5.3 实测签名：export_render_target(world_context, render_target, file_path, file_name)
+        # 注意：RT 是 16bit 浮点时该函数强制写 EXR，8bit 才写 PNG —— 所以扩展名与传入的 tmp 名不一致，
+        #       写完后要把实际产物找出来改名（见下方 glob）。
+        exporter(_editor_world(), rt,
+                 os.path.dirname(os.path.abspath(tmp)),
+                 os.path.basename(tmp))
+        # 找出实际落盘的文件（可能是 tmp.png 或 tmp.exr）
+        import glob as _glob
+        stem = os.path.splitext(tmp)[0]
+        produced = [p for p in _glob.glob(stem + ".*") if p != tmp]
+        if produced:
+            # 优先要 EXR（保留 16bit）；其次 PNG
+            produced.sort(key=lambda p: (not p.endswith(".exr"), p))
+            os.replace(produced[0], tmp)
+            if produced[0].endswith(".exr"):
+                _log("⚠️ 兜底路径按 RT 格式写成了 EXR（16bit），已改名为 %s" % path)
     if not os.path.exists(tmp):
         raise RuntimeError("渲染目标落盘失败（两条路径都没产出文件）: %s" % path)
     os.replace(tmp, path)
     return path
 
 
-def _configure_capture(comp, rt, capture_source_name, cam_state):
+# 捕获源候选链：不同 UE 小版本的 SceneCaptureSource 枚举名不一样（5.3 起 SCS_SCENE_COLOR /
+# SCS_FINAL_COLOR 已被移除，改成 _HDR/_LDR 变体）。按顺序找第一个存在的，找不到才算失败。
+CAPTURE_SOURCE_CANDIDATES = {
+    # RGB：优先 HDR 线性（16bit 承诺依赖它），再退 LDR
+    "rgb": ["SCS_SCENE_COLOR_HDR", "SCS_SCENE_COLOR_HDR_NO_ALPHA",
+            "SCS_FINAL_COLOR_HDR", "SCS_SCENE_COLOR", "SCS_FINAL_COLOR_LDR"],
+    # 深度：场景深度（NDC，线性化在材质里做，见文件头）
+    "depth": ["SCS_SCENE_DEPTH", "SCS_DEVICE_DEPTH", "SCS_SCENE_COLOR_SCENE_DEPTH"],
+    # 语义：后处理前的最终颜色（模板值来自 CustomDepth，见 capture_math）
+    "sem": ["SCS_FINAL_COLOR_LDR", "SCS_BASE_COLOR", "SCS_FINAL_COLOR_HDR", "SCS_FINAL_COLOR"],
+}
+
+
+def _resolve_capture_source(channel):
+    """按候选链找到本机引擎真实存在的 SceneCaptureSource 枚举值；返回 (枚举值, 名称)。"""
+    src_enum = getattr(unreal, "SceneCaptureSource", None)
+    if src_enum is None:
+        return None, None
+    for name in CAPTURE_SOURCE_CANDIDATES.get(channel, []):
+        val = getattr(src_enum, name, None)
+        if val is not None:
+            return val, name
+    return None, None
+
+
+def _configure_capture(comp, rt, channel, cam_state):
     """把 SceneCaptureComponent2D 配成指定通道：目标 RT + 捕获源 + FOV。"""
     _try_set_editor_property(comp, "texture_target", rt, "capture")
     _try_set_editor_property(comp, "capture_every_frame", False, "capture")   # 手动 capture_scene
     _try_set_editor_property(comp, "fov_angle", cam_state["hfov_deg"], "capture")
-    src_enum = getattr(unreal, "SceneCaptureSource", None)
-    src = getattr(src_enum, capture_source_name, None) if src_enum is not None else None
+    src, name = _resolve_capture_source(channel)
     if src is None:
-        _log("⚠️ SceneCaptureSource.%s 不存在，沿用当前捕获源" % capture_source_name)
-    else:
-        _try_set_editor_property(comp, "capture_source", src, "capture")
+        _log("⚠️ 通道 %s 找不到可用的 SceneCaptureSource（候选 %s 都不存在）"
+             % (channel, CAPTURE_SOURCE_CANDIDATES.get(channel)))
+        return None
+    _try_set_editor_property(comp, "capture_source", src, "capture")
+    return name
 
 
-def _capture_and_save(comp, rt, capture_source_name, cam_state, path):
-    """配一次 → capture_scene → 落盘。"""
-    _configure_capture(comp, rt, capture_source_name, cam_state)
+def _capture_and_save(comp, rt, channel, cam_state, path):
+    """配一次 → capture_scene → 落盘。返回实际使用的捕获源名（便于排查黑帧）。"""
+    used = _configure_capture(comp, rt, channel, cam_state)
     if not hasattr(comp, "capture_scene"):
         raise RuntimeError("SceneCaptureComponent2D.capture_scene 不存在（阶段三核对）")
     # TODO(阶段三): 首帧着色器编译可能产出黑帧（附录 C「首帧耗时极长」），阶段三考虑预热捕获
     #   1~2 帧后丢弃；当前不预热，靠抽样人工校验发现。
     comp.capture_scene()
-    return _save_render_target(rt, path)
+    _save_render_target(rt, path)
+    return used
 
 
 def capture_channels(frame_id, cam_actor, cam_state):
@@ -1100,22 +1147,27 @@ def capture_channels(frame_id, cam_actor, cam_state):
     #   需要自定义后处理材质直接取 SceneColor 并关掉 tone curve，再配 RTF_RGBA16F。
     # 通道名固定（不带 frame_id）→ 同一批次复用同一个 RT，避免每帧新建撑爆显存（见 _create_render_target）
     rgb_rt = _create_render_target("rgb", w, h, "RTF_RGBA16F")
-    _capture_and_save(comp, rgb_rt, "SCS_SCENE_COLOR", cam_state, rgb_p)
+    used_rgb = _capture_and_save(comp, rgb_rt, "rgb", cam_state, rgb_p)
+    _log_once("rgb_src", "RGB 捕获源 = %s" % used_rgb)
 
     # 2) 深度：捕获源切到场景深度；0~200m 线性化 + 归一化在材质里做，Python 只给配置参照
-    # TODO(阶段三): SCS_SCENE_DEPTH 给的是非线性 NDC 深度，必须挂「线性化 + /200m + 存 RG16」的
-    #   后处理材质；本函数目前只切捕获源，材质参数（DepthFarMeters=200、EncodeMax=65535）待接。
-    depth_rt = _create_render_target("depth", w, h, "RTF_RG16F")
+    # ⚠️ 实测（本机 Vulkan）：RTF_RG16F / RTF_R8 / RTF_R32F 落盘一律 0 字节，
+    #   只有 RGBA 系（RTF_RGBA8 / RTF_RGBA16F）能写出文件。所以深度通道改用 RTF_RGBA16F，
+    #   深度值走 R 通道（16F 保留精度），G/B 留 0 —— 后处理按 R 通道读即可。
+    # TODO(阶段三): SCS_SCENE_DEPTH 给的是非线性 NDC 深度，必须挂「线性化 + /200m」的后处理材质；
+    #   本函数目前只切捕获源，材质参数（DepthFarMeters=200、EncodeMax=65535）待接。
+    depth_rt = _create_render_target("depth", w, h, "RTF_RGBA16F")
     _log_once("depth_ref", "深度编码参照 米→0~65535: %s" % depth_encode_reference())
-    _capture_and_save(comp, depth_rt, "SCS_SCENE_DEPTH", cam_state, depth_p)
+    _capture_and_save(comp, depth_rt, "depth", cam_state, depth_p)
 
     # 3) 语义：CustomDepth 模板值经后处理材质写成灰度图
     # TODO(阶段三): 语义通道目前只切到最终颜色 + R8 目标，真正取 stencil 需要
     #   (a) 后处理材质采样 SceneTexture:CustomStencil 并直接输出（不做颜色变换）；
     #   (b) 确认 SceneCapture2D 的 post_process_settings 能挂该材质；
     #   (c) 天空 255 的取法（sky actor/天空材质单独给 stencil）。
-    sem_rt = _create_render_target("sem", w, h, "RTF_R8")
-    _capture_and_save(comp, sem_rt, "SCS_FINAL_COLOR", cam_state, sem_p)
+    # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8，模板值走 R 通道。
+    sem_rt = _create_render_target("sem", w, h, "RTF_RGBA8")
+    _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
     return (rgb_p, depth_p, sem_p)
 
 
