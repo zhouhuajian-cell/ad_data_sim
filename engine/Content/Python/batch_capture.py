@@ -1185,16 +1185,24 @@ def capture_channels(frame_id, cam_actor, cam_state):
     _apply_post_material(comp, DEPTH_MATERIAL_PATH, "depth")
     _, depth_p = _capture_and_save(comp, depth_rt, "depth", cam_state, depth_p)
 
-    # 3) 语义：CustomDepth 模板值经后处理材质写成灰度图
-    # 做法：关卡里每个感知 Actor 设好 RenderCustomDepth + CustomDepthStencilValue（类别号 1~7），
-    #   再用后处理材质采样 SceneTexture:CustomStencil 并 /255 输出到 Emissive。
-    # 材质路径见 SEMANTIC_MATERIAL_PATH（由 setup_assets.py 生成）。
-    # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8，模板值走 R 通道。
+    # 3) 语义：把每个物体的材质临时替换成「类别灰度 Unlit 材质」，捕获后还原。
+    # ⚠️ 不能用后处理材质：实测 SceneCapture.post_process_settings 与 PostProcessVolume
+    #   两条路径在无头 -ExecutePythonScript 下都完全不生效（采样值与基线逐位相同）。
+    #   材质替换实测有效（road 区域灰度精确等于 stencil/255）。实现见 semantic_capture.py。
+    # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8。
     sem_rt = _create_render_target("sem", w, h, "RTF_RGBA8")
-    _apply_post_material(comp, SEMANTIC_MATERIAL_PATH, "sem")
-    _, sem_p = _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
-    # 捕获完成，清掉后处理材质，避免影响后续帧的其它通道
-    _apply_post_material(comp, None, "clear")
+    try:
+        # 脚本目录要在 sys.path 里（-ExecutePythonScript 不保证当前目录是本脚本所在目录）
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        import semantic_capture as _sem
+        sem_p = _sem.capture_semantic(comp, sem_rt, _save_render_target, sem_p)
+    except Exception as e:
+        import traceback as _tb
+        _log("⚠️ 语义通道材质替换失败(%s)，退回普通捕获（内容将是颜色图）" % e)
+        _log("   详情: " + _tb.format_exc()[:400].replace(chr(10), " | "))
+        _, sem_p = _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
     return (rgb_p, depth_p, sem_p)
 
 
