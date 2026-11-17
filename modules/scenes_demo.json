@@ -1,0 +1,22 @@
+{
+  "name": "demo_straight",
+  "map": "/Game/Maps/codex_validation",
+  "note": "三车道直道：左右实线 + 中间两条虚线；右侧一个限速牌；前方车辆、行人、锥桶",
+  "gnd": [
+    {"type": "lane_solid_white", "start_cm": [0, -550], "length_cm": 4000, "yaw": 0},
+    {"type": "lane_dashed_white", "start_cm": [0, -180], "length_cm": 4000, "yaw": 0},
+    {"type": "lane_dashed_white", "start_cm": [0, 180], "length_cm": 4000, "yaw": 0},
+    {"type": "lane_solid_white", "start_cm": [0, 550], "length_cm": 4000, "yaw": 0}
+  ],
+  "tsr": [
+    {"class": "speed_limit", "pos_cm": [2000, 700, 220], "yaw": 180, "material": ""},
+    {"class": "warning", "pos_cm": [2600, -700, 220], "yaw": 180, "material": ""}
+  ],
+  "obj": [
+    {"class": "car", "pos_cm": [1600, -180, 0], "yaw": 180},
+    {"class": "suv", "pos_cm": [2200, 180, 0], "yaw": 180},
+    {"class": "pedestrian", "pos_cm": [1200, 650, 0], "yaw": 90},
+    {"class": "cone", "pos_cm": [900, 350, 0], "yaw": 0},
+    {"class": "cone", "pos_cm": [1100, 350, 0], "yaw": 0}
+  ]
+}

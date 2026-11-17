@@ -62,7 +62,8 @@ try:
     cube = unreal.load_asset("/Engine/BasicShapes/Cube.Cube")
     rec("load_cube", cube is not None)
 
-    # 牌面：薄板（1m x 0.7m x 0.05m）
+    # 牌面：薄板。Cube 原始尺寸 100cm（1m 单位立方），scale 是倍数。
+    #   尺寸取：厚 5cm、宽 70cm、高 70cm  → scale = (0.05, 0.70, 0.70)
     plate = eas.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(POS[0], POS[1], POS[2]),
                                        unreal.Rotator(0.0, YAW, 0.0))
     plate.set_actor_label("TrafficSign_Plate")
@@ -79,19 +80,19 @@ try:
         rec("plate_stencil", False, str(e)[:100])
     rec("plate", True, "位置 %s 朝向 %.0f°" % (POS, YAW))
 
-    # 立柱：细长方块，从牌面下沿往下延伸到地面。
-    #   Cube 原始尺寸 100cm（单位立方），scale_z = S 时高度 = 100*S cm。
-    #   牌面下沿在 POS.z - 0.35*SCALE（牌面半高 0.35m），所以立柱顶端要对齐那里，
-    #   底端落到 z=0 地面：高度 H = POS.z - 0.35*SCALE，中心 z = H/2。
-    plate_half = 0.35 * SCALE                    # 牌面半高（米）
-    post_top = POS[2] - plate_half               # 立柱顶端（与牌面下沿齐平）
-    post_h = max(0.2, post_top)                  # 立柱高度（米）
-    post_z = post_h * 0.5                        # 立柱中心（米，相对地面）
-    post = eas.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(POS[0], POS[1], post_z),
+    # 立柱：细长方体，顶端对齐牌面下沿、底端落到地面。
+    #   ⚠️ 单位坑：UE 世界里位置是**厘米**，而 set_actor_scale3d 是**倍数**。
+    #      之前把 POS[2]（厘米）当米用，算出 219 米高的柱子（实测 bug）。
+    #   这里统一按厘米算：牌面半高 = 35cm*SCALE；立柱高 H_cm = POS[2] - 牌面半高；
+    #      立柱中心 z_cm = H_cm/2；立柱 scale_z = H_cm / 100（因为 Cube 高 100cm）。
+    plate_half_cm = 35.0 * SCALE                       # 牌面半高（厘米）
+    post_h_cm = max(20.0, POS[2] - plate_half_cm)      # 立柱高度（厘米）
+    post_z_cm = post_h_cm * 0.5                        # 立柱中心（厘米）
+    post = eas.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(POS[0], POS[1], post_z_cm),
                                       unreal.Rotator(0.0, YAW, 0.0))
     post.set_actor_label("TrafficSign_Post")
-    # 立柱截面 6cm，高度 post_h 米
-    post.set_actor_scale3d(unreal.Vector(0.06 * SCALE, 0.06 * SCALE, post_h))
+    # 截面 6cm x 6cm，高度 post_h_cm
+    post.set_actor_scale3d(unreal.Vector(0.06 * SCALE, 0.06 * SCALE, post_h_cm / 100.0))
     qm = post.get_component_by_class(unreal.StaticMeshComponent)
     qm.set_static_mesh(cube)
     try:
