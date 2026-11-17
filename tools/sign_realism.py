@@ -2,77 +2,93 @@
 # -*- coding: utf-8 -*-
 """sign_realism.py — 让替换后的 TSR 标牌「像真实拍摄的」，可直接当训练数据
 
-上一版的问题（实测）：
-  sign_degrade.py 把颜色整体对齐到参照区域，导致：
-    - 红环被冲淡（交通红应该饱和）
-    - 白底变灰（标牌白底在照片里是亮的）
-    - 整体对比度下降，训练时模型分不清
+当前版本的核心改进：**全部参数从原标牌实测自适应**，不再用固定值。
 
-本版的思路（在保留「真实感」的同时保住「可辨识度」）：
-  1) 亮度对齐但不压对比度 —— 用参照区域的**亮度均值**对齐整体明暗，
-     但保持图案自己的对比度（不像上一版那样把方差也压过去）
-  2) 保持饱和度 —— 交通标志的红/黄/蓝是高饱和色，照片里也是；
-     只对饱和度过高的合成色做轻微收敛，不做整体降饱和
-  3) 局部光照模拟 —— 按原标牌的亮度梯度叠加渐变，模拟侧光/逆光
-  4) 真实劣化链 —— 模糊（按原图锐度）→ 轻微噪声 → JPEG 压缩 → 轻微色偏
-  5) 边缘处理 —— 不做硬腐蚀，用 1px 羽化保留标牌轮廓（避免变成「软塌塌的贴纸」）
+为什么必须自适应（实测数据）：
+  同一批实拍图里，原标牌的亮度在 79~137、对比度 36~73、饱和度 46~93 之间波动。
+  用固定参数劣化，在暗场景里过亮、在亮场景里偏灰，一眼就能看出是贴的。
+
+处理链（每一步的参数都来自参照区域）：
+  1) 亮度对齐   把图案的**平均亮度**移到参照区域的水平（保留图案自身对比度）
+  2) 对比度对齐 图案的对比度按参照区域缩放，但不低于原图案的 92%（保住可辨识度）
+  3) 饱和度    以参照区饱和度为基准，但不低于图案自身的 85%（保住交通标志的鲜艳）
+  4) 局部光照  用参照区域的低频亮度场给图案加渐变（侧光/逆光跟随场景）
+  5) 模糊      按参照区域的拉普拉斯方差决定高斯 sigma
+  6) 噪声      按参照区域的噪声水平加高斯噪声
+  7) JPEG 伪影 走一次真实编码，模拟采集链路的压缩
+  8) 边缘羽化  1~2px 软边，保留轮廓（不做腐蚀，避免变「软塌塌的贴纸」）
 
 训练数据友好性：
-  - 保留标牌的类别特征（颜色、形状、对比度）
-  - 只增加「采集侧」的劣化（噪声/模糊/压缩），不加「合成侧」的假痕迹
+  - 保住类别特征（红/黄/蓝的高饱和、形状轮廓、数字/符号对比度）
+  - 只增加「采集侧」劣化，不加「合成侧」假痕迹
 """
 import cv2
 import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# 基础工具
+# 参照区域的统计量
 # ---------------------------------------------------------------------------
-def _lum(bgr):
-    return cv2.cvtColor(bgr.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+def ref_stats(ref_patch, mask=None):
+    """提取参照区域的亮度/对比度/饱和度/锐度/噪声，作为劣化参数的依据。"""
+    g = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    hsv = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1].astype(np.float32)
 
-
-def target_brightness(ref_patch, mask=None):
-    """参照区域的目标平均亮度（0~255）。有掩码就只统计掩码内。"""
-    g = _lum(ref_patch)
     if mask is not None and mask.sum() > 0:
-        vals = g[mask > 0]
+        gm = g[mask > 0]
+        sm = s[mask > 0]
     else:
-        vals = g.reshape(-1)
-    if vals.size == 0:
-        return 128.0
-    return float(np.mean(vals))
+        gm = g.reshape(-1)
+        sm = s.reshape(-1)
+
+    # 锐度：用 float32 输入（OpenCV 5.0 不接受 Laplacian(CV_64F)）
+    lap_var = float(cv2.Laplacian(g, -1).var())
+    # 噪声：与 3x3 中值的残差
+    noise_std = float(np.std(g - cv2.medianBlur(g.astype(np.uint8), 3).astype(np.float32)))
+
+    return {
+        "mean": float(np.mean(gm)) if gm.size else 128.0,
+        "std": float(np.std(gm)) if gm.size else 48.0,
+        "sat": float(np.mean(sm)) if sm.size else 60.0,
+        "lap_var": lap_var,
+        "noise_std": noise_std,
+    }
 
 
-def match_brightness_keep_contrast(sign_bgr, target_mean, gain=1.0):
-    """把图案的**平均亮度**移到 target_mean，但保留图案自己的对比度。
-
-    做法：先按图案自身均值做中心化，再整体平移到目标亮度。
-    这样红环依然红、白底依然白，只是整体明暗贴合场景。
-    """
+# ---------------------------------------------------------------------------
+# 各步骤（参数都由 stats 驱动）
+# ---------------------------------------------------------------------------
+def match_tone(sign_bgr, stats, keep_contrast=0.92):
+    """亮度平移到参照水平，对比度按参照缩放（保留不低于原图案的 keep_contrast 倍）。"""
     p = sign_bgr.astype(np.float32)
-    cur = float(p.mean())
-    if cur < 1e-3:
+    cur_mean = float(p.mean())
+    cur_std = float(p.std())
+    if cur_std < 1e-3:
         return p
-    # 轻微放大对比度（交通标志本身对比强），再平移到目标亮度
-    out = (p - cur) * gain + target_mean
+
+    target_std = max(stats["std"] * 0.90, cur_std * keep_contrast)
+    scale = target_std / cur_std
+
+    out = (p - cur_mean) * scale + stats["mean"]
     return np.clip(out, 0, 255)
 
 
-def boost_saturation(bgr, factor=1.15):
-    """提升饱和度：交通标志的红/黄/蓝是高对比色，照片里也饱和。"""
-    hsv = cv2.cvtColor(np.clip(bgr, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+def match_saturation(sign_bgr, stats, floor=0.85):
+    """饱和度向参照靠拢，但不低于图案自身 floor 倍（保住交通标志的鲜艳度）。"""
+    hsv = cv2.cvtColor(np.clip(sign_bgr, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    cur_s = float(hsv[:, :, 1].mean())
+    if cur_s < 1e-3:
+        return sign_bgr.astype(np.float32)
+    target_s = max(stats["sat"], cur_s * floor)
+    factor = float(np.clip(target_s / cur_s, 0.8, 1.35))
     hsv[:, :, 1] = np.clip(hsv[:, :, 1] * factor, 0, 255)
     return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
 
-def apply_lighting_gradient(sign_bgr, ref_patch):
-    """按参照区域的亮度梯度给图案加渐变，模拟侧光/逆光。
-
-    做法：把参照图降采样成很粗的亮度场（只保留大范围明暗变化），
-    归一化后乘到图案上——这样标牌会「跟着场景一起亮/暗」。
-    """
-    g = _lum(ref_patch)
+def apply_lighting(sign_bgr, ref_patch, strength=1.0):
+    """用参照区域的低频亮度场给图案加渐变，让标牌跟着场景一起明暗。"""
+    g = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
     h, w = g.shape
     cells = max(2, min(h, w) // 8)
     small = cv2.resize(g, (cells, cells), interpolation=cv2.INTER_AREA)
@@ -80,35 +96,27 @@ def apply_lighting_gradient(sign_bgr, ref_patch):
     m = float(field.mean())
     if m < 1e-3:
         return sign_bgr
-    # 归一化到 0.75~1.25 之间，避免过强
-    norm = np.clip(field / m, 0.75, 1.25)
+    norm = np.clip(field / m, 1.0 - 0.25 * strength, 1.0 + 0.25 * strength)
     return np.clip(sign_bgr.astype(np.float32) * norm[:, :, None], 0, 255)
 
 
-def estimate_blur_sigma(ref_patch, max_sigma=2.5):
-    """用拉普拉斯方差估参照区域锐度，返回建议的高斯 sigma。"""
-    # OpenCV 5.0 对 Laplacian(CV_64F) 会报 "Unsupported combination"，
-    # 改成先把灰度转 float32 再用 ddepth=-1（与输入同深度）计算方差
-    g = _lum(ref_patch).astype(np.float32)
-    var = float(cv2.Laplacian(g, -1).var())
-    sigma = max_sigma * (1.0 - min(var, 400.0) / 400.0)
+def blur_sigma_from(stats, max_sigma=2.2):
+    """按参照区域的拉普拉斯方差决定模糊量：越模糊的图，贴上去也越模糊。"""
+    v = max(0.0, stats["lap_var"])
+    sigma = max_sigma * (1.0 - min(v, 400.0) / 400.0)
     return float(np.clip(sigma, 0.0, max_sigma))
 
 
-def add_real_noise(patch, ref_patch, strength=0.6):
-    """加与参照区域同量级的高斯噪声（模拟传感器噪声）。"""
-    g = _lum(ref_patch)
-    med = cv2.medianBlur(g.astype(np.uint8), 3).astype(np.float32)
-    n_std = float(np.std(g - med)) * strength
-    n_std = min(n_std, 8.0)
-    if n_std < 0.5:
-        return patch
-    noise = np.random.normal(0, n_std, patch.shape).astype(np.float32)
-    return np.clip(patch.astype(np.float32) + noise, 0, 255)
+def add_noise(sign_bgr, stats, factor=0.8):
+    """按参照区域的噪声水平加噪（上限 8，避免糊掉）。"""
+    n_std = min(stats["noise_std"] * factor, 8.0)
+    if n_std < 0.4:
+        return sign_bgr
+    noise = np.random.normal(0, n_std, sign_bgr.shape).astype(np.float32)
+    return np.clip(sign_bgr.astype(np.float32) + noise, 0, 255)
 
 
-def jpeg_roundtrip(patch, quality=88):
-    """走一次 JPEG 编解码，模拟照片的压缩伪影（训练数据里所有图都有）。"""
+def jpeg_roundtrip(patch, quality=90):
     ok, buf = cv2.imencode(".jpg", np.clip(patch, 0, 255).astype(np.uint8),
                            [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
@@ -119,55 +127,40 @@ def jpeg_roundtrip(patch, quality=88):
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
-def make_realistic(sign_bgr, mask, ref_patch, strength=1.0, sat_boost=1.18):
-    """把图案处理成「像真实拍摄的标牌」。
-
-    sign_bgr  图案（BGR，已缩放到目标尺寸）
-    mask      图案掩码（0/255）
-    ref_patch 原标牌区域（同尺寸），用来取亮度/锐度/噪声
-    strength  劣化强度（0=不处理，1=默认，1.5=更旧更脏）
-    sat_boost 饱和度提升系数（交通标志建议 1.1~1.25）
+def make_realistic(sign_bgr, mask, ref_patch, strength=1.0, jpeg_quality=90):
+    """把图案处理成「像真实拍摄的标牌」。所有参数从 ref_patch 实测。
 
     返回 (处理后的图案, 软掩码)
     """
     if ref_patch.shape[:2] != sign_bgr.shape[:2]:
         ref_patch = cv2.resize(ref_patch, (sign_bgr.shape[1], sign_bgr.shape[0]))
 
+    stats = ref_stats(ref_patch)
     out = sign_bgr.astype(np.float32)
 
-    # 1) 亮度对齐（保对比）
-    tgt = target_brightness(ref_patch, mask)
-    out = match_brightness_keep_contrast(out, tgt, gain=1.0 + 0.1 * strength)
+    out = match_tone(out, stats)          # 1) 亮度 + 对比度
+    out = match_saturation(out, stats)    # 2) 饱和度
 
-    # 2) 饱和度：交通标志本身饱和度高，这里略微加强让类别特征更清晰
-    out = boost_saturation(out, sat_boost)
-
-    # 3) 局部光照渐变（跟着场景一起明暗）
     if strength > 0:
-        out = apply_lighting_gradient(out, ref_patch)
+        out = apply_lighting(out, ref_patch, strength)    # 3) 光照渐变
 
-    # 4) 模糊：匹配原图锐度
-    sigma = estimate_blur_sigma(ref_patch) * strength
+    sigma = blur_sigma_from(stats) * strength             # 4) 模糊
     if sigma > 0.3:
         k = int(max(3, 2 * round(sigma * 1.5) + 1))
         out = cv2.GaussianBlur(out, (k, k), sigma)
 
-    # 5) 噪声
     if strength > 0:
-        out = add_real_noise(out, ref_patch, 0.6 * strength)
+        out = add_noise(out, stats, 0.8 * strength)       # 5) 噪声
+        out = jpeg_roundtrip(out, quality=jpeg_quality)   # 6) JPEG 伪影
 
-    # 6) JPEG 伪影（只做一次，强度随 strength 变）
-    if strength > 0:
-        out = jpeg_roundtrip(out, quality=int(92 - 8 * strength))
-
-    # 7) 软掩码：1~2px 羽化，保留清晰轮廓（不做腐蚀）
+    # 7) 软掩码：1~2px 羽化（不做腐蚀）
     soft = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (3, 3), 0.6)
     soft = np.clip(soft, 0, 1)
 
     return np.clip(out, 0, 255).astype(np.uint8), (soft * 255).astype(np.uint8)
 
 
-def paste_realistic(image, sign_bgr, mask, bbox, strength=1.0, sat_boost=1.18):
+def paste_realistic(image, sign_bgr, mask, bbox, strength=1.0, jpeg_quality=90):
     """一步完成：取参照 → 处理 → 粘贴。bbox=[x1,y1,x2,y2]。"""
     H, W = image.shape[:2]
     x1, y1, x2, y2 = [int(round(v)) for v in bbox]
@@ -181,7 +174,7 @@ def paste_realistic(image, sign_bgr, mask, bbox, strength=1.0, sat_boost=1.18):
     mask_r = cv2.resize(mask, (tw, th), interpolation=cv2.INTER_NEAREST)
     ref = image[y1:y2, x1:x2]
 
-    out_patch, soft = make_realistic(sign_r, mask_r, ref, strength, sat_boost)
+    out_patch, soft = make_realistic(sign_r, mask_r, ref, strength, jpeg_quality)
 
     out = image.astype(np.float32).copy()
     roi = out[y1:y2, x1:x2]

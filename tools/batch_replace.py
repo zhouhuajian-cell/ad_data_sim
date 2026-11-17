@@ -28,6 +28,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cv2                                                    # noqa: E402
 from replace_sign import detect_signs, load_sign, sign_mask  # noqa: E402
 from sign_realism import paste_realistic                     # noqa: E402
 
@@ -84,6 +85,64 @@ def list_signs(signs_dir):
     return raw
 
 
+def detect_shape(image, bbox):
+    """判断原标牌的形状：circle / triangle / rect。
+
+    做法：在 bbox 内做颜色分割（标牌通常是高饱和或高对比区域），
+    取最大轮廓，按轮廓的「填充率 + 近似多边形顶点数」判定。
+
+    为什么必须判形状：实测圆形图案贴到三角形标牌上时，三个角会露出来，
+    一眼就能看出是假的。形状不匹配就不该替换。
+    """
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = image.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W, x2), min(H, y2)
+    roi = image[y1:y2, x1:x2]
+    if roi.size == 0 or roi.shape[0] < 8 or roi.shape[1] < 8:
+        return "unknown"
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # 用 Otsu 分割出标牌主体（亮底 vs 暗环境，或反过来）
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 取包含中心的那一半
+    h, w = th.shape
+    if th[h // 2, w // 2] == 0:
+        th = cv2.bitwise_not(th)
+
+    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return "unknown"
+    c = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    bx, by, bw, bh = cv2.boundingRect(c)
+    if bw < 6 or bh < 6:
+        return "unknown"
+    fill = area / float(bw * bh)
+
+    peri = cv2.arcLength(c, True)
+    approx = cv2.approxPolyDP(c, 0.04 * peri, True)
+    n = len(approx)
+
+    # 判定顺序：先三角（填充率 0.4~0.6），再圆（填充率 ~0.78），最后矩形
+    aspect = bw / float(bh)
+    if n == 3 or (0.35 <= fill <= 0.60 and 0.8 <= aspect <= 1.25):
+        return "triangle"
+    if fill >= 0.68 and 0.80 <= aspect <= 1.25:
+        return "circle"
+    return "rect"
+
+
+def shape_matches(sign_shape, target_shape):
+    """图案形状是否能贴到该目标上。"""
+    if target_shape == "unknown":
+        return True          # 判不出形状就不拦
+    if sign_shape == target_shape:
+        return True
+    # 矩形目标比较宽容：圆形/三角图案贴到方形牌上不算错（有的牌就是方底圆图）
+    return target_shape == "rect"
+
+
 def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):
     """按图案长宽比把检测框收缩成实际粘贴区域，返回新 bbox。"""
     x1, y1, x2, y2 = bbox
@@ -111,6 +170,7 @@ def main():
     ap.add_argument("--min-px", type=int, default=24, help="标牌小于该像素宽就跳过")
     ap.add_argument("--all-signs", action="store_true", help="一张图里所有标牌都替换")
     ap.add_argument("--no-annotate", action="store_true", help="不输出标注")
+    ap.add_argument("--no-shape-check", action="store_true", help="不校验形状匹配")
     a = ap.parse_args()
 
     if not a.signs and not a.signs_dir:
@@ -141,7 +201,6 @@ def main():
                "items": []}
     print("待处理 %d 张图，模式=%s" % (len(images), mode))
 
-    import cv2
     for i, img_path in enumerate(images):
         name = os.path.splitext(os.path.basename(img_path))[0]
         rec = {"image": img_path, "replaced": [], "skipped": []}
@@ -172,6 +231,14 @@ def main():
                         os.path.splitext(os.path.basename(path))[0])
 
                 sm = sign_mask(sign_img)
+                # 形状约束：原标牌是三角形就不贴圆形图案（否则角会露出来）
+                tgt_shape = detect_shape(im, d["bbox"])
+                sign_shape = tsr_mod.shape_of(cls_name) if hasattr(tsr_mod, "shape_of") else "circle"
+                if not shape_matches(sign_shape, tgt_shape):
+                    rec["skipped"].append("%s(图案%s) vs 场景%s 形状不符"
+                                          % (cls_name, sign_shape, tgt_shape))
+                    continue
+
                 bbox = fit_bbox(d["bbox"], sm.shape, keep_ratio=True)
                 if a.scale != 1.0:
                     cx, cy = (bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5
@@ -181,7 +248,7 @@ def main():
 
                 base = composed if composed is not None else im
                 composed, soft = paste_realistic(base, sign_img[:, :, :3], sm, bbox,
-                                                 strength=a.strength, sat_boost=a.sat_boost)
+                                                 strength=a.strength)
                 if soft is None:
                     rec["skipped"].append("bbox 过小")
                     continue
@@ -194,6 +261,7 @@ def main():
                     "label": tsr_mod.class_label(cls_name),
                     "bbox": [round(v, 1) for v in bbox],
                     "detected_as": d["class"],
+                    "scene_shape": tgt_shape,
                     "det_conf": d["conf"],
                 })
 
