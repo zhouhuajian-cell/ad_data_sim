@@ -1,17 +1,12 @@
 [
   {
-    "name": "road_straight",
-    "map": "/Game/Maps/road_straight",
-    "note": "直线城市路段，含两车道与右侧人行道"
+    "name": "codex_validation",
+    "map": "/Game/Maps/codex_validation",
+    "note": "验证场景：道路 + 左右车道线 + 路标/车辆/锥桶代理物 + 太阳光/天光/大气（当前唯一可用关卡）"
   },
   {
-    "name": "road_curve",
-    "map": "/Game/Maps/road_curve",
-    "note": "弯道，用于检查小目标在边缘的形变与截断"
-  },
-  {
-    "name": "intersection",
-    "map": "/Game/Maps/intersection",
-    "note": "十字路口，多目标同屏与遮挡的主要来源"
+    "name": "test_level",
+    "map": "/Game/Maps/TestLevel",
+    "note": "最小测试关卡：地面 + 两根立柱 + 光照，用于管线自检"
   }
 ]

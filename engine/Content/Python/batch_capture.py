@@ -990,7 +990,15 @@ def _create_render_target(name, width, height, format_name):
     key = (str(name), int(width), int(height), str(format_name))
     cached = _RT_CACHE.get(key)
     if cached is not None:
-        return cached
+        # ⚠️ 缓存的 RT 可能已被引擎回收：分辨率切换 / 关卡重载时 UObject 会失效，
+        #   此时再拿去 export 会报 "TextureRenderTarget2D: Internal Error - ObjectInstance is null!"。
+        #   这里先探活，失效就丢掉重建（实测连续两帧换分辨率时必现）。
+        try:
+            _ = cached.get_name()
+            return cached
+        except Exception:
+            _RT_CACHE.pop(key, None)
+            _log("⚠️ 渲染目标 %s 已失效，重建" % (name,))
     lib = _render_lib()
     creator = getattr(lib, "create_render_target2d", None) if lib is not None else None
     if creator is None:
