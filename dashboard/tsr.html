@@ -70,6 +70,19 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .toolbar .right{margin-left:auto;color:var(--textSecondary);font-size:13px}
 
 /* 视口 */
+
+/* 图片放大查看 */
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;
+  display:none;align-items:center;justify-content:center;cursor:zoom-out}
+.lightbox.on{display:flex}
+.lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;
+  box-shadow:0 0 40px rgba(0,0,0,.8);cursor:default}
+.lightbox .lbclose{position:fixed;top:16px;right:20px;font-size:28px;color:#ccc;
+  cursor:pointer;line-height:1;padding:6px 12px;border-radius:3px}
+.lightbox .lbclose:hover{background:rgba(255,255,255,.12);color:#fff}
+.lightbox .lbtip{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+  color:#8a94a0;font-size:13px}
+.stage img{cursor:zoom-in}
 .thumbstrip{height:70px;flex:0 0 70px;background:#13171D;border-top:1px solid var(--line);
   display:flex;gap:4px;padding:6px 8px;overflow-x:auto;overflow-y:hidden;
   align-items:center;white-space:nowrap}
@@ -1067,6 +1080,50 @@ async function pollJob(){
 })();
 
 /* 页面结构就绪后先绑按钮（不依赖后续初始化是否成功） */
+
+/* 图片放大：点视口图片打开 lightbox，滚轮缩放 */
+function initLightbox(){
+  const lb = document.getElementById('lightbox');
+  const im = document.getElementById('lbImg');
+  if (!lb || !im) return;
+  let scale = 1;
+
+  window.openLightbox = function(src){
+    im.src = src;
+    scale = 1;
+    im.style.transform = 'scale(1)';
+    lb.classList.add('on');
+  };
+  window.closeLightbox = function(){
+    lb.classList.remove('on');
+    im.src = '';
+  };
+
+  // 用事件委托：点视口里任意 img 就放大
+  document.body.addEventListener('click', function(e){
+    const t = e.target;
+    if (t && t.tagName === 'IMG' && t.closest && t.closest('#viewport')) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.openLightbox(t.src);
+    }
+  }, true);
+
+  const cl = document.getElementById('lbClose');
+  if (cl) cl.onclick = window.closeLightbox;
+  lb.addEventListener('click', function(e){ if (e.target === lb) window.closeLightbox(); });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape') window.closeLightbox();
+  });
+  lb.addEventListener('wheel', function(e){
+    e.preventDefault();
+    scale *= e.deltaY > 0 ? 0.88 : 1.14;
+    scale = Math.max(0.2, Math.min(8, scale));
+    im.style.transform = 'scale(' + scale.toFixed(3) + ')';
+  }, { passive: false });
+}
+
+initLightbox();
 bindWorkflowBtns();
 
 /* 初始化：先拉素材库，再渲染国家列表与类别 */
@@ -1087,5 +1144,10 @@ bindWorkflowBtns();
   }
 })();
 </script>
+<div class="lightbox" id="lightbox">
+  <span class="lbclose" id="lbClose">×</span>
+  <img id="lbImg" src="">
+  <div class="lbtip">滚轮缩放 · 点背景或按 Esc 关闭</div>
+</div>
 </body>
 </html>
