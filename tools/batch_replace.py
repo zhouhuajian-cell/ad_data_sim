@@ -313,6 +313,160 @@ def shape_matches(sign_shape, target_shape, user_shape=""):
     return sign_shape == target_shape
 
 
+def std_shape(image, bbox):
+    """严格判断原标牌形状，只认标准 circle / square / triangle，其余 unknown。
+
+    为什么必须严格：
+      用户实测反馈，形状不匹配会直接穿帮（圆牌贴三角素材、椭圆贴圆）。
+      宁可多判 unknown 跳过，也不能误判后乱贴。
+
+    判定依据（按可靠性排序）：
+      1) 宽高比必须接近 1（0.85~1.18）—— 先排除椭圆、竖长牌
+      2) 填充率 fill = 轮廓面积 / 外接矩形面积
+           圆    π/4 = 0.785
+           方    1.0
+           三角  0.5
+      3) 圆形度 circularity = 4πA/P²（圆 1.0、方 0.785、三角 0.6）
+      4) 三角必须同时满足：填充率高但顶角窄、底边宽 ——
+         实测坑：最初只用「顶部中央是背景」，圆牌顶部也是背景，
+         导致 50% 的圆牌被误判成三角。
+
+    参数区间都是实测校准过的，改之前先跑验证。
+    """
+    import cv2
+    import numpy as np
+
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = image.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W, x2), min(H, y2)
+    roi = image[y1:y2, x1:x2]
+    if roi.shape[0] < 24 or roi.shape[1] < 24:
+        return "unknown"
+    h, w = roi.shape[:2]
+
+    asp = w / float(h)
+    if not (0.85 <= asp <= 1.18):
+        return "unknown"          # 椭圆 / 竖牌 / 横牌，不处理
+
+    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if th[h // 2, w // 2] == 0:
+        th = cv2.bitwise_not(th)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, w // 10) | 1,
+                                                      max(3, h // 10) | 1))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return "unknown"
+    c = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    per = cv2.arcLength(c, True)
+    if area < 120 or per < 18:
+        return "unknown"
+
+    bx, by, bw, bh = cv2.boundingRect(c)
+    if bw < 20 or bh < 20:
+        return "unknown"
+    fill = area / float(bw * bh)
+    circ = 4.0 * np.pi * area / (per * per + 1e-6)
+
+    # 菱形排除：四角全暗
+    corners = [th[2, 2], th[2, w - 3], th[h - 3, 2], th[h - 3, w - 3]]
+    if sum(1 for v in corners if v == 0) >= 3 and fill < 0.66:
+        return "unknown"
+
+    # ---- 三角：填充率 0.45~0.58 且 顶部窄底部宽 ----
+    if 0.45 <= fill <= 0.58:
+        # 顶部 20% 行的前景宽度 vs 底部 20% 行
+        top_w = float((th[int(h * 0.15), :] > 0).sum())
+        bot_w = float((th[int(h * 0.85), :] > 0).sum())
+        if bot_w > 0 and top_w / bot_w < 0.45 and circ < 0.78:
+            return "triangle"
+        return "unknown"
+
+    # ---- 圆：填充率贴近 π/4，圆形度高 ----
+    if 0.70 <= fill <= 0.87 and circ >= 0.80:
+        return "circle"
+
+    # ---- 方：填充率高 ----
+    if fill >= 0.87:
+        return "square"
+
+    return "unknown"
+
+
+def fit_to_sign_contour(image, bbox, margin=0.0):
+    """把检测框收缩到原标牌的实际轮廓。
+
+    为什么不能直接用检测框：
+      YOLO 的 bbox 通常留了几像素余量，实测原标牌轮廓比 bbox 小 5~15%。
+      直接按 bbox 贴素材 → 新牌比原牌大一圈，
+      原牌的深色描边/底板从边缘露出来，看起来就是「重影」。
+
+    做法：在 bbox 内用 Otsu + 最大连通域找标牌本体，返回其外接矩形。
+    找不到可靠轮廓时退回原 bbox（宁可不收缩，也不要乱收缩）。
+    """
+    import cv2
+    import numpy as np
+
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = image.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W, x2), min(H, y2)
+    roi = image[y1:y2, x1:x2]
+    if roi.size == 0 or roi.shape[0] < 14 or roi.shape[1] < 14:
+        return [float(v) for v in bbox]
+
+    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    h, w = g.shape
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 中心是前景才保留，否则反相
+    if th[h // 2, w // 2] == 0:
+        th = cv2.bitwise_not(th)
+    # 闭运算：把牌面内部的黑字/图案连起来，保住外轮廓
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, w // 8) | 1,
+                                                      max(3, h // 8) | 1))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=2)
+
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(th, connectivity=8)
+    if n <= 1:
+        return [float(v) for v in bbox]
+    # 取最大的、且不是整幅画布的那个
+    best = None
+    for i in range(1, n):
+        a = stats[i, cv2.CC_STAT_AREA]
+        bw_ = stats[i, cv2.CC_STAT_WIDTH]
+        bh_ = stats[i, cv2.CC_STAT_HEIGHT]
+        if bw_ >= w - 2 and bh_ >= h - 2:
+            continue      # 整幅都算前景，说明分割失败
+        if best is None or a > stats[best, cv2.CC_STAT_AREA]:
+            best = i
+    if best is None:
+        return [float(v) for v in bbox]
+
+    sx = stats[best, cv2.CC_STAT_LEFT]
+    sy = stats[best, cv2.CC_STAT_TOP]
+    sw = stats[best, cv2.CC_STAT_WIDTH]
+    sh = stats[best, cv2.CC_STAT_HEIGHT]
+
+    # 收缩过度保护：新框不小于原框的 55%
+    if sw < w * 0.55 or sh < h * 0.55:
+        return [float(v) for v in bbox]
+    # 放大保护：不超过原框
+    if sw > w or sh > h:
+        return [float(v) for v in bbox]
+
+    if margin:
+        mx, my = int(sw * margin), int(sh * margin)
+        sx, sy = max(0, sx - mx), max(0, sy - my)
+        sw, sh = min(w - sx, sw + 2 * mx), min(h - sy, sh + 2 * my)
+
+    return [float(x1 + sx), float(y1 + sy),
+            float(x1 + sx + sw), float(y1 + sy + sh)]
+
+
 def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):
     """按图案长宽比把检测框收缩成实际粘贴区域，返回新 bbox。"""
     x1, y1, x2, y2 = bbox

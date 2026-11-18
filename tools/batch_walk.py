@@ -68,7 +68,8 @@ def main():
     from replace_sign import detect_signs, load_sign, sign_mask
     from sign_realism2 import paste_v2
     from sign_occlusion import detect_occluder
-    from batch_replace import (fit_bbox, pick_varied_asset, list_signs)
+    from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
+                               fit_to_sign_contour, std_shape, asset_shape)
 
     t0 = time.time()
     print("[1/3] 扫描目录…", flush=True)
@@ -125,6 +126,20 @@ def main():
                 fail += 1
                 continue
 
+            # 严格形状过滤：只处理标准圆/方/三角，且素材形状必须一致。
+            # 实测形状不匹配是穿帮的主因（圆贴三角、椭圆贴圆都会露边），
+            # 宁可跳过，也不贴错。
+            keep_dets = []
+            for d in dets:
+                sh = std_shape(im, d["bbox"])
+                if sh == "unknown":
+                    continue
+                want = "circle" if sh == "circle" else ("triangle" if sh == "triangle" else "rect")
+                keep_dets.append((d, want))
+            if not keep_dets:
+                skip_small += 1     # 统计上并入「不适用形状」
+                continue
+
             seq = os.path.basename(os.path.dirname(p))
             base = os.path.splitext(os.path.basename(p))[0]
             stem = "%s__%s" % (seq, base)
@@ -132,18 +147,24 @@ def main():
             objects = []
             out_im = im
 
-            for d in dets:
-                if a.vary_class:
-                    cls_name, path = pick_varied_asset(
-                        d["class"], table, seed=os.path.basename(p) + str(d["bbox"]))
-                else:
-                    from batch_replace import pick_neutral_asset
-                    cls_name, path = pick_neutral_asset(d["class"], table)
-                if not path:
+            for d, want in keep_dets:
+                # 在该大类下找「形状匹配」的素材
+                cands = [(nm, pp) for nm, pp in table.items()
+                         if (nm == d["class"] or nm.startswith(d["class"] + "_"))
+                         and asset_shape(nm) == want]
+                if not cands:
                     continue
+                if a.vary_class:
+                    import hashlib
+                    h = int(hashlib.md5((os.path.basename(p) + str(d["bbox"])).encode()).hexdigest()[:8], 16)
+                    cls_name, path = cands[h % len(cands)]
+                else:
+                    cls_name, path = cands[0]
                 s = load_sign(path)
                 m = sign_mask(s)
-                bbox = fit_bbox(d["bbox"], m.shape)
+                # 先把检测框收缩到原标牌实际轮廓，避免新牌比原牌大一圈
+                tight = fit_to_sign_contour(out_im, d["bbox"])
+                bbox = fit_bbox(tight, m.shape)
                 out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox)
                 if not cinfo.get("ok"):
                     continue
