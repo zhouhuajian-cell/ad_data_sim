@@ -181,6 +181,61 @@ def int_param(p, key, default=None):
     except (TypeError, ValueError):
         raise ValueError("%s 必须是整数，收到 %r" % (key, v))
 
+
+SMOKE_SCRIPT = "/data/avsynth/ObjSmokeTools/run_obj_smoke.sh"
+SMOKE_ROOT = "/data/render"
+SMOKE_ANNOTATIONS = {"obj": "coco/annotations/instances_all.json",
+                     "gnd": "ground_annotations.json"}
+SMOKE_LAUNCH_LOCK = threading.Lock()
+
+
+def smoke_artifact(run, kind):
+    match = re.fullmatch(r"(obj|gnd)_smoke\.[A-Za-z0-9]{6}", run)
+    if not match:
+        return None
+    relative = ("overlay/contact_sheet.jpg" if kind == "sheet"
+                else SMOKE_ANNOTATIONS[match.group(1)])
+    if kind == "scene":
+        if match.group(1) != "obj":
+            return None
+        relative = "scene_annotations.json"
+    path = os.path.join(SMOKE_ROOT, run, relative)
+    return path if os.path.realpath(path) == path and os.path.isfile(path) else None
+
+
+def smoke_status(mode):
+    with JOBS_LOCK:
+        jobs = [dict(j) for j in JOBS.values()]
+    latest = max((j for j in jobs if j["action"] == mode + "_smoke"),
+                 key=lambda j: j["started_ts"], default=None)
+    job = None
+    if latest:
+        log = tail(latest["log"], 30)
+        match = re.search(r"^输出目录 (/data/render/((?:obj|gnd)_smoke\.[A-Za-z0-9]{6}))$", log, re.M)
+        if match and (latest["status"] == "fail" or latest["status"] == "running"):
+            ue_log = os.path.join(match.group(1), "ue.log")
+            if os.path.realpath(ue_log) == ue_log:
+                log += "\n" + tail(ue_log, 12)
+        job = {"status": latest["status"], "log": log}
+
+    completed = []
+    for name in os.listdir(SMOKE_ROOT):
+        if name.startswith(mode + "_smoke."):
+            sheet = smoke_artifact(name, "sheet")
+            if sheet and smoke_artifact(name, "annotations"):
+                completed.append((os.path.getmtime(sheet), name))
+    busy = render_session_running() or any(
+        j["status"] == "running" and j["action"] in
+        ("obj_smoke", "gnd_smoke", "setup_assets", "preview", "render_start")
+        for j in jobs)
+    result = max(completed, default=(0, None))[1]
+    is_truck = result and mode == "obj" and os.path.isfile(
+        os.path.join(SMOKE_ROOT, result, "obj_truck_0001.json"))
+    is_workzone = result and mode == "obj" and smoke_artifact(result, "scene")
+    return {"job": job, "busy": busy, "result": result,
+            "result_sample": "workzone" if is_workzone else ("truck" if is_truck else "traffic")}
+
+
 def build_cmd(action, p, cfg):
     """白名单动作 → argv 列表（不走 shell，参数原样传递）。非法参数抛 ValueError。"""
     s, py = cfg["scripts_dir"], PY
@@ -197,6 +252,13 @@ def build_cmd(action, p, cfg):
                 "--cameras", os.path.join(d, "cameras.json"),
                 "-o", p.get("out") or cfg["queue_file"],
                 "--seed", str(int_param(p, "seed", 20261113))]
+
+    if action in ("obj_smoke", "gnd_smoke"):
+        mode = action.split("_")[0]
+        sample = p.get("sample", "traffic")
+        if sample != "traffic" and (mode != "obj" or sample not in ("truck", "workzone")):
+            raise ValueError("不支持的小样类型")
+        return ["runuser", "-u", "algo", "--", "bash", SMOKE_SCRIPT, mode, sample]
     if action == "setup_assets":
         return ["bash", os.path.join(cfg["scripts_dir"], "linux", "run_setup.sh"),
                 cfg["uproject"], cfg["ue_dir"]]
@@ -278,6 +340,12 @@ def precheck(action, cfg):
     为什么要这层：脚本自己报错时人已经点完按钮了，看到的是 tmux/bash 的英文报错；
     无人值守场景下，缺工程/缺引擎是最常见的"看起来点得动其实跑不了"。
     """
+
+    if action in ("obj_smoke", "gnd_smoke"):
+        if not os.path.isfile(SMOKE_SCRIPT):
+            return "交通场景小样脚本未安装"
+        if smoke_status(action.split("_")[0])["busy"]:
+            return "UE 正在运行作业，请稍后再试"
     if action in ("setup_assets", "preview"):
         if render_session_running():
             return "渲染正在运行，先停止渲染再制作验证资产"
@@ -765,6 +833,25 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+
+        if u.path in ("/gallery", "/gallery.html"):
+            with open(os.path.join(BASE, "gallery.html"), "rb") as f:
+                return self._send(200, f.read(), "text/html; charset=utf-8")
+
+        if u.path in ("/bev", "/obj", "/gnd"):
+            with open(os.path.join(BASE, "obj.html"), "rb") as f:
+                return self._send(200, f.read(), "text/html; charset=utf-8")
+        status = re.fullmatch(r"/api/(obj|gnd)/status", u.path)
+        if status:
+            return self._send(200, smoke_status(status.group(1)))
+        result = re.fullmatch(r"/api/(obj|gnd)/result/([^/]+)/(sheet|annotations|scene)", u.path)
+        if result:
+            mode, run, kind = result.groups()
+            artifact = smoke_artifact(run, kind) if run.startswith(mode + "_") else None
+            if artifact:
+                with open(artifact, "rb") as f:
+                    return self._send(200, f.read(), "image/jpeg" if kind == "sheet" else "application/json")
+            return self._send(404, {"error": "结果文件不存在"})
         if u.path in ("/", "/index.html"):
             return self._send(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
         # [TSR-API] 提供 tsr.html
@@ -888,6 +975,19 @@ class H(BaseHTTPRequestHandler):
                                     "images": files[offset:offset + limit]})
 
         # [TSR-API] 单张实拍图
+        if u.path == "/api/tsr/src":
+            # 批量产出的原图：按 annotations 里记的 source_path 读取
+            d = (q.get("dir") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            maxw = int((q.get("max") or ["900"])[0])
+            ap = os.path.join(d, "annotations", stem + ".json")
+            if not os.path.isfile(ap):
+                return self._send(404, {"error": "标注不存在"})
+            with open(ap, "r", encoding="utf-8") as f:
+                a = json.load(f)
+            sp = a.get("source_path", "")
+            return self._send_image(max_w=maxw)(sp)
+
         if u.path == "/api/tsr/image":
             d = (q.get("dir") or [""])[0]
             f = (q.get("file") or [""])[0]
@@ -901,7 +1001,7 @@ class H(BaseHTTPRequestHandler):
 
         # [PRESCREEN] 查进度 / 取结果
         if u.path == "/api/tsr/walk_progress":
-            tag = (qs.get("job") or [""])[0]
+            tag = (q.get("job") or [""])[0]
             prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
             if not os.path.isfile(prog):
                 return self._send(200, {"phase": "unknown"})
@@ -941,13 +1041,66 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, info)
 
         # [TSR-API] 替换结果图
+        if u.path == "/api/tsr/gallery":
+            # 批量产出的相册：返回文件名 + 原图 + 合成图 URL
+            d = (q.get("dir") or [""])[0]
+            limit = int((q.get("limit") or ["400"])[0])
+            if not d:
+                # 在多个产出根目录下找带 annotations 的目录，按修改时间取最新。
+                # 注意：批量的 --out 可以直接指定 /data/render/xxx，不一定在 TSR_OUT_DIR 下，
+                # 所以两个根目录都要扫。
+                cands = []
+                for root in (TSR_OUT_DIR, "/data/render"):
+                    if not os.path.isdir(root):
+                        continue
+                    for x in os.listdir(root):
+                        full = os.path.join(root, x)
+                        if os.path.isdir(full) and os.path.isdir(os.path.join(full, "annotations")):
+                            cands.append((os.path.getmtime(full), full))
+                cands.sort()
+                walks = [c for c in cands if "/walk_" in c[1] + "/"]
+                d = (walks or cands)[-1][1] if (walks or cands) else ""
+            if not d or not os.path.isdir(d):
+                return self._send(404, {"error": "目录不存在", "dir": d})
+            ann_dir = os.path.join(d, "annotations")
+            items = []
+            if os.path.isdir(ann_dir):
+                for fn in sorted(os.listdir(ann_dir))[:limit]:
+                    if not fn.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(ann_dir, fn), "r", encoding="utf-8") as f:
+                            a = json.load(f)
+                    except Exception:
+                        continue
+                    items.append({
+                        "stem": fn[:-5],
+                        "composed": a.get("image", ""),
+                        "source_name": a.get("source_image", ""),
+                        "country": "",
+                        "objects": a.get("objects", []),
+                    })
+            return self._send(200, {"dir": d, "count": len(items), "items": items})
+
         if u.path == "/api/tsr/result":
             f = (q.get("file") or [""])[0]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.(?:jpg|png)", f, re.I):
                 return self._send(400, {"error": "invalid"})
             p = os.path.join(TSR_OUT_DIR, f)
             if not os.path.isfile(p):
-                return self._send(404, {"error": "not found"})
+                # 批量产出可能直接落在 /data/render/<目录>/ 下，也要能取到
+                alt = None
+                rroot = "/data/render"
+                if os.path.isdir(rroot):
+                    for x in os.listdir(rroot):
+                        cand = os.path.join(rroot, x, f)
+                        if os.path.isfile(cand):
+                            alt = cand
+                            break
+                if alt:
+                    p = alt
+                else:
+                    return self._send(404, {"error": "not found"})
             with open(p, "rb") as fh:
                 blob = fh.read()
             # ⚠️ 必须 no-store：预览图文件名固定（xxx_preview.jpg），
@@ -1013,6 +1166,17 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
     def do_POST(self):
         u = urlparse(self.path)
+
+        smoke = re.fullmatch(r"/api/(obj|gnd)/run", u.path)
+        if smoke:
+            payload = self._body()
+            if not isinstance(payload, dict):
+                return self._send(400, {"error": "小样参数须为 JSON 对象"})
+            with SMOKE_LAUNCH_LOCK:
+                rec, error = start_job(smoke.group(1) + "_smoke", payload)
+            if error:
+                return self._send(409, {"error": error})
+            return self._send(202, {"id": rec["id"]})
         if u.path == "/api/preview":
             rec, err = start_job("preview", {})
             return self._send(400, {"error": err}) if err else self._send(200, {"id": rec["id"]})

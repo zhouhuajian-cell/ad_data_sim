@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OBJ 交通目标</title>
+<style>
+  body { margin: 0; background: #111827; color: #e2e8f0; font: 16px system-ui, sans-serif; }
+  main { max-width: 1200px; margin: auto; padding: 24px; }
+  a { color: #76dfdb; }
+  section { margin: 18px 0; padding: 18px; background: #1e293b; border-radius: 8px; }
+  button { background: #76dfdb; color: #10242d; border: 0; padding: 10px 16px; border-radius: 6px; font: inherit; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  img { display: block; width: 100%; height: auto; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
+</style>
+<main>
+  <section id="local-entry" hidden>
+    <p>正在打开服务器上的 OBJ 工作台。</p>
+    <a href="http://10.2.248.34:8010/obj">打开 OBJ 工作台</a>
+  </section>
+  <div id="workspace">
+  <a href="/">返回工作台</a>
+  <nav aria-label="BEV 仿真模块">
+    <a href="/bev">OBJ 交通目标</a> · <a href="/bev?module=gnd">GND 地面标线</a>
+  </nav>
+  <h1>BEV 仿真工作台</h1>
+  <h2 id="module-title">OBJ 交通目标</h2>
+  <section>
+    <p id="description">用车辆、行人和锥桶代理模型渲染 3 帧 RGB，并导出 2D 标注。启动 UE 可能需要几分钟。</p>
+    <label id="sample-control">场景
+      <select id="sample">
+        <option value="traffic">车辆、行人和锥桶</option>
+        <option value="truck">卡车代理</option>
+        <option value="workzone">道路施工（卡车、锥桶和标线）</option>
+      </select>
+    </label>
+    <button id="run" disabled>运行三帧小样</button>
+    <p id="status" role="status">正在获取作业状态</p>
+    <details id="details" hidden><summary>作业日志</summary><pre id="log"></pre></details>
+  </section>
+  <section id="result" hidden>
+    <h2 id="title">上次完成的小样</h2>
+    <img id="sheet" alt="三帧渲染与标注抽检图">
+    <p><a id="annotations" download>下载标注</a></p>
+    <p id="scene-download" hidden><a id="scene-annotations" download="scene_annotations.json">下载标线与障碍物完整 JSON</a></p>
+  </section>
+  </div>
+</main>
+<script>
+const run = document.getElementById('run');
+const status = document.getElementById('status');
+const mode = location.pathname === '/gnd' ||
+  new URLSearchParams(location.search).get('module') === 'gnd' ? 'gnd' : 'obj';
+const endpoint = '/api/' + mode;
+const annotations = document.getElementById('annotations');
+const sample = document.getElementById('sample');
+if (mode === 'gnd') {
+  document.getElementById('sample-control').hidden = true;
+  document.title = document.getElementById('module-title').textContent = 'GND 地面标线';
+  document.getElementById('description').textContent =
+    '渲染 3 帧道路标线，包含白色边线、白色虚线、黄色实线和停止线。启动 UE 可能需要几分钟。';
+  annotations.textContent = '下载标线分段投影 JSON';
+  annotations.download = 'ground_annotations.json';
+} else {
+  annotations.textContent = '下载 COCO 标注';
+  annotations.download = 'instances_all.json';
+}
+let polling;
+let displayed;
+
+async function request(path, method = 'GET') {
+  const options = {method, cache: 'no-store'};
+  if (method === 'POST') {
+    options.headers = {'Content-Type': 'application/json'};
+    options.body = JSON.stringify({sample: mode === 'obj' ? sample.value : 'traffic'});
+  }
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+
+async function refresh() {
+  try {
+    const {job, result, busy, result_sample} = await request(endpoint + '/status');
+    run.disabled = busy;
+    status.textContent = {
+      running: '正在运行，完成后会显示本次抽检图。',
+      ok: '小样已完成。',
+      fail: '小样失败，请查看作业日志。'
+    }[job?.status] || (busy ? 'UE 正在运行其他任务。' : '可以启动小样。');
+    if (job) {
+      document.getElementById('details').hidden = false;
+      document.getElementById('log').textContent = job.log;
+    }
+    if (result && result !== displayed) {
+      const names = {truck: '卡车代理', workzone: '道路施工'};
+      document.getElementById('title').textContent = '上次完成的小样' +
+        (names[result_sample] ? ' · ' + names[result_sample] : '');
+      document.getElementById('scene-download').hidden = result_sample !== 'workzone';
+      document.getElementById('scene-annotations').href = endpoint + '/result/' + result + '/scene';
+      document.getElementById('sheet').src = endpoint + '/result/' + result + '/sheet';
+      annotations.href = endpoint + '/result/' + result + '/annotations';
+      document.getElementById('result').hidden = false;
+      displayed = result;
+    }
+  } catch (error) {
+    status.textContent = error.message;
+    run.disabled = false;
+  }
+}
+
+async function poll() {
+  await refresh();
+  polling = setTimeout(poll, 3000);
+}
+
+run.onclick = async () => {
+  clearTimeout(polling);
+  run.disabled = true;
+  try {
+    await request(endpoint + '/run', 'POST');
+  } catch (error) {
+    status.textContent = error.message;
+    run.disabled = false;
+    polling = setTimeout(poll, 5000);
+    return;
+  }
+  await poll();
+};
+if (location.protocol === 'file:') {
+  document.getElementById('workspace').hidden = true;
+  const entry = document.getElementById('local-entry');
+  entry.hidden = false;
+  location.replace(entry.querySelector('a').href);
+} else {
+  poll();
+}
+</script>
+</html>

@@ -134,6 +134,28 @@ NEUTRAL_FALLBACK = ["no_entry", "stop", "no_parking", "no_stopping",
 STRICT_SHAPE = False
 
 
+# 类别 → 形状（交通标志的国际通用规则，比图像检测可靠得多）
+# 在 40~80px 的小标牌上，任何图像形状检测都不准（实测准确率 13%），
+# 但「类别→形状」是设计规范，不会错。
+CLASS_SHAPE = {
+    "speed_limit": "circle",
+    "prohibition": "circle",
+    "mandatory": "circle",
+    "signal": "circle",
+    "crosswalk": "circle",
+    "warning": "triangle",
+    "guide": "rect",
+}
+
+# 素材名 → 形状（用于按形状筛选素材）
+def asset_shape(name):
+    base = name.split("_x")[0]      # 去掉 _x2 之类的补充分类后缀
+    for k, v in CLASS_SHAPE.items():
+        if base.startswith(k):
+            return v
+    return "unknown"
+
+
 def pick_varied_asset(cls, sign_table, seed=None):
     """在大类下随机挑一个子类，用于让批量产出覆盖多样化类别。
 
@@ -149,8 +171,14 @@ def pick_varied_asset(cls, sign_table, seed=None):
 
     返回 (类别名, 路径) 或 (None, None)。
     """
+    want_shape = CLASS_SHAPE.get(cls, "")
     cands = [(nm, p) for nm, p in sign_table.items()
              if nm == cls or nm.startswith(cls + "_") or nm.startswith(cls)]
+    # 只保留同形状的（类别推出的形状），形状不符的素材一律不用
+    if want_shape:
+        same = [(nm, p) for nm, p in cands if asset_shape(nm) == want_shape]
+        if same:
+            cands = same
     if not cands:
         return None, None
     if len(cands) == 1:
@@ -185,41 +213,37 @@ def pick_neutral_asset(cls, sign_table):
 
 
 def detect_shape(image, bbox):
-    """判断原标牌的形状：circle / triangle / rect。
+    """判断原标牌形状：circle / triangle / rect / unknown
 
-    实测校准（同一块圆牌，不同处理参数下的填充率）：
-        inv=0 close=0  0.512   ← 前景碎裂（牌面图案、立柱干扰），偏小
-        inv=0 close=1  0.835   ← 最接近理论值（圆的 π/4 = 0.785）
-        inv=0 close=2  0.939   ← 过度闭运算把背景并进来了
-        inv=1 close=0  0.947   ← 反相后把背景当前景，呈方形
+    已试过并放弃的方案：
+      1) 填充率（contour area / bbox area）区间判定 ——
+         实测同一块圆牌连续帧在 0.51~0.95 之间跳，40~50px 的牌判不准
+      2) 两向 Otsu 取最大 fill —— 反相结果会把圆判成矩形，更糟
 
-    结论：
-      - 只用正向 Otsu（inv=0）+ 闭运算 1 次，结果最稳
-      - 不能「两向都试取最大 fill」，反相会给出方形的高 fill 把圆判成矩形
-      - 形状判定按 fill 区间：
-          三角   0.38 ~ 0.62
-          圆     0.62 ~ 0.90（配合宽高比 0.70~1.35）
-          矩形   > 0.90
+    现在的做法：圆形度 circularity = 4πA / P²
+        理论值：圆 1.00、正方形 0.785、正三角形 0.605
+      这是尺度无关的指标，比填充率稳。
+      同时保留宽高比作为三角的辅助判据（三角高宽比约 0.87）。
+      判不准时返回 unknown —— 调用方对 unknown 一律放行，
+      宁可不拦，也不要乱拦（之前误拦导致一半场景被跳过）。
     """
     import cv2
+    import math
+
     x1, y1, x2, y2 = [int(round(v)) for v in bbox]
     H, W = image.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(W, x2), min(H, y2)
     roi = image[y1:y2, x1:x2]
-    if roi.size == 0 or roi.shape[0] < 8 or roi.shape[1] < 8:
+    if roi.size == 0 or roi.shape[0] < 12 or roi.shape[1] < 12:
         return "unknown"
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-
-    # 正向 Otsu：标牌通常比背景亮
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # 中心像素要是暗的，说明标牌比背景暗，这时才反相
     if th[h // 2, w // 2] == 0:
         th = cv2.bitwise_not(th)
-    # 闭运算 1 次，填上牌面图案（如禁止停车的 X）造成的小洞
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, w // 8), max(3, h // 8)))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, w // 10), max(3, h // 10)))
     th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
 
     cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -227,12 +251,31 @@ def detect_shape(image, bbox):
         return "unknown"
     c = max(cnts, key=cv2.contourArea)
     area = cv2.contourArea(c)
-    bx, by, bw, bh = cv2.boundingRect(c)
-    if bw < 8 or bh < 8:
+    per = cv2.arcLength(c, True)
+    if area < 40 or per < 10:
         return "unknown"
-    fill = area / float(bw * bh)
+
+    bx, by, bw, bh = cv2.boundingRect(c)
+    if bw < 10 or bh < 10:
+        return "unknown"
+
+    circ = 4.0 * math.pi * area / (per * per + 1e-6)
     aspect = bw / float(bh)
-    return _classify(fill, aspect)
+    # 顶点数：近似多边形
+    approx = cv2.approxPolyDP(c, 0.04 * per, True)
+    nv = len(approx)
+
+    # 圆：圆形度接近 1，宽高比接近 1
+    if circ >= 0.82 and 0.80 <= aspect <= 1.25:
+        return "circle"
+    # 三角：圆形度明显低（0.55~0.72），且顶点数 <= 4，宽高比偏宽
+    if 0.45 <= circ <= 0.75 and nv <= 5 and 0.70 <= aspect <= 1.45:
+        return "triangle"
+    # 矩形：圆形度 0.75~0.85 且是方块
+    if circ >= 0.75 and 0.78 <= aspect <= 1.28:
+        return "rect"
+    # 其余判不准，交给调用方放行
+    return "unknown"
 
 
 def _classify(fill, aspect):

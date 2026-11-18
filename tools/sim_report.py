@@ -151,6 +151,39 @@ def main():
         print("    <40px 占 %.1f%%（太小的合成效果看不出来）"
               % ((s < 40).mean() * 100))
 
+    # 5.5) 形状匹配：用素材类别推出的形状 vs YOLO 检测到的类别推出的形状
+    print("\n[5.5] 形状匹配一致性")
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from batch_replace import CLASS_SHAPE, asset_shape
+        mismatch = 0
+        checked = 0
+        for fn in picked:
+            with open(os.path.join(ann_dir, fn), encoding="utf-8") as f:
+                d = json.load(f)
+            for o in d.get("objects", []):
+                mat = o.get("material", "")
+                cls = o.get("class", "")
+                if not mat or not cls:
+                    continue
+                s_shape = asset_shape(mat)
+                # 用检出类别对应的期望形状
+                det_cls = cls.split("_")[0]
+                want = CLASS_SHAPE.get(det_cls, "")
+                if not want or s_shape == "unknown":
+                    continue
+                checked += 1
+                if s_shape != want:
+                    mismatch += 1
+        if checked:
+            print("    检查 %d 个实例，形状不符 %d 个 (%.1f%%)  %s"
+                  % (checked, mismatch, 100.0 * mismatch / checked,
+                     "全部匹配" if mismatch == 0 else "存在形状不符"))
+        else:
+            print("    无法检查（标注里缺 material 字段）")
+    except Exception as e:
+        print("    检查失败: %s" % str(e)[:60])
+
     # 6) summary 信息
     sp = os.path.join(a.out, "summary.json")
     if os.path.isfile(sp):
