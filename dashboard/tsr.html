@@ -275,6 +275,16 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
         </select>
         <button class="bigbtn ghost" id="btnLoadImg2" style="flex:1;margin:0;padding:7px;font-size:13px">加载图片</button>
       </div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:7px">
+        <span style="font-size:12px;color:var(--txtDim);white-space:nowrap">标牌形状</span>
+        <select id="fShape" style="flex:1;padding:6px 6px;border-radius:2px;background:var(--inputBg);
+                border:1px solid var(--line);outline:0;font-size:12.5px">
+          <option value="">自动判断</option>
+          <option value="circle">圆形（限速/禁止）</option>
+          <option value="triangle">三角形（警告）</option>
+          <option value="rect">矩形（指路）</option>
+        </select>
+      </div>
       <div class="hint" id="loadStat" style="font-size:12px;color:var(--txtMute)">未加载</div>
     </div>
     <div class="propbody">
@@ -468,6 +478,7 @@ const S = {
   step:'lib', country:'BR', cls:'', manual:false,
   dir:'', file:'', view:'side', showBox:true,
   lib:null, dets:[], prevUrl:'', curImgUrl:'', origUrl:'', imgs:[], idx:-1,
+  shape:'',
   jobId:null, timer:null
 };
 
@@ -973,6 +984,7 @@ async function runPreview(){
   logline('[INFO] 合成中…'); pct('合成', 60);
   $('#btnRun').disabled = true;
   const body = {dir:S.dir, file:S.file, country:S.country};
+  const sh = $('#fShape'); if (sh && sh.value) body.shape = sh.value;
   if (S.manual && $('#fTargetClass').value.trim())
     body.target_class = $('#fTargetClass').value.trim();
   const r = await api('/api/tsr/replace', {method:'POST',
@@ -997,6 +1009,7 @@ async function runBatch(){
   $('#btnBatch').disabled = true;
   $('#batchLog').textContent = '提交中…';
   const body = {dir:S.dir, country:S.country, limit:+$('#fLimit').value};
+  const sh2 = $('#fShape'); if (sh2 && sh2.value) body.shape = sh2.value;
   if (S.manual && $('#fTargetClass').value.trim())
     body.target_class = $('#fTargetClass').value.trim();
   const r = await api('/api/tsr/batch', {method:'POST',

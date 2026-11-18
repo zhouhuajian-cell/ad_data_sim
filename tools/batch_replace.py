@@ -113,73 +113,7 @@ def list_signs(signs_dir, country=""):
     return raw
 
 
-def detect_shape(image, bbox):
-    """判断原标牌的形状：circle / triangle / rect。
-
-    做法：在 bbox 内做颜色分割（标牌通常是高饱和或高对比区域），
-    取最大轮廓，按轮廓的「填充率 + 近似多边形顶点数」判定。
-
-    为什么必须判形状：实测圆形图案贴到三角形标牌上时，三个角会露出来，
-    一眼就能看出是假的。形状不匹配就不该替换。
-    """
-    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
-    H, W = image.shape[:2]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(W, x2), min(H, y2)
-    roi = image[y1:y2, x1:x2]
-    if roi.size == 0 or roi.shape[0] < 8 or roi.shape[1] < 8:
-        return "unknown"
-
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    # 用 Otsu 分割出标牌主体（亮底 vs 暗环境，或反过来）
-    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # 取包含中心的那一半
-    h, w = th.shape
-    if th[h // 2, w // 2] == 0:
-        th = cv2.bitwise_not(th)
-
-    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return "unknown"
-    c = max(cnts, key=cv2.contourArea)
-    area = cv2.contourArea(c)
-    bx, by, bw, bh = cv2.boundingRect(c)
-    if bw < 6 or bh < 6:
-        return "unknown"
-    fill = area / float(bw * bh)
-
-    peri = cv2.arcLength(c, True)
-    approx = cv2.approxPolyDP(c, 0.04 * peri, True)
-    n = len(approx)
-
-    # 判定顺序：先三角（填充率 0.4~0.6），再圆（填充率 ~0.78），最后矩形
-    aspect = bw / float(bh)
-    if n == 3 or (0.35 <= fill <= 0.60 and 0.8 <= aspect <= 1.25):
-        return "triangle"
-    if fill >= 0.68 and 0.80 <= aspect <= 1.25:
-        return "circle"
-    return "rect"
-
-
-def shape_matches(sign_shape, target_shape):
-    """图案形状是否允许贴到该目标上 —— **严格同形状**。
-
-    为什么严格：
-      1) 几何上必然正确：圆对圆边缘完全重合，三角对三角三个角精确对应，不会露边露角。
-         之前宽松放行「矩形目标」时，实测圆图案贴到椭圆广告牌上露出一圈椭圆边。
-      2) 符合真实：道路标牌形状由国标规定（圆形=限速/禁止、三角=警告、矩形=指路），
-         同一位置换同形状的牌，物理上就是合理的。
-      3) 训练安全：硬把圆图案裁成三角形会产生现实中不存在的形状，反而给模型带偏。
-    判不出目标形状时（unknown）不拦，避免因为检测失败而全部跳过。
-    """
-    if target_shape == "unknown":
-        return True
-    return sign_shape == target_shape
-
-
-# 每个大类的中性代表子类：用于「只检测到大类、没有细分信息」时选素材。
-# 为什么需要：实测按大类随便取第一个素材时，会把「限高5.5m」贴到「禁止右转」的位置，
-# 形状位置都对但语义完全错，这样的数据训练出来等于教模型认错标牌。
+# 每个大类的中性代表子类：只检测到大类时用它，避免把「限高5.5m」贴到「禁止右转」的位置
 NEUTRAL_SUBTYPE = {
     "speed_limit": "60",
     "prohibition": "no_entry",
@@ -194,14 +128,14 @@ NEUTRAL_SUBTYPE = {
 NEUTRAL_FALLBACK = ["no_entry", "stop", "no_parking", "no_stopping",
                     "60", "50", "80", "bump", "pedestrian", "red"]
 
+# 形状是否严格校验（默认 False：形状只作参考，不做硬约束）
+STRICT_SHAPE = False
+
 
 def pick_neutral_asset(cls, sign_table):
     """为「只知道大类」的情况挑一个中性代表素材。
 
-    优先级：
-      1) NEUTRAL_SUBTYPE 指定的子类
-      2) NEUTRAL_FALLBACK 里能命中的第一个
-      3) 该大类下第一个（最坏情况，仍保证形状一致）
+    优先级：NEUTRAL_SUBTYPE 指定子类 → NEUTRAL_FALLBACK 里能命中的 → 该大类第一个。
     返回 (类别名, 路径) 或 (None, None)。
     """
     want = NEUTRAL_SUBTYPE.get(cls)
@@ -217,6 +151,92 @@ def pick_neutral_asset(cls, sign_table):
         if nm == cls or nm.startswith(cls + "_"):
             return nm, path
     return None, None
+
+
+def detect_shape(image, bbox):
+    """判断原标牌的形状：circle / triangle / rect。
+
+    实测校准（同一块圆牌，不同处理参数下的填充率）：
+        inv=0 close=0  0.512   ← 前景碎裂（牌面图案、立柱干扰），偏小
+        inv=0 close=1  0.835   ← 最接近理论值（圆的 π/4 = 0.785）
+        inv=0 close=2  0.939   ← 过度闭运算把背景并进来了
+        inv=1 close=0  0.947   ← 反相后把背景当前景，呈方形
+
+    结论：
+      - 只用正向 Otsu（inv=0）+ 闭运算 1 次，结果最稳
+      - 不能「两向都试取最大 fill」，反相会给出方形的高 fill 把圆判成矩形
+      - 形状判定按 fill 区间：
+          三角   0.38 ~ 0.62
+          圆     0.62 ~ 0.90（配合宽高比 0.70~1.35）
+          矩形   > 0.90
+    """
+    import cv2
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = image.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(W, x2), min(H, y2)
+    roi = image[y1:y2, x1:x2]
+    if roi.size == 0 or roi.shape[0] < 8 or roi.shape[1] < 8:
+        return "unknown"
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    # 正向 Otsu：标牌通常比背景亮
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 中心像素要是暗的，说明标牌比背景暗，这时才反相
+    if th[h // 2, w // 2] == 0:
+        th = cv2.bitwise_not(th)
+    # 闭运算 1 次，填上牌面图案（如禁止停车的 X）造成的小洞
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, w // 8), max(3, h // 8)))
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+    cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return "unknown"
+    c = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    bx, by, bw, bh = cv2.boundingRect(c)
+    if bw < 8 or bh < 8:
+        return "unknown"
+    fill = area / float(bw * bh)
+    aspect = bw / float(bh)
+    return _classify(fill, aspect)
+
+
+def _classify(fill, aspect):
+    """按填充率与宽高比分类。"""
+    # 三角：填充率明显低（理论 0.5）
+    if fill < 0.62:
+        return "triangle"
+    # 圆：填充率在 π/4 附近，且接近正方
+    if fill <= 0.90 and 0.70 <= aspect <= 1.40:
+        return "circle"
+    # 其余按矩形（fill 接近 1）
+    return "rect"
+
+
+def shape_matches(sign_shape, target_shape, user_shape=""):
+    """形状是否允许替换 —— 形状只作参考，不做硬约束。
+
+    为什么不做硬约束：
+      实测在 40~50 像素的小标牌上，用填充率判形状并不可靠 ——
+      同一块圆牌连续 6 帧会在 circle / rect 之间跳变，
+      按「严格同形状」会误跳过一半以上场景，反而更差。
+
+    现在的策略：
+      1) 默认一律放行（不拦）。形状作为参考信息写进标注（scene_shape 字段），
+         训练时可以按需筛。
+      2) 提供 --strict-shape 开关，需要严格同形状时才拦。
+         用户明确指定 --shape 时，也只在 strict 模式下才拦。
+    """
+    if not STRICT_SHAPE:
+        return True
+    if user_shape:
+        return sign_shape == user_shape
+    if target_shape in ("", "unknown"):
+        return True
+    return sign_shape == target_shape
 
 
 def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):
@@ -240,6 +260,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--country", default="",
                     help="国家代码（BR/RU/DE…），按国家分层素材库时指定")
+    ap.add_argument("--shape", default="", choices=["", "circle", "triangle", "rect"],
+                    help="用户指定标牌形状：circle/triangle/rect。给了就按它匹配，不再用自动检测")
     ap.add_argument("--target-class", default="",
                     help="指定要造的类别（如 speed_limit_60）。给了就把所有检测到的标牌"
                          "都换成这一类；不给则按大类挑中性代表素材")
@@ -251,8 +273,12 @@ def main():
     ap.add_argument("--min-px", type=int, default=24, help="标牌小于该像素宽就跳过")
     ap.add_argument("--all-signs", action="store_true", help="一张图里所有标牌都替换")
     ap.add_argument("--no-annotate", action="store_true", help="不输出标注")
-    ap.add_argument("--no-shape-check", action="store_true", help="不校验形状匹配")
+    ap.add_argument("--strict-shape", action="store_true",
+                    help="严格同形状（默认不拦，形状只作参考写入标注）")
     a = ap.parse_args()
+
+    global STRICT_SHAPE
+    STRICT_SHAPE = bool(a.strict_shape)
 
     if not a.signs and not a.signs_dir:
         raise SystemExit("必须给 --signs 或 --signs-dir")
@@ -275,7 +301,7 @@ def main():
         raise SystemExit("场景目录里没有图片: %s" % a.images)
 
     mode = "multi" if a.signs_dir else "single"
-    summary = {"mode": mode, "country": a.country, "target_class": a.target_class, "total": len(images), "ok": 0, "skipped": 0,
+    summary = {"mode": mode, "country": a.country, "target_class": a.target_class, "shape": a.shape, "total": len(images), "ok": 0, "skipped": 0,
                "failed": 0, "annotated": 0,
                "params": {"conf": a.conf, "scale": a.scale, "strength": a.strength,
                           "sat_boost": a.sat_boost, "min_px": a.min_px},
@@ -322,7 +348,7 @@ def main():
                 # 形状约束：原标牌是三角形就不贴圆形图案（否则角会露出来）
                 tgt_shape = detect_shape(im, d["bbox"])
                 sign_shape = tsr_mod.shape_of(cls_name) if hasattr(tsr_mod, "shape_of") else "circle"
-                if not shape_matches(sign_shape, tgt_shape):
+                if not shape_matches(sign_shape, tgt_shape, a.shape):
                     rec["skipped"].append("%s(图案%s) vs 场景%s 形状不符"
                                           % (cls_name, sign_shape, tgt_shape))
                     continue

@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--library", required=True)
     ap.add_argument("--country", default="")
     ap.add_argument("--target-class", default="")
+    ap.add_argument("--shape", default="", choices=["", "circle", "triangle", "rect"])
+    ap.add_argument("--strict-shape", action="store_true")
     ap.add_argument("--bbox", default="")
     ap.add_argument("--conf", type=float, default=0.30)
     a = ap.parse_args()
@@ -35,8 +37,10 @@ def main():
         import cv2
         from replace_sign import detect_signs, load_sign, sign_mask
         from sign_realism import paste_realistic
+        import batch_replace as _br
         from batch_replace import (detect_shape, shape_matches, fit_bbox,
                                    list_signs, pick_neutral_asset)
+        _br.STRICT_SHAPE = bool(a.strict_shape)
 
         im = cv2.imread(a.image)
         if im is None:
@@ -91,7 +95,7 @@ def main():
                 continue
             # 形状约束：形状不符就不贴（避免圆图案塞进三角牌露角）
             from build_library_mtsd import shape_for
-            if shape != "unknown" and not shape_matches(shape_for(cls), shape):
+            if a.strict_shape and not shape_matches(shape_for(cls), shape, a.shape):
                 res["objects"].append({"class": cls, "bbox": d["bbox"],
                                        "scene_shape": shape,
                                        "skipped": "形状不符(%s vs %s)"
