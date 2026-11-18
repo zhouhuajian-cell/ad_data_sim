@@ -1123,8 +1123,18 @@ function initLightbox(){
   }, { passive: false });
 }
 
-initLightbox();
-bindWorkflowBtns();
+/* ⚠️ lightbox 的 DOM 在 script 之后才解析，必须等 DOM 就绪再初始化，
+   否则 getElementById 返回 null，initLightbox 提前 return，
+   window.openLightbox 永远不会被赋值（表现为「点图片没反应」） */
+function bootUi(){
+  initLightbox();
+  bindWorkflowBtns();
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bootUi);
+} else {
+  bootUi();
+}
 
 /* 初始化：先拉素材库，再渲染国家列表与类别 */
 (async () => {
