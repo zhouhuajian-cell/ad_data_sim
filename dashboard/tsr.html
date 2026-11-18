@@ -102,7 +102,8 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .stage{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
 .stage img{display:block;max-width:100%;max-height:calc(100vh - 310px);
   object-fit:contain;border-radius:2px}
-.stage canvas{position:absolute;inset:0;pointer-events:none;display:block}
+.stage canvas{position:absolute;inset:0;pointer-events:none;display:block;
+  transition:opacity .18s ease}
 .hud{position:absolute;padding:5px 11px;border-radius:3px;background:rgba(0,0,0,.62);
   font-size:13px;pointer-events:none}
 .hud.tl{top:12px;left:12px}
@@ -232,7 +233,7 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
         <button data-v="orig">仅原图</button>
       </div>
       <div class="vsep"></div>
-      <label class="chk" style="padding:0"><input type="checkbox" id="cbBox" checked> 叠加检测框</label>
+      <label class="chk" style="padding:0"><input type="checkbox" id="cbBox" checked> 检测框（悬停可隐藏）</label>
       <div class="vsep"></div>
       <button class="btn" id="btnPrevImg">◀ 上一张</button>
       <span id="imgIdx" style="min-width:64px;text-align:center;color:var(--txtDim);font-size:12.5px">— / —</span>
@@ -1204,6 +1205,23 @@ function initLightbox(){
     var cv = document.getElementById('lbCanvas');
     if (cv) cv.style.display = 'none';
   };
+
+  /* 鼠标悬停时临时隐藏检测框，方便看「没有框覆盖」的真实效果 */
+  document.body.addEventListener('mouseover', function(e){
+    var t = e.target;
+    if (t && t.tagName === 'IMG' && t.closest && t.closest('#viewport')) {
+      var cvs = document.querySelectorAll('.stage canvas');
+      cvs.forEach(function(c){ c.style.opacity = '0'; });
+    }
+  });
+  document.body.addEventListener('mouseout', function(e){
+    var t = e.target;
+    if (t && t.tagName === 'IMG' && t.closest && t.closest('#viewport')) {
+      var cvs = document.querySelectorAll('.stage canvas');
+      cvs.forEach(function(c){ c.style.opacity = S.showBox ? '1' : '0'; });
+    }
+  });
+  window.toggleBoxByHover = true;
 
   // 用事件委托：点视口里任意 img 就放大
   document.body.addEventListener('click', function(e){
