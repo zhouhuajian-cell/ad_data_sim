@@ -346,19 +346,19 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
           <div class="h">亮度</div>
           <div class="hint">目标亮度 = 环境亮分位 × 该值。觉得偏亮就往下调。</div>
           <div style="margin-top:8px">
-            <div class="sldrow"><span>亮度增益</span><span id="vBright">0.95</span></div>
-            <input type="range" id="fBrightGain" min="0.5" max="1.3" step="0.05" value="0.95">
+            <div class="sldrow"><span>亮度增益</span><span id="vBright">0.50</span></div>
+            <input type="range" id="fBrightGain" min="0.3" max="1.3" step="0.05" value="0.5">
           </div>
         </div>
         <div class="grp hr">
           <div class="h">雾 / 对比</div>
           <div style="margin-bottom:10px">
-            <div class="sldrow"><span>雾度强度</span><span id="vHaze">1.00</span></div>
-            <input type="range" id="fHazeGain" min="0" max="1.5" step="0.05" value="1">
+            <div class="sldrow"><span>雾度强度</span><span id="vHaze">0.75</span></div>
+            <input type="range" id="fHazeGain" min="0" max="1.5" step="0.05" value="0.75">
           </div>
           <div style="margin-bottom:10px">
-            <div class="sldrow"><span>对比度倍数</span><span id="vContrast">1.05</span></div>
-            <input type="range" id="fContrastGain" min="0.6" max="1.6" step="0.05" value="1.05">
+            <div class="sldrow"><span>对比度倍数</span><span id="vContrast">1.15</span></div>
+            <input type="range" id="fContrastGain" min="0.6" max="1.6" step="0.05" value="1.15">
           </div>
           <div>
             <div class="sldrow"><span>饱和度保留</span><span id="vSatur">0.70</span></div>
@@ -367,8 +367,8 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
         </div>
         <div class="grp hr">
           <div class="h">边缘</div>
-          <div class="sldrow"><span>羽化比例</span><span id="vFeather">0.06</span></div>
-          <input type="range" id="fFeatherRatio" min="0.02" max="0.16" step="0.01" value="0.06">
+          <div class="sldrow"><span>羽化比例</span><span id="vFeather">0.08</span></div>
+          <input type="range" id="fFeatherRatio" min="0.02" max="0.16" step="0.01" value="0.08">
           <div class="hint">越大边缘越软（模糊感强）；越小边缘越硬（贴纸感强）。</div>
         </div>
         <div class="grp hr">
@@ -1178,8 +1178,8 @@ function bindParamSliders(){
   });
   const rst = document.getElementById('btnResetParams');
   if (rst) rst.onclick = function(){
-    const def = {fBrightGain:0.95, fHazeGain:1.0, fContrastGain:1.05,
-                 fSaturKeep:0.70, fFeatherRatio:0.06};
+    const def = {fBrightGain:0.50, fHazeGain:0.75, fContrastGain:1.15,
+                 fSaturKeep:0.70, fFeatherRatio:0.08};
     Object.keys(def).forEach(function(k){
       const e = document.getElementById(k);
       if (e) { e.value = def[k]; e.dispatchEvent(new Event('input')); }
