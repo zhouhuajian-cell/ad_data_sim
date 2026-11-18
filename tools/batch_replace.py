@@ -134,6 +134,35 @@ NEUTRAL_FALLBACK = ["no_entry", "stop", "no_parking", "no_stopping",
 STRICT_SHAPE = False
 
 
+def pick_varied_asset(cls, sign_table, seed=None):
+    """在大类下随机挑一个子类，用于让批量产出覆盖多样化类别。
+
+    为什么需要：
+      原来的 pick_neutral_asset 对同一个大类永远返回同一个子类
+      （比如 speed_limit 永远给 speed_limit_60），
+      跑 50 张出来全是「限速60」，数据集严重偏斜。
+
+    做法：
+      收集该大类下所有可用子类（speed_limit_30/40/60/80...），
+      用 seed（通常是文件名哈希）稳定随机挑一个 ——
+      同一张图重跑结果一致，不同图之间分布均匀。
+
+    返回 (类别名, 路径) 或 (None, None)。
+    """
+    cands = [(nm, p) for nm, p in sign_table.items()
+             if nm == cls or nm.startswith(cls + "_") or nm.startswith(cls)]
+    if not cands:
+        return None, None
+    if len(cands) == 1:
+        return cands[0]
+    import hashlib
+    if seed is None:
+        import random
+        return random.choice(cands)
+    h = int(hashlib.md5(str(seed).encode("utf-8")).hexdigest()[:8], 16)
+    return cands[h % len(cands)]
+
+
 def pick_neutral_asset(cls, sign_table):
     """为「只知道大类」的情况挑一个中性代表素材。
 
@@ -262,6 +291,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--country", default="",
                     help="国家代码（BR/RU/DE…），按国家分层素材库时指定")
+    ap.add_argument("--vary-class", action="store_true",
+                    help="大类下随机挑子类（避免全部贴成同一类，批量更均衡）")
     ap.add_argument("--shape", default="", choices=["", "circle", "triangle", "rect"],
                     help="用户指定标牌形状：circle/triangle/rect。给了就按它匹配，不再用自动检测")
     ap.add_argument("--target-class", default="",
@@ -361,7 +392,11 @@ def main():
                     cls_name = a.target_class
                 else:
                     # A) 中性代表：按大类挑最中性的子类，不做无依据的猜测
-                    cls_name, path = pick_neutral_asset(d["class"], sign_table)
+                    if a.vary_class:
+                        cls_name, path = pick_varied_asset(d["class"], sign_table,
+                                                            seed=os.path.basename(img_path))
+                    else:
+                        cls_name, path = pick_neutral_asset(d["class"], sign_table)
                     if not path:
                         rec["skipped"].append("%s 无匹配素材" % d["class"])
                         continue
