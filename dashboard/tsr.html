@@ -75,6 +75,7 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;
   display:none;align-items:center;justify-content:center;cursor:zoom-out}
 .lightbox.on{display:flex}
+.lightbox canvas{position:absolute;pointer-events:none;display:none}
 .lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;
   box-shadow:0 0 40px rgba(0,0,0,.8);cursor:default}
 .lightbox .lbclose{position:fixed;top:16px;right:20px;font-size:28px;color:#ccc;
@@ -101,7 +102,7 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .stage{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
 .stage img{display:block;max-width:100%;max-height:calc(100vh - 310px);
   object-fit:contain;border-radius:2px}
-.stage canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.stage canvas{position:absolute;inset:0;pointer-events:none;display:block}
 .hud{position:absolute;padding:5px 11px;border-radius:3px;background:rgba(0,0,0,.62);
   font-size:13px;pointer-events:none}
 .hud.tl{top:12px;left:12px}
@@ -616,7 +617,8 @@ function renderView(){
         ${S.showBox? '<canvas id="cvA"></canvas>':''}</div>
       ${showSim ? `<div class="stage"><img id="imgB" src="${S.prevUrl}&t=${Date.now()}">
         <div class="hud tl" style="color:#4A9BD8">仿真后</div>
-        <div class="hud tr" id="hudStats"></div></div>` : ''}
+        <div class="hud tr" id="hudStats"></div>
+        ${S.showBox? '<canvas id="cvB"></canvas>':''}</div>` : ''}
     </div>`;
   } else {
     const src = S.view==='orig' ? S.origUrl : (S.prevUrl || S.origUrl);
@@ -630,33 +632,86 @@ function renderView(){
   if (a) {
     a.onload = () => {
       hud('tbInfo', `分辨率 ${a.naturalWidth} × ${a.naturalHeight}`);
-      drawBoxes('cvA', 'imgA');
+      requestAnimationFrame(() => {
+        drawBoxes('cvA', 'imgA');
+        drawBoxes('cvB', 'imgB');
+        watchStage(a, 'cvA', 'imgA');
+      });
     };
     if (a.complete) a.onload();
   }
   updateHudStats();
 }
 
+/* stage 尺寸变化（图片加载完成、窗口缩放、布局调整）后要重画框，
+   否则 canvas 会残留旧尺寸，框位置全错 */
+let _ro = null;
+function watchStage(img, cvId, imgId){
+  if (!img || !img.parentElement) return;
+  if (_ro) { _ro.disconnect(); _ro = null; }
+  if (typeof ResizeObserver === 'undefined') return;
+  _ro = new ResizeObserver(function(){
+    drawBoxes(cvId, imgId);
+    drawBoxes('cvB', 'imgB');
+  });
+  _ro.observe(img.parentElement);
+}
+
 function drawBoxes(cvId, imgId){
   const cv = document.getElementById(cvId), img = document.getElementById(imgId);
   if (!cv || !img || !S.showBox) return;
-  const w = img.clientWidth, h = img.clientHeight;
-  cv.width = w; cv.height = h;
+  if (!img.naturalWidth) return;     // 图片还没加载完，等 onload 再画
+  // canvas 覆盖整个 stage；图片在 stage 里居中，所以要先算图片相对 stage 的偏移
+  const stage = img.parentElement;
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  cv.width = sw; cv.height = sh;
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0,0,w,h);
-  const sx = w / img.naturalWidth, sy = h / img.naturalHeight;
+  ctx.clearRect(0, 0, sw, sh);
+  // ⚠️ 关键：bbox 是用「原图尺寸」算出来的，而前端为了速度加载的是缩放后的图
+  //    （/api/tsr/image?max=1400 会缩到 1400 宽）。
+  //    所以不能拿 img.naturalWidth 当坐标系，必须用 bbox 对应的原图尺寸。
+  //    S.detSize 由检测接口返回，缺省时退回 img.naturalWidth。
+  const bw_src = (S.detSize && S.detSize[0]) || img.naturalWidth;
+  const bh_src = (S.detSize && S.detSize[1]) || img.naturalHeight;
+  // 图片在 stage 里的显示尺寸（object-fit:contain）
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const fit = Math.min(sw / iw, sh / ih);
+  // bbox 坐标系 → 屏幕坐标的缩放比
+  const kx = (iw * fit) / bw_src;
+  const ky = (ih * fit) / bh_src;
+  const dw = iw * fit, dh = ih * fit;
+  const ox = (sw - dw) / 2, oy = (sh - dh) / 2;   // 图片在 stage 内的左上角
+  const sx = kx, sy = ky;
   S.dets.forEach(d => {
-    const [x1,y1,x2,y2] = d.bbox;
-    ctx.strokeStyle = d.usable ? '#4A9BD8' : '#F57269';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy);
-    const label = `${d.class} ${d.conf.toFixed(2)}`;
-    ctx.font = '600 12px sans-serif';
-    const tw = ctx.measureText(label).width + 10;
-    ctx.fillStyle = d.usable ? 'rgba(54,207,201,.92)' : 'rgba(245,114,105,.92)';
-    ctx.fillRect(x1*sx, Math.max(0,y1*sy-18), tw, 18);
+    const [x1, y1, x2, y2] = d.bbox;
+    const lx = ox + x1 * sx, ly = oy + y1 * sy;
+    let rw = (x2 - x1) * sx, rh = (y2 - y1) * sy;
+    // 标牌常见只有 20~30px，缩到预览尺寸后只剩几像素，
+    // 给框一个最小可见尺寸，保证肉眼能看到在哪
+    const MIN = 16;
+    if (rw < MIN) rw = MIN;
+    if (rh < MIN) rh = MIN;
+    const color = d.usable ? '#4A9BD8' : '#F57269';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    // 四角标记，比实线框更不挡画面
+    const L = Math.min(5, rw * 0.4, rh * 0.4);
+    ctx.beginPath();
+    ctx.moveTo(lx, ly + L); ctx.lineTo(lx, ly); ctx.lineTo(lx + L, ly);
+    ctx.moveTo(lx + rw - L, ly); ctx.lineTo(lx + rw, ly); ctx.lineTo(lx + rw, ly + L);
+    ctx.moveTo(lx + rw, ly + rh - L); ctx.lineTo(lx + rw, ly + rh); ctx.lineTo(lx + rw - L, ly + rh);
+    ctx.moveTo(lx + L, ly + rh); ctx.lineTo(lx, ly + rh); ctx.lineTo(lx, ly + rh - L);
+    ctx.stroke();
+    // 短标签：去掉大类前缀
+    const short = d.class.replace(/^(speed_limit|prohibition|warning|mandatory|guide|signal|crosswalk)_?/, '') || d.class;
+    const txt = short + ' ' + d.conf.toFixed(1);
+    ctx.font = '600 10px sans-serif';
+    const tw = ctx.measureText(txt).width + 7;
+    const lby = ly > 15 ? ly - 14 : ly + rh + 1;
+    ctx.fillStyle = color;
+    ctx.fillRect(lx, lby, tw, 13);
     ctx.fillStyle = '#08131c';
-    ctx.fillText(label, x1*sx+5, Math.max(12, y1*sy-5));
+    ctx.fillText(txt, lx + 3, lby + 10);
   });
 }
 window.addEventListener('resize', () => { if (S.origUrl) renderView(); });
@@ -785,7 +840,7 @@ function pickIndex(i){
   i = Math.max(0, Math.min(S.imgs.length - 1, i));
   S.idx = i;
   S.file = S.imgs[i];
-  S.prevUrl = ''; S.dets = [];
+  S.prevUrl = ''; S.dets = []; S.detSize = null;
   S.origUrl = '/api/tsr/image?dir=' + encodeURIComponent(S.dir) +
               '&file=' + encodeURIComponent(S.file) + '&max=1400';
   const el = $('#imgIdx'); if (el) el.textContent = (i+1) + ' / ' + S.imgs.length;
@@ -985,6 +1040,7 @@ async function autoDetect(silent){
   pct('就绪', 0);
   if (!r.d.ok) { if (!silent) logline('[ERR] 检测失败'); return; }
   S.dets = r.d.detections || [];
+  if (r.d.width && r.d.height) S.detSize = [r.d.width, r.d.height];
   logline(`[INFO] 检出 ${S.dets.length} 个标牌`);
   renderView();
   // 只渲染框（不重新加载图片）
@@ -1092,11 +1148,61 @@ function initLightbox(){
     im.src = src;
     scale = 1;
     im.style.transform = 'scale(1)';
+    var _cv = document.getElementById('lbCanvas');
+    if (_cv) { _cv.style.transform = 'scale(1)'; _cv.style.transformOrigin = 'center center'; }
     lb.classList.add('on');
+    im.onload = function(){ drawLbBoxes(); };
+    // 图片可能已经在缓存里，onload 不会触发，补一次
+    if (im.complete) setTimeout(drawLbBoxes, 30);
   };
+
+  /* 放大视图里也画检测框 —— 放大看就是为了确认框准不准 */
+  function drawLbBoxes(){
+    const cv = document.getElementById('lbCanvas');
+    if (!cv || !S.dets || !S.dets.length || !S.showBox || !S.detSize) {
+      if (cv) cv.style.display = 'none';
+      return;
+    }
+    const r = im.getBoundingClientRect();
+    const iw = im.naturalWidth, ih = im.naturalHeight;
+    if (!iw) return;
+    // 图片按 object-fit:contain 显示，算出可见区域
+    const fit = Math.min(r.width / iw, r.height / ih);
+    const dw = iw * fit, dh = ih * fit;
+    cv.style.left = (r.left + (r.width - dw) / 2) + 'px';
+    cv.style.top  = (r.top  + (r.height - dh) / 2) + 'px';
+    cv.style.width = dw + 'px';
+    cv.style.height = dh + 'px';
+    cv.style.display = 'block';
+    cv.width = Math.round(dw);
+    cv.height = Math.round(dh);
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    // bbox 是 detSize 坐标系，换算到显示尺寸
+    const kx = dw / S.detSize[0], ky = dh / S.detSize[1];
+    S.dets.forEach(function(d){
+      const b = d.bbox; if (!b) return;
+      const x = b[0] * kx, y = b[1] * ky;
+      const w = (b[2] - b[0]) * kx, h = (b[3] - b[1]) * ky;
+      ctx.strokeStyle = d.usable ? '#4A9BD8' : '#F57269';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+      const short = (d.class || '').replace(/^(speed_limit|prohibition|warning|mandatory|guide|signal|crosswalk)_?/, '') || d.class;
+      const txt = short + ' ' + (d.conf || 0).toFixed(2);
+      ctx.font = '600 13px sans-serif';
+      const tw = ctx.measureText(txt).width + 10;
+      ctx.fillStyle = d.usable ? 'rgba(74,155,216,.92)' : 'rgba(245,114,105,.92)';
+      ctx.fillRect(x, Math.max(0, y - 18), tw, 18);
+      ctx.fillStyle = '#08131c';
+      ctx.fillText(txt, x + 5, Math.max(13, y - 5));
+    });
+  }
+  window.drawLbBoxes = drawLbBoxes;
   window.closeLightbox = function(){
     lb.classList.remove('on');
     im.src = '';
+    var cv = document.getElementById('lbCanvas');
+    if (cv) cv.style.display = 'none';
   };
 
   // 用事件委托：点视口里任意 img 就放大
@@ -1119,7 +1225,14 @@ function initLightbox(){
     e.preventDefault();
     scale *= e.deltaY > 0 ? 0.88 : 1.14;
     scale = Math.max(0.2, Math.min(8, scale));
-    im.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    var tf = 'scale(' + scale.toFixed(3) + ')';
+    // canvas 用同样的 transform 和 transform-origin，保证框和图片始终对齐
+    im.style.transform = tf;
+    var cv = document.getElementById('lbCanvas');
+    if (cv && cv.style.display === 'block') {
+      cv.style.transform = tf;
+      cv.style.transformOrigin = 'center center';
+    }
   }, { passive: false });
 }
 
@@ -1157,6 +1270,7 @@ if (document.readyState === 'loading') {
 <div class="lightbox" id="lightbox">
   <span class="lbclose" id="lbClose">×</span>
   <img id="lbImg" src="">
+  <canvas id="lbCanvas"></canvas>
   <div class="lbtip">滚轮缩放 · 点背景或按 Esc 关闭</div>
 </div>
 </body>
