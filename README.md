@@ -2,6 +2,24 @@
 
 > 仓库地址：https://github.com/zhouhuajian-cell/ad_data_sim
 
+## 📄 文档约定
+
+**所有 `.md` 文档一律放在仓库根目录**（本文件夹），不要新建子目录存放。
+
+当前文档：
+
+| 文件 | 内容 |
+|---|---|
+| `README.md` | 本文件，脚本包总览 |
+| `TSR仿真_操作SOP.md` | TSR 标牌仿真完整操作流程（三步 + 常见问题 + 验收清单） |
+| `仿真平台_PRD与技术方案.md` | 产品需求与技术方案 |
+| `UE5_ENV_REPORT_20261117.md` | UE5 环境搭建报告（含 8 个踩坑记录） |
+| `FRONTEND_SPEC.md` | 前端规格说明 |
+| `phase3_checklist.md` | 阶段三验收清单 |
+| `zero_to_render.md` | 从零到出图的步骤 |
+
+> 素材与数据的说明文档（如 `config/README.md`）属于配置说明，随各自目录保留。
+
 对应《UE5感知合成数据双平台实施方案.docx》的**可执行部分**（Windows 创作 + Ubuntu 批量渲染）。
 本目录只做脚本与骨架，**引擎内脚本未在编辑器里跑过**（本机无 UE/无 N 卡）——`batch_capture.py` 必须按表 11 阶段三验收后才算可用。
 
