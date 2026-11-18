@@ -168,7 +168,7 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
 .list button.on{background:#232A33;color:var(--txt);box-shadow:inset 2px 0 0 var(--primary)}
 .list button .n{color:var(--textSecondary);font-size:12px}
 .list button.on .n{color:#bfe0ff}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;max-height:250px;overflow-y:auto}
+.grid3{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;max-height:420px;overflow-y:auto}
 .grid3::-webkit-scrollbar{width:5px}
 .grid3::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
 .grid3 button{border-radius:2px;overflow:hidden;background:#12151A;padding:0;position:relative}
@@ -327,6 +327,9 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
           <div class="h">指定类别</div>
           <input type="text" id="fTargetClass" placeholder="speed_limit_60" disabled
                  style="width:100%;padding:8px 10px;border-radius:3px;background:var(--inputBg);border:0;outline:0">
+          <input type="text" id="fClassFilter" placeholder="搜索类别（支持中文，如 限速 / 禁止停车）"
+                 style="width:100%;padding:7px 10px;border-radius:3px;background:var(--inputBg);
+                        border:1px solid var(--line);outline:0;font-size:12.5px;margin-top:6px">
           <div class="hint" id="classCount">—</div>
           <div class="grid3" id="assetGrid"></div>
         </div>
@@ -755,6 +758,61 @@ function renderCountries(f){
 }
 $('#fCountryFilter').oninput = e => renderCountries(e.target.value);
 
+/* 类别中文名：搜索时中文/英文都能命中 */
+const CLASS_CN = {
+  'speed_limit':'限速', 'prohibition':'禁止', 'warning':'警告',
+  'mandatory':'指示', 'guide':'指路', 'signal':'信号', 'crosswalk':'人行横道',
+  'speed_limit_20':'限速20','speed_limit_30':'限速30','speed_limit_40':'限速40',
+  'speed_limit_50':'限速50','speed_limit_60':'限速60','speed_limit_70':'限速70',
+  'speed_limit_80':'限速80','speed_limit_90':'限速90','speed_limit_100':'限速100',
+  'speed_limit_110':'限速110','speed_limit_120':'限速120',
+  'prohibition_no_entry':'禁止驶入','prohibition_no_parking':'禁止停车',
+  'prohibition_no_stopping':'禁止长停','prohibition_no_left':'禁止左转',
+  'prohibition_no_right':'禁止右转','prohibition_no_u_turn':'禁止掉头',
+  'prohibition_no_overtaking':'禁止超车','prohibition_no_trucks':'禁止货车',
+  'prohibition_no_pedestrians':'禁止行人','prohibition_no_bicycles':'禁止自行车',
+  'prohibition_no_motor_vehicles':'禁止机动车','prohibition_height_limit':'限高',
+  'prohibition_weight_limit':'限重','prohibition_width_limit':'限宽',
+  'prohibition_stop':'停车让行','prohibition_yield':'让行',
+  'warning_pedestrian':'注意行人','warning_children':'注意儿童',
+  'warning_bump':'路面不平','warning_slippery':'易滑',
+  'warning_roadwork':'道路施工','warning_curve_left':'向左急弯',
+  'warning_curve_right':'向右急弯','warning_narrow':'窄路',
+  'warning_roundabout':'环岛','warning_crossroad':'交叉路口',
+  'warning_railway':'铁路道口','warning_steep':'陡坡',
+  'mandatory_go_straight':'直行','mandatory_turn_left':'左转',
+  'mandatory_turn_right':'右转','mandatory_keep_left':'靠左',
+  'mandatory_keep_right':'靠右','mandatory_roundabout':'环岛行驶',
+  'mandatory_min_speed':'最低限速','mandatory_u_turn':'允许掉头',
+  'signal_red':'红灯','guide_parking':'停车','guide_highway':'高速',
+  'crosswalk_sign':'人行横道标志'
+};
+
+function classSearchText(k){
+  const cn = CLASS_CN[k] || '';
+  return (k + ' ' + cn).toLowerCase();
+}
+
+function filterAssetGrid(){
+  const el = document.getElementById('fClassFilter');
+  const q = (el && el.value || '').trim().toLowerCase();
+  const grid = document.getElementById('assetGrid');
+  if (!grid) return;
+  let shown = 0;
+  grid.querySelectorAll('button').forEach(function(b){
+    const txt = classSearchText(b.dataset.k || '');
+    const hit = !q || txt.indexOf(q) >= 0;
+    b.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  const cc = document.getElementById('classCount');
+  if (cc && S._classTotal) {
+    cc.textContent = q
+      ? '搜索「' + q + '」命中 ' + shown + ' / ' + S._classTotal + ' 类'
+      : S.country + ' 共 ' + S._classTotal + ' 个类别';
+  }
+}
+
 async function loadClasses(){
   const c = (S.lib?.countries||[]).find(x=>x.country===S.country);
   if (!c) return;
@@ -762,11 +820,16 @@ async function loadClasses(){
   const ccEl = $('#classCount');
   if (!ccEl) return;
   ccEl.textContent = `${S.country} 共 ${c.class_count} 个类别，点缩略图选为指定类别`;
-  const classes = c.classes.filter(k => !k.startsWith('mtsd_')).slice(0, 12);
-  $('#assetGrid').innerHTML = classes.map(k =>
-    `<button data-k="${k}" title="${k}">
+  // 全部展示，不再截断（之前 slice(0,12) 导致 39 类只看到 12 个）
+  const classes = c.classes.filter(k => !k.startsWith('mtsd_'));
+  $('#assetGrid').innerHTML = classes.map(k => {
+    const cn = CLASS_CN[k] || '';
+    return `<button data-k="${k}" title="${k}${cn ? ' · ' + cn : ''}">
       <img loading="lazy" src="/api/tsr/library/thumb?country=${encodeURIComponent(S.country)}&class=${encodeURIComponent(k)}&t=${Date.now()}">
-    </button>`).join('');
+      <div style="font-size:9.5px;color:var(--txtDim);padding:1px 2px;white-space:nowrap;
+                  overflow:hidden;text-overflow:ellipsis;text-align:center">${cn || k.replace(/^\w+_/, '')}</div>
+    </button>`;
+  }).join('');
   $$('#assetGrid button').forEach(b => b.onclick = () => {
     S.cls = b.dataset.k; $('#fTargetClass').value = S.cls;
     $$('#assetGrid button').forEach(x=>x.classList.toggle('on', x===b));
@@ -1012,6 +1075,16 @@ function bindWorkflowBtns(){
   const p = $('#btnPrevImg'); if (p) p.onclick = () => stepImage(-1);
   const n = $('#btnNextImg'); if (n) n.onclick = () => stepImage(1);
   const b = $('#btnLoadImg2'); if (b) b.onclick = loadFromSource;
+  const cf = $('#fClassFilter');
+  if (cf) {
+    cf.oninput = filterAssetGrid;
+    // 回车直接跳到唯一命中项
+    cf.onkeydown = function(ev){
+      if (ev.key !== 'Enter') return;
+      const vis = [...document.querySelectorAll('#assetGrid button')].filter(b => b.style.display !== 'none');
+      if (vis.length === 1) vis[0].click();
+    };
+  }
   const cs = $('#fCountrySelect');
   if (cs) cs.onchange = () => {
     const cc = cs.value;
@@ -1121,20 +1194,8 @@ async function pollJob(){
   const bat = $('#btnBatch'); if (bat) bat.onclick = runBatch;
 })();
 
-// 选图步骤：在右面板插入目录输入
-(function initPickInputs(){
-  const p = document.createElement('div');
-  p.className = 'grp hr';
-  p.style.marginBottom = '14px';
-  p.innerHTML = `
-    <div class="h">实拍图目录</div>
-    <div class="hint">南美：/mnt/Data_Platform/zhj_datamining/test/projects/Oversea_南美/images/M57-2M_EX5-001_20260806_215252_001</div>
-    <div class="fld" style="margin-top:6px"><label>目录路径</label>
-      <input type="text" id="fDir" value="/mnt/Data_Platform/zhj_datamining/test/projects/Oversea_南美/images/M57-2M_EX5-001_20260806_215252_001"></div>
-    <button class="bigbtn ghost" id="btnLoadImg" style="margin-top:8px">加载图片</button>`;
-  $('[data-panel="class"]').prepend(p);
-  document.getElementById('btnLoadImg').onclick = loadImages;
-})();
+/* 旧的数据源输入已移除，统一由 sourceBar 提供 */
+
 
 /* 页面结构就绪后先绑按钮（不依赖后续初始化是否成功） */
 
