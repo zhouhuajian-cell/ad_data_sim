@@ -1143,6 +1143,22 @@ function readSimParams(){
   return out;
 }
 
+let autoPreviewTimer = null;
+let previewBusy = false;
+
+/* 滑块变化后自动生成预览（防抖 500ms）
+   为什么要防抖：拖一次滑块会触发几十次 input 事件，
+   每次都请求后端会把服务打满，也会让画面闪烁。
+   停止拖动 500ms 后再生成一次，手感接近「实时」。 */
+function scheduleAutoPreview(){
+  if (!S.file) return;                 // 还没选图就不触发
+  clearTimeout(autoPreviewTimer);
+  autoPreviewTimer = setTimeout(function(){
+    if (previewBusy) { scheduleAutoPreview(); return; }
+    runPreview(true);
+  }, 500);
+}
+
 function bindParamSliders(){
   const pairs = [['fBrightGain','vBright'],['fHazeGain','vHaze'],
                  ['fContrastGain','vContrast'],['fSaturKeep','vSatur'],
@@ -1151,7 +1167,10 @@ function bindParamSliders(){
     const el = document.getElementById(pr[0]);
     const lab = document.getElementById(pr[1]);
     if (!el || !lab) return;
-    const upd = function(){ lab.textContent = parseFloat(el.value).toFixed(2); };
+    const upd = function(){
+      lab.textContent = parseFloat(el.value).toFixed(2);
+      scheduleAutoPreview();
+    };
     el.addEventListener('input', upd);
     upd();
   });
@@ -1218,10 +1237,12 @@ async function autoDetect(silent){
 }
 
 /* ============ 预览 ============ */
-async function runPreview(){
-  if (!S.file) { alert('先选一张实拍图'); return; }
+async function runPreview(auto){
+  if (!S.file) { if (!auto) alert('先选一张实拍图'); return; }
+  if (previewBusy) return;
+  previewBusy = true;
   logline('[INFO] 合成中…'); pct('合成', 60);
-  $('#btnRun').disabled = true;
+  if (!auto) $('#btnRun').disabled = true;
   const body = {dir:S.dir, file:S.file, country:S.country};
   const sh = $('#fShape'); if (sh && sh.value) body.shape = sh.value;
   Object.assign(body, readSimParams());
@@ -1229,9 +1250,11 @@ async function runPreview(){
     body.target_class = $('#fTargetClass').value.trim();
   const r = await api('/api/tsr/replace', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  previewBusy = false;
   $('#btnRun').disabled = false;
   pct('就绪', 0);
   if (!r.d.ok) {
+    previewBusy = false;
     logline('[WARN] ' + (r.d.error || '全部跳过'));
     const sk = (r.d.objects||[]).filter(o=>o.skipped).map(o=>o.skipped).join('；');
     if (sk) logline('[WARN] ' + sk.slice(0,90));
