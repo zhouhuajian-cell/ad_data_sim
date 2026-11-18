@@ -57,6 +57,8 @@ def main():
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--signs-dir", default="/data/tsr_library_v2")
     ap.add_argument("--vary-class", action="store_true", default=True)
+    ap.add_argument("--grow", type=float, default=1.12,
+                    help="粘贴区域放大倍数（默认 1.12：YOLO 框不含红色外圈，需放大盖住）")
     ap.add_argument("--jobs-progress", default="",
                     help="进度写到这个文件，面板可轮询")
     a = ap.parse_args()
@@ -69,7 +71,8 @@ def main():
     from sign_realism2 import paste_v2
     from sign_occlusion import detect_occluder
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
-                               fit_to_sign_contour, std_shape, asset_shape)
+                               fit_to_sign_contour, std_shape, asset_shape,
+                               fit_to_inner, measure_face)
 
     t0 = time.time()
     print("[1/3] 扫描目录…", flush=True)
@@ -163,8 +166,18 @@ def main():
                 s = load_sign(path)
                 m = sign_mask(s)
                 # 先把检测框收缩到原标牌实际轮廓，避免新牌比原牌大一圈
-                tight = fit_to_sign_contour(out_im, d["bbox"])
-                bbox = fit_bbox(tight, m.shape)
+                # 实测结论（14 个样本，用红色外圈做真值）：
+                #   YOLO 框画的是「白色内圈」，不含红色外圈；
+                #   红圈比框平均大 (+5.3, +11.0) px。
+                #   所以贴图要按「框 × 1.12」放大，而不是缩小 ——
+                #   缩小会让原牌红圈整圈露在外面（用户反馈的那种「重影」）。
+                # --grow 控制放大倍数，默认 1.12。
+                cx = (d["bbox"][0] + d["bbox"][2]) * 0.5
+                cy = (d["bbox"][1] + d["bbox"][3]) * 0.5
+                hw = (d["bbox"][2] - d["bbox"][0]) * 0.5 * a.grow
+                hh = (d["bbox"][3] - d["bbox"][1]) * 0.5 * a.grow
+                grown = [cx - hw, cy - hh, cx + hw, cy + hh]
+                bbox = fit_bbox(grown, m.shape)
                 out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox)
                 if not cinfo.get("ok"):
                     continue

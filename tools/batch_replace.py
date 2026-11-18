@@ -313,6 +313,100 @@ def shape_matches(sign_shape, target_shape, user_shape=""):
     return sign_shape == target_shape
 
 
+def fit_to_inner(image, bbox, shrink=0.90):
+    """把粘贴区域收缩到原标牌的「内圈」，避免盖住原有的深色外框。
+
+    实测问题：
+      原标牌是「深色外圈 + 白色内圈」的圆牌（49×49），
+      新素材按 49×49 贴上去后，圆形 alpha 的四角露出原牌的深色外圈，
+      视觉上就是「一圈重影」。
+      把粘贴区域收缩到 88~92%，正好盖住白色内圈、不碰深色外圈，
+      圆角处露出的就是原牌的深色描边 —— 看起来跟原牌融为一体。
+
+    参数：
+      shrink  收缩比例（0.90 = 收到 90%）
+    """
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    hw = (x2 - x1) * 0.5 * shrink
+    hh = (y2 - y1) * 0.5 * shrink
+    return [cx - hw, cy - hh, cx + hw, cy + hh]
+
+
+def measure_face(image, bbox, pad=0.25):
+    """测量原标牌「牌面」的实际大小（白色/亮色内圈），返回精确的粘贴区域。
+
+    为什么不按比例收缩：
+      实测贴图溢出量在 -74% ~ +1737% 之间浮动，固定比例（0.88/0.90）完全是猜。
+      原牌的真实结构是「深色描边 + 亮色牌面」，
+      只要把亮色牌面量准了，新牌就能严丝合缝地盖住它，不凸出也不凹陷。
+
+    做法：
+      1) 在 bbox 外扩 pad 的范围内找亮度最高的连通域（牌面通常是亮色）
+      2) 用它的外接矩形作为粘贴区域
+      3) 量不准（面积过小/贴满全框）时退回 bbox 中心 90%
+    """
+    import cv2
+    import numpy as np
+
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = image.shape[:2]
+    bw0, bh0 = x2 - x1, y2 - y1
+    px = int(bw0 * pad)
+    ex1, ey1 = max(0, x1 - px), max(0, y1 - px)
+    ex2, ey2 = min(W, x2 + px), min(H, y2 + px)
+    roi = image[ey1:ey2, ex1:ex2]
+    if roi.size == 0 or roi.shape[0] < 16 or roi.shape[1] < 16:
+        return [float(x1), float(y1), float(x2), float(y2)]
+
+    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    h, w = g.shape
+
+    # 牌面 = 亮色区域。用 Otsu 拿阈值后取「偏亮」的一侧
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bright = th
+    if bright[h // 2, w // 2] == 0:
+        bright = cv2.bitwise_not(bright)
+    # 闭运算把牌面的图案/文字填掉，只留整块牌面
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                  (max(3, w // 12) | 1, max(3, h // 12) | 1))
+    bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, k, iterations=2)
+
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(bright, connectivity=8)
+    if n <= 1:
+        return _fallback(x1, y1, x2, y2, ex1, ey1)
+
+    # 选包含 bbox 中心的最大连通域
+    cx, cy = (x1 + x2) // 2 - ex1, (y1 + y2) // 2 - ey1
+    cx = min(max(cx, 0), w - 1)
+    cy = min(max(cy, 0), h - 1)
+    lab_id = lab[cy, cx]
+    if lab_id == 0:
+        # 中心不在任何亮块里，退而求其次：面积最大的
+        areas = [(stats[i, cv2.CC_STAT_AREA], i) for i in range(1, n)]
+        areas.sort(reverse=True)
+        lab_id = areas[0][1]
+
+    fx = stats[lab_id, cv2.CC_STAT_LEFT] + ex1
+    fy = stats[lab_id, cv2.CC_STAT_TOP] + ey1
+    fw = stats[lab_id, cv2.CC_STAT_WIDTH]
+    fh = stats[lab_id, cv2.CC_STAT_HEIGHT]
+
+    # 合理性检查
+    if fw < bw0 * 0.45 or fh < bh0 * 0.45:
+        return _fallback(x1, y1, x2, y2, ex1, ey1)     # 太小，肯定量错了
+    if fw > bw0 * 1.5 or fh > bh0 * 1.5:
+        return _fallback(x1, y1, x2, y2, ex1, ey1)     # 太大，把背景也算进来了
+
+    return [float(fx), float(fy), float(fx + fw), float(fy + fh)]
+
+
+def _fallback(x1, y1, x2, y2, ex1, ey1):
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    hw, hh = (x2 - x1) * 0.45, (y2 - y1) * 0.45
+    return [cx - hw, cy - hh, cx + hw, cy + hh]
+
+
 def std_shape(image, bbox):
     """严格判断原标牌形状，只认标准 circle / square / triangle，其余 unknown。
 
