@@ -322,7 +322,6 @@ def main():
                 cls, is_longtail = map_label(ob.get("label"), keep_longtail=not a.no_longtail)
                 if not cls:
                     continue
-                # 长尾类别单独统计（便于判断映射是否够用）
                 if is_longtail:
                     stats["longtail"] += 1
                 else:
@@ -336,7 +335,18 @@ def main():
                 sharp = float(cv2.Laplacian(g, -1).var())
                 bright = float(g.mean())
                 score = sharp - abs(bright - 120.0) * 2.0
-                buckets.setdefault(cls, []).append((score, crop))
+                # ⚠️ 内存坑：早期版本把裁切图全部累积到 buckets，遇到巴西这类
+                #    4000+ 张大图的国家会把 30GB 内存吃爆（实测被 OOM kill）。
+                #    改成「只保留每类最好的 per_class 张」，其余立刻丢弃。
+                bucket = buckets.setdefault(cls, [])
+                bucket.append((score, crop))
+                bucket.sort(key=lambda t: -t[0])
+                del bucket[a.per_class:]
+            # 每张原图用完即释放，避免多张 1920x1080 同时驻留
+            del img
+            if len(buckets) > 0 and (len(anns) % 200 == 0):
+                import gc
+                gc.collect()
 
         saved = 0
         for cls, items in buckets.items():

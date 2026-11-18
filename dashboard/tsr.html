@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSR 仿真 · 数据合成</title>
+<style>
+:root{
+  --bg:#0b0f16; --panel:#141b26; --panel2:#1a2331; --line:#243044;
+  --txt:#e6edf7; --dim:#8b9bb4; --accent:#4da3ff; --ok:#3ddc97; --warn:#ffb020; --err:#ff5c5c;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+  font:16px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{display:flex;height:100vh;overflow:hidden}
+
+/* 左侧 */
+aside{width:280px;flex:0 0 280px;background:var(--panel);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;padding:20px 0}
+aside h1{font-size:19px;margin:0 20px 4px;letter-spacing:.5px}
+aside .sub{font-size:13px;color:var(--dim);margin:0 20px 22px}
+.menu{display:flex;flex-direction:column;gap:4px;padding:0 12px}
+.menu button{display:flex;align-items:center;gap:12px;padding:13px 16px;border:0;border-radius:10px;
+  background:transparent;color:var(--dim);font:inherit;font-size:16px;cursor:pointer;text-align:left;width:100%}
+.menu button:hover{background:var(--panel2);color:var(--txt)}
+.menu button.on{background:linear-gradient(90deg,#1d4a7a,#183048);color:#fff;
+  box-shadow:inset 3px 0 0 var(--accent)}
+.menu .n{font-size:13px;opacity:.55;min-width:18px}
+aside .foot{margin-top:auto;padding:16px 20px;font-size:13px;color:var(--dim);border-top:1px solid var(--line)}
+aside .foot b{color:var(--accent)}
+
+/* 主区 */
+main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+header{padding:22px 32px 16px;border-bottom:1px solid var(--line);display:flex;
+  align-items:baseline;gap:16px;flex-wrap:wrap}
+header h2{margin:0;font-size:23px}
+header .hint{color:var(--dim);font-size:14px}
+.body{flex:1;overflow:auto;padding:26px 32px 60px}
+.pane{display:none}
+.pane.on{display:block}
+
+/* 通用 */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:20px}
+.card h3{margin:0 0 6px;font-size:18px}
+.card .desc{color:var(--dim);font-size:14px;margin:0 0 18px}
+label{display:block;font-size:14px;color:var(--dim);margin:14px 0 7px}
+input[type=text],input[type=number],select{width:100%;padding:11px 14px;border-radius:9px;
+  border:1px solid var(--line);background:var(--panel2);color:var(--txt);font:inherit;font-size:15px}
+input:focus,select:focus{outline:0;border-color:var(--accent)}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.row>*{flex:1;min-width:180px}
+button.act{padding:12px 26px;border:0;border-radius:10px;background:var(--accent);color:#06101d;
+  font:inherit;font-size:15px;font-weight:600;cursor:pointer;margin-top:18px}
+button.act:hover{filter:brightness(1.1)}
+button.act:disabled{opacity:.45;cursor:not-allowed}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--txt);font-weight:500}
+.tag{display:inline-block;padding:2px 9px;border-radius:6px;background:var(--panel2);
+  border:1px solid var(--line);font-size:12px;color:var(--dim);margin:2px 4px 2px 0}
+.tag.ok{color:var(--ok);border-color:#1e4d3c;background:#0f241c}
+.tag.warn{color:var(--warn);border-color:#4d3a1e;background:#241c0f}
+.tag.err{color:var(--err);border-color:#4d1e1e;background:#241010}
+.grid{display:grid;gap:14px}
+.g4{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.g6{grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
+.gimg{grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}
+.thumb{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  overflow:hidden;cursor:pointer;transition:.15s}
+.thumb:hover{border-color:var(--accent);transform:translateY(-2px)}
+.thumb.on{border-color:var(--accent);box-shadow:0 0 0 2px rgba(77,163,255,.28)}
+.thumb img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block;background:#0a0e14}
+.thumb .cap{padding:8px 10px;font-size:13px;color:var(--dim);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.thumb .cap b{color:var(--txt);font-weight:600}
+.empty{color:var(--dim);text-align:center;padding:48px 0;font-size:15px}
+.stat{display:flex;gap:34px;flex-wrap:wrap;margin:6px 0 4px}
+.stat div{font-size:14px;color:var(--dim)}
+.stat b{display:block;font-size:28px;color:var(--txt);font-weight:650;line-height:1.2}
+.preview{display:flex;gap:18px;flex-wrap:wrap}
+.preview figure{margin:0;flex:1;min-width:300px}
+.preview img{width:100%;border-radius:10px;border:1px solid var(--line);display:block;background:#0a0e14}
+.preview figcaption{font-size:13px;color:var(--dim);margin-top:8px;text-align:center}
+.bar{height:8px;border-radius:5px;background:var(--panel2);overflow:hidden;margin-top:14px}
+.bar i{display:block;height:100%;background:var(--accent);width:0;transition:.3s}
+pre.log{background:#070b11;border:1px solid var(--line);border-radius:10px;padding:14px;
+  font:13px/1.65 ui-monospace,Consolas,monospace;color:#9fb3cc;max-height:300px;overflow:auto;
+  white-space:pre-wrap;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <h1>TSR 仿真</h1>
+    <p class="sub">实拍照片 × 真实标牌素材 → 训练数据</p>
+    <nav class="menu">
+      <button data-p="lib" class="on"><span class="n">1</span>素材库</button>
+      <button data-p="pick"><span class="n">2</span>选择场景图</button>
+      <button data-p="prev"><span class="n">3</span>单张预览</button>
+      <button data-p="batch"><span class="n">4</span>批量生成</button>
+    </nav>
+    <div class="foot">
+      素材库 <b id="footLib">—</b><br>
+      面板 <b id="footPid">在线</b>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <h2 id="ttl">素材库</h2>
+      <span class="hint" id="hint">按国家分层的真实标牌素材</span>
+    </header>
+    <div class="body">
+
+      <!-- 1 素材库 -->
+      <section class="pane on" id="p-lib">
+        <div class="card">
+          <h3>素材库概况</h3>
+          <p class="desc">来自 MTSD 真实拍摄的标牌裁切图，按国家分层。批量替换时优先用检测场景对应国家的素材。</p>
+          <div class="stat">
+            <div><b id="sCountries">—</b>国家 / 地区</div>
+            <div><b id="sAssets">—</b>素材张数</div>
+            <div><b id="sClasses">—</b>类别数</div>
+          </div>
+          <button class="act ghost" id="reloadLib">刷新</button>
+        </div>
+        <div class="card">
+          <h3>按国家浏览</h3>
+          <p class="desc">点一个国家看它的标牌类别与样例</p>
+          <div id="countryGrid" class="grid g4"></div>
+        </div>
+        <div class="card" id="classCard" style="display:none">
+          <h3 id="classTitle">—</h3>
+          <p class="desc">该国家下可用的类别，点一个看素材</p>
+          <div id="classTags"></div>
+        </div>
+        <div class="card" id="assetCard" style="display:none">
+          <h3 id="assetTitle">—</h3>
+          <div id="assetGrid" class="grid g6"></div>
+        </div>
+      </section>
+
+      <!-- 2 选择场景图 -->
+      <section class="pane" id="p-pick">
+        <div class="card">
+          <h3>实拍图目录</h3>
+          <p class="desc">填服务器上的目录路径。南美实拍：/mnt/Data_Platform/zhj_datamining/test/projects/Oversea_南美/images</p>
+          <label>目录</label>
+          <input type="text" id="imgDir" placeholder="/mnt/Data_Platform/...">
+          <label>国家代码（用哪个国家的素材）</label>
+          <input type="text" id="imgCountry" placeholder="BR">
+          <button class="act" id="loadImgs">加载图片</button>
+          <div id="imgStat" style="margin-top:14px"></div>
+        </div>
+        <div class="card">
+          <h3>图片</h3>
+          <div id="imgGrid" class="grid gimg"></div>
+        </div>
+      </section>
+
+      <!-- 3 单张预览 -->
+      <section class="pane" id="p-prev">
+        <div class="card">
+          <h3>替换预览</h3>
+          <p class="desc">先选好实拍图和素材，这里看合成效果</p>
+          <div id="prevInfo" class="empty">还没有选择图片</div>
+          <button class="act" id="doPreview" disabled>生成预览</button>
+          <div class="bar"><i id="prevBar"></i></div>
+          <div id="prevResult" style="margin-top:18px"></div>
+        </div>
+      </section>
+
+      <!-- 4 批量 -->
+      <section class="pane" id="p-batch">
+        <div class="card">
+          <h3>批量生成训练数据</h3>
+          <p class="desc">对目录里的实拍图批量替换标牌，输出合成图 + 标注</p>
+          <div class="row">
+            <div>
+              <label>数量上限</label>
+              <input type="number" id="bLimit" value="20" min="1" max="2000">
+            </div>
+            <div>
+              <label>指定类别（可空）</label>
+              <input type="text" id="bClass" placeholder="speed_limit_60">
+            </div>
+          </div>
+          <button class="act" id="doBatch">开始批量</button>
+          <div id="batchStat" style="margin-top:16px"></div>
+        </div>
+        <div class="card">
+          <h3>运行日志</h3>
+          <pre class="log" id="batchLog">等待开始…</pre>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, o) => fetch(p, o).then(r => r.json().then(d => ({ok:r.ok, d, code:r.status})));
+
+const S = { country:'', cls:'', dir:'', file:'', lib:null };
+
+/* 导航 */
+document.querySelectorAll('.menu button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.menu button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
+  $('#p-' + b.dataset.p).classList.add('on');
+  const t = {lib:['素材库','按国家分层的真实标牌素材'],
+             pick:['选择场景图','挑要处理哪些实拍照片'],
+             prev:['单张预览','看一张的合成效果'],
+             batch:['批量生成','产出训练数据']};
+  $('#ttl').textContent = t[b.dataset.p][0];
+  $('#hint').textContent = t[b.dataset.p][1];
+});
+
+/* ---------- 1 素材库 ---------- */
+async function loadLib(){
+  const r = await api('/api/tsr/library');
+  if (!r.ok) { $('#countryGrid').innerHTML = '<div class="empty">读取失败：'+(r.d.error||r.code)+'</div>'; return; }
+  S.lib = r.d;
+  $('#sCountries').textContent = r.d.total_countries;
+  $('#sAssets').textContent = r.d.total_assets;
+  $('#sClasses').textContent = new Set(r.d.countries.flatMap(c=>c.classes)).size;
+  $('#footLib').textContent = r.d.total_countries + ' 国 · ' + r.d.total_assets + ' 张';
+  $('#countryGrid').innerHTML = r.d.countries.map(c => `
+    <div class="thumb ${c.country===S.country?'on':''}" data-c="${c.country}">
+      <div style="padding:16px;min-height:78px;display:flex;flex-direction:column;justify-content:center">
+        <div style="font-size:21px;font-weight:650;letter-spacing:.5px">${c.country}</div>
+        <div style="font-size:13px;color:var(--dim);margin-top:4px">${c.count} 张 · ${c.class_count} 类</div>
+      </div>
+    </div>`).join('');
+  $('#countryGrid').querySelectorAll('.thumb').forEach(el => el.onclick = () => showClasses(el.dataset.c));
+}
+// 类别分组：105 个标签平铺太乱，按大类分组显示
+const GROUP_ORDER = ['speed_limit','prohibition','warning','mandatory','guide','signal','crosswalk'];
+const GROUP_CN = {speed_limit:'限速', prohibition:'禁止', warning:'警告', mandatory:'指示',
+                  guide:'指路', signal:'信号', crosswalk:'人行横道', mtsd:'长尾'};
+function groupOf(k){
+  if (k.startsWith('mtsd_')) return 'mtsd';
+  for (const g of GROUP_ORDER) if (k.startsWith(g)) return g;
+  return 'mtsd';
+}
+function showClasses(cc){
+  S.country = cc; S.cls = '';
+  const c = S.lib.countries.find(x => x.country === cc);
+  if (!c) return;
+  document.querySelectorAll('#countryGrid .thumb').forEach(el =>
+    el.classList.toggle('on', el.dataset.c === cc));
+  $('#classCard').style.display = '';
+  $('#classTitle').textContent = cc + ' · ' + c.class_count + ' 个类别';
+
+  // 分组
+  const groups = {};
+  c.classes.forEach(k => (groups[groupOf(k)] = groups[groupOf(k)] || []).push(k));
+  const order = [...GROUP_ORDER, 'mtsd'].filter(g => groups[g]);
+  $('#classTags').innerHTML = order.map(g => {
+    const keys = groups[g].sort();
+    return `<div style="margin:0 0 18px">
+      <div style="font-size:14px;color:var(--dim);margin-bottom:9px">
+        ${GROUP_CN[g] || g} <span style="opacity:.6">· ${keys.length}</span></div>
+      <div>${keys.map(k => `<span class="tag" data-k="${k}"
+        style="cursor:pointer;font-size:13px;padding:5px 11px">${k}</span>`).join('')}</div>
+    </div>`;
+  }).join('');
+  $('#classTags').querySelectorAll('.tag').forEach(el => el.onclick = () => showAssets(el.dataset.k));
+  $('#assetCard').style.display = 'none';
+}
+async function showAssets(cls){
+  S.cls = cls;
+  document.querySelectorAll('#classTags .tag').forEach(el =>
+    el.style.borderColor = el.dataset.k === cls ? 'var(--accent)' : '');
+  const r = await api(`/api/tsr/library/class?country=${encodeURIComponent(S.country)}&class=${encodeURIComponent(cls)}`);
+  $('#assetCard').style.display = '';
+  $('#assetTitle').textContent = cls + ' · ' + (r.d.files||[]).length + ' 张';
+  $('#assetGrid').innerHTML = (r.d.files||[]).map(f => `
+    <div class="thumb"><img loading="lazy" src="/api/tsr/library/thumb?country=${encodeURIComponent(S.country)}&class=${encodeURIComponent(cls)}&t=${Date.now()}">
+      <div class="cap">${f}</div></div>`).join('');
+}
+$('#reloadLib').onclick = loadLib;
+
+/* ---------- 2 选择图片 ---------- */
+$('#loadImgs').onclick = async () => {
+  const dir = $('#imgDir').value.trim();
+  const cc = $('#imgCountry').value.trim().toUpperCase();
+  if (!dir) return;
+  S.dir = dir; S.country = cc;
+  const r = await api(`/api/tsr/images?dir=${encodeURIComponent(dir)}&limit=60`);
+  if (!r.ok) { $('#imgStat').innerHTML = `<span class="tag err">${r.d.error||'读取失败'}</span>`; return; }
+  $('#imgStat').innerHTML = `<span class="tag ok">共 ${r.d.total} 张</span>
+    <span class="tag">显示前 ${r.d.images.length} 张</span>`;
+  $('#imgGrid').innerHTML = r.d.images.map(f => `
+    <div class="thumb" data-f="${f}">
+      <img loading="lazy" src="/api/tsr/image?dir=${encodeURIComponent(dir)}&file=${encodeURIComponent(f)}&max=380">
+      <div class="cap">${f}</div></div>`).join('');
+  $('#imgGrid').querySelectorAll('.thumb').forEach(el => el.onclick = () => {
+    S.file = el.dataset.f;
+    document.querySelectorAll('#imgGrid .thumb').forEach(x => x.classList.remove('on'));
+    el.classList.add('on');
+    updatePrev();
+  });
+};
+
+function updatePrev(){
+  if (!S.file) return;
+  $('#prevInfo').innerHTML = `<span class="tag ok">已选</span>
+    <span style="color:var(--txt);font-size:15px">${S.file}</span>
+    <span class="tag" style="margin-left:8px">国家 ${S.country || '未指定'}</span>`;
+  $('#doPreview').disabled = false;
+}
+
+/* ---------- 3 预览 ---------- */
+$('#doPreview').onclick = async () => {
+  if (!S.file) return;
+  $('#doPreview').disabled = true;
+  $('#prevBar').style.width = '40%';
+  $('#prevResult').innerHTML = '<div class="empty">检测与合成中…</div>';
+  const r = await api('/api/tsr/replace', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dir:S.dir, file:S.file, country:S.country})
+  });
+  $('#prevBar').style.width = '100%';
+  $('#doPreview').disabled = false;
+  setTimeout(()=>$('#prevBar').style.width='0', 600);
+  if (!r.d.ok) {
+    $('#prevResult').innerHTML = `<span class="tag err">${r.d.error || '失败'}</span>`;
+    return;
+  }
+  const objs = (r.d.objects||[]).map(o =>
+    o.skipped ? `<span class="tag warn">${o.class} · 跳过：${o.skipped}</span>`
+              : `<span class="tag ok">${o.class}</span>`).join('');
+  $('#prevResult').innerHTML = `
+    <div class="preview">
+      <figure>
+        <img src="/api/tsr/image?dir=${encodeURIComponent(S.dir)}&file=${encodeURIComponent(S.file)}&max=1000">
+        <figcaption>原图</figcaption>
+      </figure>
+      <figure>
+        <img src="${r.d.url}&t=${Date.now()}">
+        <figcaption>仿真后</figcaption>
+      </figure>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${objs}</div>`;
+};
+
+/* ---------- 4 批量 ---------- */
+let pollTimer = null;
+$('#doBatch').onclick = async () => {
+  if (!S.dir) { $('#batchStat').innerHTML = '<span class="tag err">先在第 2 步加载图片目录</span>'; return; }
+  $('#doBatch').disabled = true;
+  $('#batchStat').innerHTML = '<span class="tag">提交中…</span>';
+  const r = await api('/api/tsr/batch', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dir:S.dir, country:S.country,
+      target_class:$('#bClass').value.trim(), limit:parseInt($('#bLimit').value)||20})
+  });
+  if (!r.ok || !r.d.id) {
+    $('#batchStat').innerHTML = `<span class="tag err">${r.d.error || '提交失败'}</span>`;
+    $('#doBatch').disabled = false; return;
+  }
+  $('#batchStat').innerHTML = `<span class="tag ok">已启动 ${r.d.id}</span>
+    <span class="tag">输出 ${r.d.out}</span>`;
+  poll(r.d.id);
+};
+
+async function poll(id){
+  clearTimeout(pollTimer);
+  const r = await api(`/api/job?id=${id}`);
+  const d = r.d || {};
+  const log = (d.log_tail || d.log || '').trim();
+  $('#batchLog').textContent = log || '运行中…';
+  $('#batchLog').scrollTop = $('#batchLog').scrollHeight;
+  if (d.status === 'running') { pollTimer = setTimeout(() => poll(id), 2000); return; }
+  $('#doBatch').disabled = false;
+  const m = log.match(/完成: 成功 (\d+) \/ 跳过 (\d+) \/ 失败 (\d+)/);
+  $('#batchStat').innerHTML = m
+    ? `<span class="tag ok">成功 ${m[1]}</span><span class="tag warn">跳过 ${m[2]}</span>` +
+      `<span class="tag err">失败 ${m[3]}</span>`
+    : `<span class="tag">结束（${d.status||'?'}）</span>`;
+}
+
+loadLib();
+</script>
+</body>
+</html>

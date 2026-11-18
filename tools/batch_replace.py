@@ -177,6 +177,48 @@ def shape_matches(sign_shape, target_shape):
     return sign_shape == target_shape
 
 
+# 每个大类的中性代表子类：用于「只检测到大类、没有细分信息」时选素材。
+# 为什么需要：实测按大类随便取第一个素材时，会把「限高5.5m」贴到「禁止右转」的位置，
+# 形状位置都对但语义完全错，这样的数据训练出来等于教模型认错标牌。
+NEUTRAL_SUBTYPE = {
+    "speed_limit": "60",
+    "prohibition": "no_entry",
+    "warning": "bump",
+    "mandatory": "go_straight",
+    "guide": "direction",
+    "signal": "red",
+    "crosswalk": "zebra",
+}
+
+# 兜底顺序（越靠前越中性、越常见）
+NEUTRAL_FALLBACK = ["no_entry", "stop", "no_parking", "no_stopping",
+                    "60", "50", "80", "bump", "pedestrian", "red"]
+
+
+def pick_neutral_asset(cls, sign_table):
+    """为「只知道大类」的情况挑一个中性代表素材。
+
+    优先级：
+      1) NEUTRAL_SUBTYPE 指定的子类
+      2) NEUTRAL_FALLBACK 里能命中的第一个
+      3) 该大类下第一个（最坏情况，仍保证形状一致）
+    返回 (类别名, 路径) 或 (None, None)。
+    """
+    want = NEUTRAL_SUBTYPE.get(cls)
+    if want:
+        exact = "%s_%s" % (cls, want)
+        if exact in sign_table:
+            return exact, sign_table[exact]
+    for sub in NEUTRAL_FALLBACK:
+        exact = "%s_%s" % (cls, sub)
+        if exact in sign_table:
+            return exact, sign_table[exact]
+    for nm, path in sign_table.items():
+        if nm == cls or nm.startswith(cls + "_"):
+            return nm, path
+    return None, None
+
+
 def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):
     """按图案长宽比把检测框收缩成实际粘贴区域，返回新 bbox。"""
     x1, y1, x2, y2 = bbox
@@ -198,6 +240,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--country", default="",
                     help="国家代码（BR/RU/DE…），按国家分层素材库时指定")
+    ap.add_argument("--target-class", default="",
+                    help="指定要造的类别（如 speed_limit_60）。给了就把所有检测到的标牌"
+                         "都换成这一类；不给则按大类挑中性代表素材")
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--limit", type=int, default=0, help="最多处理多少张图")
     ap.add_argument("--scale", type=float, default=1.0, help="粘贴区域相对检测框的倍数")
@@ -230,7 +275,7 @@ def main():
         raise SystemExit("场景目录里没有图片: %s" % a.images)
 
     mode = "multi" if a.signs_dir else "single"
-    summary = {"mode": mode, "country": a.country, "total": len(images), "ok": 0, "skipped": 0,
+    summary = {"mode": mode, "country": a.country, "target_class": a.target_class, "total": len(images), "ok": 0, "skipped": 0,
                "failed": 0, "annotated": 0,
                "params": {"conf": a.conf, "scale": a.scale, "strength": a.strength,
                           "sat_boost": a.sat_boost, "min_px": a.min_px},
@@ -257,14 +302,21 @@ def main():
             for d in targets:
                 if single is not None:
                     sign_img, cls_name = single, single_name
+                elif a.target_class:
+                    # B) 人工指定：所有检测到的标牌都换成这一类
+                    path = sign_table.get(a.target_class)
+                    if not path:
+                        rec["skipped"].append("指定类别 %s 不在素材库" % a.target_class)
+                        continue
+                    sign_img = load_sign(path)
+                    cls_name = a.target_class
                 else:
-                    path = tsr_mod.material_for(d["class"], sign_table)
+                    # A) 中性代表：按大类挑最中性的子类，不做无依据的猜测
+                    cls_name, path = pick_neutral_asset(d["class"], sign_table)
                     if not path:
                         rec["skipped"].append("%s 无匹配素材" % d["class"])
                         continue
                     sign_img = load_sign(path)
-                    cls_name = tsr_mod.normalize_class_name(
-                        os.path.splitext(os.path.basename(path))[0])
 
                 sm = sign_mask(sign_img)
                 # 形状约束：原标牌是三角形就不贴圆形图案（否则角会露出来）
