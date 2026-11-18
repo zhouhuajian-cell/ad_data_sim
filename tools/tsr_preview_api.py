@@ -38,6 +38,7 @@ def main():
         from replace_sign import detect_signs, load_sign, sign_mask
         from sign_realism import paste_realistic, make_realistic
         from sign_occlusion import paste_with_occlusion
+        from sign_realism2 import paste_v2
         import batch_replace as _br
         from batch_replace import (detect_shape, shape_matches, fit_bbox,
                                    list_signs, pick_neutral_asset)
@@ -104,10 +105,8 @@ def main():
                 continue
 
             bbox = fit_bbox(d["bbox"], m.shape, keep_ratio=True)
-            out_im, cinfo = paste_with_occlusion(
-                composed, s[:, :, :3], m, bbox,
-                degrade_fn=lambda sig, alp, ref: make_realistic(sig, alp, ref, strength=1.0),
-                shadow=True, strength=1.0)
+            out_im, cinfo = paste_v2(composed, s[:, :, :3], m, bbox,
+                                     strength=1.0, edge_glow=True)
             if not cinfo.get("ok"):
                 continue
             composed = out_im

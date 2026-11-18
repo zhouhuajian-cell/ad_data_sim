@@ -32,6 +32,7 @@ import cv2                                                    # noqa: E402
 from replace_sign import detect_signs, load_sign, sign_mask  # noqa: E402
 from sign_realism import paste_realistic, make_realistic     # noqa: E402
 from sign_occlusion import paste_with_occlusion              # noqa: E402
+from sign_realism2 import paste_v2                           # noqa: E402
 
 # 复用 modules/tsr.py 的类别工具（保持单一事实来源）
 _MODULES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "modules")
@@ -369,12 +370,18 @@ def main():
                 # 用带遮挡保留 + 投影阴影的合成：
                 #   原图里挡在标牌前面的立柱/树枝不会被新标牌盖掉，
                 #   并按场景光照方向投出渐隐阴影，避免「硬贴」感
-                def _deg(sig, alp, ref):
-                    return make_realistic(sig, alp, ref, strength=a.strength)
-                composed, cinfo = paste_with_occlusion(
+                # 优先用 v2（环境氛围匹配 + 边缘过渡）：
+                #   亮度向「环境亮分位」对齐而不是标牌暗部，
+                #   并在雾天自动抬暗部、降对比，解决「像贴纸」的问题
+                composed, cinfo = paste_v2(
                     base, sign_img[:, :, :3], sm, bbox,
-                    degrade_fn=None if a.no_occlusion else _deg,
-                    shadow=not a.no_shadow, strength=a.strength)
+                    strength=a.strength, edge_glow=True)
+                if not cinfo.get("ok"):
+                    def _deg(sig, alp, ref):
+                        return make_realistic(sig, alp, ref, strength=a.strength)
+                    composed, cinfo = paste_with_occlusion(
+                        base, sign_img[:, :, :3], sm, bbox, degrade_fn=_deg,
+                        shadow=not a.no_shadow, strength=a.strength)
                 soft = cinfo if cinfo.get("ok") else None
                 if soft is None:
                     rec["skipped"].append("bbox 过小")
