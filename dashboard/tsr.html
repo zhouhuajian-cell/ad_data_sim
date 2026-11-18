@@ -394,6 +394,17 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
             <div class="fld"><label>检测置信度</label>
               <input type="number" id="fConf" value="0.30" step="0.05" min="0.05" max="0.95"></div>
           </div>
+          <div class="fld" style="margin-top:8px"><label>遍历根目录（递归扫描子目录）</label>
+            <input type="text" id="fWalkRoot"
+                   placeholder="留空 = 只处理上面「实拍图目录」这一层">
+          </div>
+          <div class="row2" style="margin-top:6px">
+            <div class="fld"><label>标牌最小边(px)</label>
+              <input type="number" id="fMinSign" value="40" min="10" max="300"></div>
+            <div class="fld"><label></label>
+              <button class="bigbtn ghost" id="btnWalk" style="padding:7px;font-size:12.5px">遍历批量生成</button></div>
+          </div>
+          <div class="hint">遍历模式会递归扫描根目录下所有图片，自动跳过无标牌或标牌太小的帧。</div>
         </div>
         <div class="grp hr">
           <div class="h">输出内容</div>
@@ -1182,6 +1193,8 @@ function bindParamSliders(){
     el.addEventListener('input', upd);
     upd();
   });
+  const bw = document.getElementById('btnWalk');
+  if (bw) bw.onclick = runWalk;
   const rst = document.getElementById('btnResetParams');
   if (rst) rst.onclick = function(){
     const def = {fBrightGain:0.50, fHazeGain:0.75, fContrastGain:1.15,
@@ -1277,6 +1290,60 @@ async function runPreview(auto){
 }
 
 /* ============ 批量 ============ */
+/* 遍历式批量：递归扫描根目录，跑满目标张数 */
+let walkTimer = null;
+async function runWalk(){
+  const root = ($('#fWalkRoot').value || '').trim() || S.dir;
+  if (!root) { alert('请填遍历根目录'); return; }
+  const body = {
+    root: root,
+    country: S.country,
+    limit: +$('#fLimit').value || 1000,
+    min_sign: +$('#fMinSign').value || 40,
+    conf: +$('#fConf').value || 0.30,
+  };
+  Object.assign(body, readSimParams());
+  const vb = document.getElementById('cbVaryClass');
+  body.vary_class = !!(vb && vb.checked);
+
+  $('#btnWalk').disabled = true;
+  logBatch('[INFO] 启动遍历批量…');
+  const r = await api('/api/tsr/walk', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (!r.d.ok) {
+    $('#btnWalk').disabled = false;
+    logBatch('[ERR] ' + (r.d.error || '启动失败'));
+    return;
+  }
+  const job = r.d.job;
+  logBatch('[OK] 任务已启动：' + job);
+  // 轮询进度
+  clearInterval(walkTimer);
+  walkTimer = setInterval(async function(){
+    try {
+      const pr = await api('/api/tsr/walk_progress?job=' + encodeURIComponent(job));
+      const d = pr.d || {};
+      if (d.phase === 'running') {
+        pct('遍历中 ' + (d.ok||0) + '/' + (d.total_ok||d.ok||0), Math.min(95, Math.round(100*(d.ok||0)/body.limit)));
+        logBatch(`[进度] 已扫 ${d.done} 帧，成功 ${d.ok} 张，跳过(无标牌) ${d.skip_no_sign}，跳过(太小) ${d.skip_small}`);
+      } else if (d.phase === 'done') {
+        clearInterval(walkTimer); walkTimer = null;
+        $('#btnWalk').disabled = false;
+        pct('完成', 0);
+        logBatch(`[完成] 成功 ${d.ok} 张，用时 ${d.elapsed}s`);
+        if (d.tail) logBatch(d.tail.trim().split('\n').slice(-3).join(' | '));
+      }
+    } catch(e) {}
+  }, 3000);
+}
+
+function logBatch(msg){
+  const el = document.getElementById('batchLog');
+  if (!el) return;
+  el.textContent = (el.textContent === '等待开始…' ? '' : el.textContent) + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
 async function runBatch(){
   if (!S.dir) { alert('先加载实拍图目录'); return; }
   $('#btnBatch').disabled = true;

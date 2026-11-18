@@ -900,6 +900,22 @@ class H(BaseHTTPRequestHandler):
             return self._send_image(max_w=maxw)(p)
 
         # [PRESCREEN] 查进度 / 取结果
+        if u.path == "/api/tsr/walk_progress":
+            tag = (qs.get("job") or [""])[0]
+            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
+            if not os.path.isfile(prog):
+                return self._send(200, {"phase": "unknown"})
+            with open(prog, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
+            if os.path.isfile(logf):
+                try:
+                    with open(logf, "r", encoding="utf-8", errors="replace") as f:
+                        d["tail"] = "".join(f.readlines()[-6:])
+                except Exception:
+                    pass
+            return self._send(200, d)
+
         if u.path == "/api/tsr/prescreen_progress":
             tid = (q.get("task") or [""])[0]
             if not re.fullmatch(r"[a-f0-9]{10}", tid):
@@ -1101,6 +1117,41 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, res)
 
         # [TSR-API] 批量替换
+        if u.path == "/api/tsr/walk":
+            # 遍历式批量：递归扫描目录树，自动挑有标牌的帧
+            root = str(body.get("root") or "").strip()
+            if not root or not os.path.isdir(root):
+                return self._send(400, {"error": "目录不存在：" + root})
+            country = str(body.get("country") or "BR")
+            limit = int(body.get("limit") or 1000)
+            min_sign = int(body.get("min_sign") or 40)
+            conf = float(body.get("conf") or 0.30)
+            tag = time.strftime("%m%d_%H%M%S")
+            out_dir = os.path.join(TSR_OUT_DIR, "walk_" + tag)
+            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
+            cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "batch_walk.py"),
+                   "--images", root, "--country", country,
+                   "--out", out_dir, "--limit", str(limit),
+                   "--min-sign", str(min_sign), "--conf", str(conf),
+                   "--signs-dir", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--jobs-progress", prog]
+            if body.get("vary_class", True):
+                cmd.append("--vary-class")
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        cmd += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
+            lf = open(logf, "w")
+            subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+            return self._send(200, {"ok": True, "job": tag,
+                                    "out": out_dir, "progress": prog, "log": logf})
+
         if u.path == "/api/tsr/batch":
             body = p
             d = str(body.get("dir") or "")
