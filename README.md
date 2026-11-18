@@ -17,8 +17,8 @@
 | `FRONTEND_SPEC.md` | 前端规格说明 |
 | `phase3_checklist.md` | 阶段三验收清单 |
 | `zero_to_render.md` | 从零到出图的步骤 |
-
-> 素材与数据的说明文档（如 `config/README.md`）属于配置说明，随各自目录保留。
+| `config字段说明.md` | 四维任务配置（scenes/lights/targets/cameras）的字段契约 |
+| `frontend_reference.html` | 前端界面参考稿（HTML，非文档） |
 
 对应《UE5感知合成数据双平台实施方案.docx》的**可执行部分**（Windows 创作 + Ubuntu 批量渲染）。
 本目录只做脚本与骨架，**引擎内脚本未在编辑器里跑过**（本机无 UE/无 N 卡）——`batch_capture.py` 必须按表 11 阶段三验收后才算可用。
@@ -33,7 +33,7 @@ python3 tools/dryrun_check.py        # 19 项断言，约 10 秒，退出码 0 =
 
 | 路径 | 放哪 | 作用 |
 |---|---|---|
-| `config/` | 本机或服务器 | 四维任务生成样例（scenes/lights/targets/cameras），字段契约见 `config/README.md` |
+| `config/` | 本机或服务器 | 四维任务生成样例（scenes/lights/targets/cameras），字段契约见 `config字段说明.md` |
 | `engine/Content/Python/capture_math.py` | UE 工程 `Content/Python/` | **纯数学**（相机基向量/投屏/3D 框投影/深度归一化/遮挡近似），不依赖 `unreal`，本地可测 |
 | `engine/Content/Python/batch_capture.py` | UE 工程 `Content/Python/` | 引擎内批量捕获：读任务清单 → 生成/随机化 → 相机光照 → 四通道捕获 + 逐帧 JSON；跳过已完成、单帧异常不断批 |
 | `windows/sync_project.ps1` | Windows | 工程单向下发 Ubuntu（rsync 优先，退化 tar-over-ssh；排除 Intermediate/Saved/Binaries/.vs） |
