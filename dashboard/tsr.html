@@ -172,7 +172,9 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
 .grid3::-webkit-scrollbar{width:5px}
 .grid3::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
 .grid3 button{border-radius:2px;overflow:hidden;background:#12151A;padding:0;position:relative}
-.grid3 img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
+/* ⚠️ 用 contain 而非 cover：素材是方形/三角形，cover 会把尖顶和底边裁掉 */
+.grid3 img{width:100%;aspect-ratio:1;object-fit:contain;display:block;
+  background:#181C22}
 .grid3 button.on{outline:2px solid var(--primary)}
 .log{background:#070b11;border-radius:3px;padding:10px;font:12px/1.6 ui-monospace,Consolas,monospace;
   color:#93a8c2;max-height:170px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
