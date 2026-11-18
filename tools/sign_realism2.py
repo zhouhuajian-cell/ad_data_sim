@@ -74,7 +74,8 @@ PARAMS = {
     "haze_gain": 0.75,       # 雾度强度（调小更实、对比更强）
     "contrast_gain": 1.15,   # 对比度相对环境的倍数（调小更灰）
     "satur_keep": 0.70,      # 雾天饱和度保留比例（调小更灰）
-    "feather_ratio": 0.08,   # 边缘羽化 = 标牌短边 × 该比例
+    "feather_ratio": 0.025,  # 边缘羽化 = 标牌短边 × 该比例
+                             # 实测 0.08 时 66px 的牌羽化近 5px，糊出一圈灰晕
     "min_bright": 55.0,      # 亮度下限（保证可辨识）
 }
 
@@ -147,8 +148,10 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
     soft = mask.astype(np.float32) / 255.0
     # 用小标牌的尺寸决定羽化半径：越小的牌，边缘相对越糊
     h, w = soft.shape
-    feather_px = max(1.2, min(h, w) * PARAMS["feather_ratio"])
-    kf = int(max(3, 2 * round(feather_px * 2) + 1))
+    # 羽化必须克制：标牌只有 40~70px，羽化超过 2px 就糊成一圈灰晕。
+    # 实测 0.08（66px 牌 → 4.7px）明显发虚，收到 0.025 且硬上限 2px。
+    feather_px = min(2.0, max(0.8, min(h, w) * PARAMS["feather_ratio"]))
+    kf = int(max(3, 2 * round(feather_px * 1.5) + 1))
     soft = cv2.GaussianBlur(soft, (kf, kf), feather_px)
 
     return np.clip(p, 0, 255).astype(np.uint8), (np.clip(soft, 0, 1) * 255).astype(np.uint8)
@@ -182,10 +185,10 @@ def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True):
     # 边缘微光：真实拍摄的物体边缘常有一圈更亮/更暗的过渡
     if edge_glow:
         g = cv2.GaussianBlur(soft, (3, 3), 0).astype(np.float32) / 255.0
-        ring = np.clip(g - a[:, :, 0], 0, 1) * 0.18     # 只在边缘环上生效
+        ring = np.clip(g - a[:, :, 0], 0, 1) * 0.06     # 只在边缘环上生效（0.18 会糊出灰边）
         # 边缘朝环境亮度偏一点
         edge_val = scene["bright"] * 0.9
-        roi[:] = roi * (1 - ring[:, :, None] * 0.5) + edge_val * (ring[:, :, None] * 0.5)
+        roi[:] = roi * (1 - ring[:, :, None] * 0.35) + edge_val * (ring[:, :, None] * 0.35)
 
     out[y1:y2, x1:x2] = np.clip(roi, 0, 255)
     return np.clip(out, 0, 255).astype(np.uint8), {

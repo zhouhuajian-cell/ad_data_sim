@@ -69,7 +69,7 @@ def main():
 
     from replace_sign import detect_signs, load_sign, sign_mask
     from sign_realism2 import paste_v2
-    from sign_occlusion import detect_occluder
+    from sign_occlusion import detect_occluder, add_backing_plate
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
                                fit_to_inner, measure_face)
@@ -178,6 +178,10 @@ def main():
                 hh = (d["bbox"][3] - d["bbox"][1]) * 0.5 * a.grow
                 grown = [cx - hw, cy - hh, cx + hw, cy + hh]
                 bbox = fit_bbox(grown, m.shape)
+                # 底板方案试过并放弃：
+                #   从原牌四角采样底板颜色，但四角往往是背景而不是底板，
+                #   贴上去多出一块明显的灰方块，比不带底板更突兀。
+                #   现在保持纯圆形贴图，退化到「只盖住牌面」。
                 out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox)
                 if not cinfo.get("ok"):
                     continue

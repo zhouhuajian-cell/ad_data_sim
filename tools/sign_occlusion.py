@@ -195,6 +195,63 @@ def paint_shadow(canvas, bbox, dx, dy, strength=0.5, length_ratio=0.5, opacity=0
 # ---------------------------------------------------------------------------
 # 三、合成（把上面两步串起来）
 # ---------------------------------------------------------------------------
+def add_backing_plate(sign_bgr, sign_alpha, ref_patch, plate=None):
+    """给圆形素材补一块方形底板，匹配「方底圆牌」的真实场景。
+
+    实测问题：
+      巴西大量标牌是「方形浅色底板 + 圆形红圈图案」，
+      但素材库里的标记是纯圆形（四角透明）。
+      贴上去后圆角处露出原牌的白底板，看起来像一圈灰边、不融合。
+
+    做法：
+      在圆图案外围铺一块方形底板，颜色取原牌四角的实际颜色（通常是白/灰白），
+      再把圆图案叠上去。这样新牌的外轮廓就和原牌一致。
+
+    参数：
+      plate  底板颜色 (B,G,R)；None 时自动从 ref_patch 四角采样
+    """
+    import cv2
+    import numpy as np
+
+    h, w = sign_bgr.shape[:2]
+    a = sign_alpha.astype(np.float32) / 255.0
+
+    # 判断是否需要补底板：素材四角是否透明
+    corners = [a[2, 2], a[2, w - 3], a[h - 3, 2], a[h - 3, w - 3]]
+    if all(cv > 0.5 for cv in corners):
+        return sign_bgr, sign_alpha        # 四角本来就不透明，已有底板
+
+    if plate is None:
+        # 从参照图（原标牌区域）四角采样，取中位数颜色
+        rp = ref_patch
+        rh, rw = rp.shape[:2]
+        k = max(2, min(rh, rw) // 12)
+        samples = [rp[:k, :k], rp[:k, -k:], rp[-k:, :k], rp[-k:, -k:]]
+        px = np.concatenate([x.reshape(-1, 3) for x in samples], axis=0)
+        plate = np.median(px, axis=0)
+
+    plate = np.array(plate, np.float32)
+
+    # 生成底板 alpha：方形，但边缘留一点圆角（更接近真实冲压件）
+    plate_a = np.ones((h, w), np.float32)
+    r = max(2, int(min(h, w) * 0.06))
+    # 圆角：只影响四个角
+    yy, xx = np.mgrid[0:h, 0:w]
+    dx = np.minimum(xx, w - 1 - xx)
+    dy = np.minimum(yy, h - 1 - yy)
+    inside = ~((dx < r) & (dy < r) & ((r - dx) ** 2 + (r - dy) ** 2 > r * r))
+    plate_a = plate_a * inside
+
+    # 合成：底板 + 圆图案
+    # 底板打底，再把圆图案叠上去（圆图案完全覆盖底板中央）
+    pa = plate_a[:, :, None]
+    out = plate[None, None, :] * pa
+    out = out + sign_bgr.astype(np.float32) * a[:, :, None]
+    out = out / np.maximum(pa + a[:, :, None], 1e-6)
+    new_a = np.maximum(plate_a, a)
+    return np.clip(out, 0, 255).astype(np.uint8), (new_a * 255).astype(np.uint8)
+
+
 def paste_with_occlusion(image, sign_bgr, sign_alpha, bbox,
                          degrade_fn=None, shadow=True, strength=1.0):
     """带遮挡保留与阴影的贴合。
