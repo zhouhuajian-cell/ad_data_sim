@@ -277,6 +277,16 @@ def main():
     ap.add_argument("--no-annotate", action="store_true", help="不输出标注")
     ap.add_argument("--no-occlusion", action="store_true",
                     help="不保留前景遮挡（默认保留：立柱/树枝不会被盖住）")
+    ap.add_argument("--bright-gain", type=float, default=None,
+                    help="目标亮度 = 环境亮分位 × 该值（0.5~1.2，默认 0.95）")
+    ap.add_argument("--haze-gain", type=float, default=None,
+                    help="雾度强度（0~1.5，默认 1.0，调小更实）")
+    ap.add_argument("--contrast-gain", type=float, default=None,
+                    help="对比度倍数（0.6~1.5，默认 1.05，调小更灰）")
+    ap.add_argument("--satur-keep", type=float, default=None,
+                    help="雾天饱和度保留（0.3~1.0，默认 0.70）")
+    ap.add_argument("--feather-ratio", type=float, default=None,
+                    help="边缘羽化比例（0.02~0.15，默认 0.06）")
     ap.add_argument("--no-shadow", action="store_true",
                     help="不投阴影（默认按场景光照投）")
     ap.add_argument("--strict-shape", action="store_true",
@@ -285,6 +295,13 @@ def main():
 
     global STRICT_SHAPE
     STRICT_SHAPE = bool(a.strict_shape)
+    try:
+        from sign_realism2 import set_params as _set_rp
+        _set_rp(bright_gain=a.bright_gain, haze_gain=a.haze_gain,
+                contrast_gain=a.contrast_gain, satur_keep=a.satur_keep,
+                feather_ratio=a.feather_ratio)
+    except Exception:
+        pass
 
     if not a.signs and not a.signs_dir:
         raise SystemExit("必须给 --signs 或 --signs-dir")

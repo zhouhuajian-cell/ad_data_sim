@@ -28,6 +28,12 @@ def main():
     ap.add_argument("--target-class", default="")
     ap.add_argument("--shape", default="", choices=["", "circle", "triangle", "rect"])
     ap.add_argument("--strict-shape", action="store_true")
+    # 仿真参数（面板滑块）
+    ap.add_argument("--bright-gain", type=float, default=None)
+    ap.add_argument("--haze-gain", type=float, default=None)
+    ap.add_argument("--contrast-gain", type=float, default=None)
+    ap.add_argument("--satur-keep", type=float, default=None)
+    ap.add_argument("--feather-ratio", type=float, default=None)
     ap.add_argument("--bbox", default="")
     ap.add_argument("--conf", type=float, default=0.30)
     a = ap.parse_args()
@@ -38,7 +44,10 @@ def main():
         from replace_sign import detect_signs, load_sign, sign_mask
         from sign_realism import paste_realistic, make_realistic
         from sign_occlusion import paste_with_occlusion
-        from sign_realism2 import paste_v2
+        from sign_realism2 import paste_v2, set_params as set_rp
+        set_rp(bright_gain=a.bright_gain, haze_gain=a.haze_gain,
+               contrast_gain=a.contrast_gain, satur_keep=a.satur_keep,
+               feather_ratio=a.feather_ratio)
         import batch_replace as _br
         from batch_replace import (detect_shape, shape_matches, fit_bbox,
                                    list_signs, pick_neutral_asset)

@@ -67,6 +67,28 @@ def scene_stats(image, bbox, ring_ratio=1.6):
 # ---------------------------------------------------------------------------
 # 劣化
 # ---------------------------------------------------------------------------
+# 可调参数（面板滑块控制）
+PARAMS = {
+    "bright_gain": 0.95,     # 目标亮度 = 环境亮分位 × gain（调小变暗）
+    "haze_gain": 1.0,        # 雾度强度（调小更实、对比更强）
+    "contrast_gain": 1.05,   # 对比度相对环境的倍数（调小更灰）
+    "satur_keep": 0.70,      # 雾天饱和度保留比例（调小更灰）
+    "feather_ratio": 0.06,   # 边缘羽化 = 标牌短边 × 该比例
+    "min_bright": 80.0,      # 亮度下限，保证可辨识
+}
+
+
+def set_params(**kw):
+    """更新参数。只接受 PARAMS 里有的键。"""
+    for k, v in kw.items():
+        if k in PARAMS and v is not None:
+            try:
+                PARAMS[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return dict(PARAMS)
+
+
 def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
     """按环境氛围劣化图案。返回 (图案, 软掩码)。
 
@@ -82,24 +104,24 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
 
     # ---- A. 亮度：向环境参考亮度靠拢，而不是向标牌暗部靠拢 ----
     # 标牌是反光材料，亮度取「环境亮分位 × 0.95」附近；雾天略低
-    target = scene["bright"] * (0.95 - 0.15 * scene["haze"])
-    # 但不低于 80（保证可辨识）
-    target = max(target, 80.0)
+    target = scene["bright"] * (PARAMS["bright_gain"] - 0.15 * scene["haze"] * PARAMS["haze_gain"])
+    # 但不低于下限（保证可辨识）
+    target = max(target, PARAMS["min_bright"])
     cur_mean = float(p.mean())
     cur_std = float(p.std()) + 1e-6
     # 对比度：向环境对比靠拢，但保留至少 60%（交通标志本身对比强）
-    target_std = max(scene["contrast"] * 1.05, cur_std * 0.60)
+    target_std = max(scene["contrast"] * PARAMS["contrast_gain"], cur_std * 0.60)
     p = (p - cur_mean) / cur_std * target_std + target
 
     # ---- C. 雾/霾：抬起暗部，压低整体反差（模拟空气散射） ----
-    hz = scene["haze"] * strength
+    hz = scene["haze"] * strength * PARAMS["haze_gain"]
     if hz > 0.02:
         # 暗部抬升：p = p*(1-k) + 255*k*0.85
         k = hz * 0.35
         p = p * (1 - k) + 255 * 0.82 * k
         # 轻微降饱和（雾天色彩发灰）
         hsv = cv2.cvtColor(np.clip(p, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] *= (1 - hz * 0.30)
+        hsv[:, :, 1] *= (1 - hz * (1.0 - PARAMS["satur_keep"]))
         p = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
     # ---- 模糊：匹配参照区域的锐度 ----
@@ -124,7 +146,7 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
     soft = mask.astype(np.float32) / 255.0
     # 用小标牌的尺寸决定羽化半径：越小的牌，边缘相对越糊
     h, w = soft.shape
-    feather_px = max(1.2, min(h, w) * 0.06)     # 26px 的牌 → 羽化约 1.6px
+    feather_px = max(1.2, min(h, w) * PARAMS["feather_ratio"])
     kf = int(max(3, 2 * round(feather_px * 2) + 1))
     soft = cv2.GaussianBlur(soft, (kf, kf), feather_px)
 
