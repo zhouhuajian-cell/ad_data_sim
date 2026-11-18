@@ -650,7 +650,8 @@ function renderView(){
     // 标牌特写：把检测框区域裁出来放大对比，参数调节就能看清差别
     const d0 = S.dets[0];
     const bb = d0.bbox;
-    const pad = Math.round(Math.max(bb[2]-bb[0], bb[3]-bb[1]) * 1.2);
+    // 边距只留 25%：之前 120% 导致标牌只占特写画面 1/4，平均亮度被周围稀释
+    const pad = Math.round(Math.max(bb[2]-bb[0], bb[3]-bb[1]) * 0.25);
     const W = S.detSize[0], H = S.detSize[1];
     const cx1 = Math.max(0, bb[0]-pad), cy1 = Math.max(0, bb[1]-pad);
     const cw = Math.min(W, bb[2]+pad) - cx1, ch = Math.min(H, bb[3]+pad) - cy1;
@@ -664,10 +665,12 @@ function renderView(){
         <div style="font-size:12px;color:var(--primary);margin-top:4px">仿真后</div></div>` : ''}
     </div>`;
     vp.innerHTML = html;
-    const drawCrop = (cvId, src) => {
+    const drawCrop = (cvId, src) => {   // drawCrop_v2
       const cv = document.getElementById(cvId);
       if (!cv || !src) return;
       const im = new Image();
+      // ⚠️ new Image() 会走浏览器缓存；预览图文件名固定，
+      //    改了参数重新生成后拿到的还是旧图 —— 必须每次加时间戳
       im.onload = () => {
         cv.width = 300; cv.height = 300;
         const ctx = cv.getContext('2d');
@@ -675,7 +678,7 @@ function renderView(){
         const k = im.naturalWidth / W;   // 显示图相对原图坐标系的缩放
         ctx.drawImage(im, cx1*k, cy1*k, cw*k, ch*k, 0, 0, 300, 300);
       };
-      im.src = src;
+      im.src = src + (src.includes('?') ? '&' : '?') + '_c=' + Date.now() + Math.random();
     };
     drawCrop('cropA', S.origUrl);
     if (S.prevUrl) drawCrop('cropB', S.prevUrl);
@@ -1234,7 +1237,7 @@ async function runPreview(){
     if (sk) logline('[WARN] ' + sk.slice(0,90));
     return;
   }
-  S.prevUrl = r.d.url;
+  S.prevUrl = r.d.url + (r.d.url.includes('?') ? '&' : '?') + '_t=' + Date.now();
   const objs = (r.d.objects||[]).filter(o=>!o.skipped).map(o=>o.class);
   logline(`[OK] 替换完成：${objs.join(', ')}`);
   renderView();
