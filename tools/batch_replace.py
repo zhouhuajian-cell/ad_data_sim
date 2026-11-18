@@ -75,13 +75,41 @@ def list_images(path, limit=0):
     return out[:limit] if limit > 0 else out
 
 
-def list_signs(signs_dir):
-    """素材目录 → {规范化类别名: 路径}。文件名前缀决定类别。"""
+def list_signs(signs_dir, country=""):
+    """素材目录 → {规范化类别名: 路径}。
+
+    支持两种布局：
+      1) 扁平：素材目录/*.png
+      2) 按国家分层：素材根/<CC>/<类别>.png（下面还有 _common）
+    传了 country 时优先取该国的素材，找不到再退回 _common。
+    """
     raw = {}
-    for f in sorted(os.listdir(signs_dir)):
-        p = os.path.join(signs_dir, f)
-        if os.path.isfile(p) and f.lower().endswith((".png", ".jpg", ".jpeg")):
-            raw[tsr_mod.normalize_class_name(os.path.splitext(f)[0])] = p
+
+    # 按国家分层布局
+    if country:
+        for cc in (country.upper(), "_common"):
+            d = os.path.join(signs_dir, cc)
+            if not os.path.isdir(d):
+                # 兼容 MTSD 的 <CC>_<中文名> 命名
+                for name in sorted(os.listdir(signs_dir)) if os.path.isdir(signs_dir) else []:
+                    if name.upper() == cc or name.upper().startswith(cc + "_"):
+                        d = os.path.join(signs_dir, name)
+                        break
+            if not os.path.isdir(d):
+                continue
+            for f in sorted(os.listdir(d)):
+                p = os.path.join(d, f)
+                if os.path.isfile(p) and f.lower().endswith((".png", ".jpg", ".jpeg")):
+                    name = tsr_mod.normalize_class_name(os.path.splitext(f)[0])
+                    raw.setdefault(name, p)      # 国家优先，先到先得
+
+    # 扁平布局（或没有国家时的兜底）
+    if os.path.isdir(signs_dir):
+        for f in sorted(os.listdir(signs_dir)):
+            p = os.path.join(signs_dir, f)
+            if os.path.isfile(p) and f.lower().endswith((".png", ".jpg", ".jpeg")):
+                name = tsr_mod.normalize_class_name(os.path.splitext(f)[0])
+                raw.setdefault(name, p)
     return raw
 
 
@@ -168,6 +196,8 @@ def main():
     ap.add_argument("--signs", default="", help="单个 TSR 图案（一对多模式）")
     ap.add_argument("--signs-dir", default="", help="素材目录（多对多模式，按类别匹配）")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--country", default="",
+                    help="国家代码（BR/RU/DE…），按国家分层素材库时指定")
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--limit", type=int, default=0, help="最多处理多少张图")
     ap.add_argument("--scale", type=float, default=1.0, help="粘贴区域相对检测框的倍数")
@@ -191,7 +221,7 @@ def main():
         single = load_sign(a.signs)
         single_name = tsr_mod.normalize_class_name(
             os.path.splitext(os.path.basename(a.signs))[0])
-    sign_table = list_signs(a.signs_dir) if a.signs_dir else {}
+    sign_table = list_signs(a.signs_dir, a.country) if a.signs_dir else {}
     if a.signs_dir and not sign_table:
         raise SystemExit("素材目录里没有可用图案: %s" % a.signs_dir)
 
@@ -200,7 +230,7 @@ def main():
         raise SystemExit("场景目录里没有图片: %s" % a.images)
 
     mode = "multi" if a.signs_dir else "single"
-    summary = {"mode": mode, "total": len(images), "ok": 0, "skipped": 0,
+    summary = {"mode": mode, "country": a.country, "total": len(images), "ok": 0, "skipped": 0,
                "failed": 0, "annotated": 0,
                "params": {"conf": a.conf, "scale": a.scale, "strength": a.strength,
                           "sat_boost": a.sat_boost, "min_px": a.min_px},
