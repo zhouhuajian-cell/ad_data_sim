@@ -253,6 +253,13 @@ def build_cmd(action, p, cfg):
             cmd += ["--hardcase-csv", hc_csv,
                     "--hardcase-ratio", str(float(p.get("hardcase_ratio", 1.0)))]
         return cmd
+    # [TSR-API] tsr_batch 动作：跑 tools/batch_replace.py
+    if action == "tsr_batch":
+        cmd = p.get("cmd") or []
+        if not cmd:
+            raise ValueError("tsr_batch 缺少 cmd")
+        return [ALGO_PYTHON] + [str(c) for c in cmd] if False else cmd
+
     if action == "dryrun":
         # 链路自检：工具本体的参数契约由它自己管，这里只保证解释器与脚本路径
         return [py, os.path.join(s, "tools/dryrun_check.py")]
@@ -303,6 +310,35 @@ def precheck(action, cfg):
     if action == "overlay" and count_dir(cfg["final_dir"], ".png", cap=1) == 0:
         return ("还没准备好：还没有处理后的图。\n先在第 4 步「开始处理」，再生成抽检图。")
     return None
+
+# [TSR-API] TSR 仿真相关常量与辅助
+TOOLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+TOOLS_DIR = os.path.abspath(TOOLS_DIR)
+DEFAULT_TSR_LIBRARY = "/data/tsr_library_v2"   # 官方矢量图库渲染的高清素材
+TSR_OUT_DIR = "/data/render/tsr_batch"
+# 像素/AI 相关脚本必须用 ad_mining 的 venv（有 ultralytics/opencv），面板本体零依赖
+ALGO_PYTHON = "/opt/ad_mining/venv/bin/python"
+
+
+def _tsr_slug(s):
+    """把国家码/文件名变成安全的路径片段，防目录穿越。"""
+    return "".join(c if (c.isalnum() or c in "_-") else "_" for c in str(s)).strip("_")[:96]
+
+
+def _run_algo(args, timeout=300):
+    """在 ad_mining 的 venv 里跑一个 tools 脚本，返回它 stdout 的 JSON。"""
+    import subprocess
+    exe = ALGO_PYTHON if os.path.isfile(ALGO_PYTHON) else "python3"
+    try:
+        p = subprocess.run([exe] + [str(a) for a in args],
+                           capture_output=True, text=True, timeout=timeout)
+        out = (p.stdout or "").strip()
+        if not out:
+            return {"ok": False, "error": (p.stderr or "脚本无输出")[:300]}
+        return json.loads(out.splitlines()[-1])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
 
 def start_job(action, params, auto=False):
     """启动作业。auto=True 表示由后台自动化触发（不参与"同类作业去重"之外的界面提示）。"""
@@ -691,6 +727,32 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+    def _send_image(self, max_w=900):
+        """返回一个「读文件→按需缩放→发出」的闭包。缩放用 PIL，没有就原样发。"""
+        def _go(path):
+            try:
+                with open(path, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "image not found"})
+            try:
+                from PIL import Image
+                import io as _io
+                im = Image.open(path)
+                if im.width > max_w:
+                    h = int(im.height * max_w / float(im.width))
+                    im = im.resize((max_w, h), Image.LANCZOS)
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                buf = _io.BytesIO()
+                im.save(buf, "JPEG", quality=88)
+                blob = buf.getvalue()
+                return self._send(200, blob, "image/jpeg")
+            except Exception:
+                ctype = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+                return self._send(200, blob, ctype)
+        return _go
+
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -699,11 +761,28 @@ class H(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception:
             return {}
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path in ("/", "/index.html"):
             return self._send(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        # [TSR-API] 提供 tsr.html
+        if u.path in ("/tsr", "/tsr.html"):
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsr.html")
+            try:
+                with open(fp, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "tsr.html 缺失"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            self.wfile.write(blob)
+            return
         if u.path == "/api/status":
             return self._send(200, probe_status())
         if u.path == "/api/config":
@@ -743,6 +822,128 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 return self._send(404, {"error": "image not found"})
             return self._send(200, blob, "image/png" if name.lower().endswith(".png") else "image/jpeg")
+
+        # [TSR-API] 素材库概况
+        if u.path == "/api/tsr/library":
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            items = []
+            if os.path.isdir(root):
+                for name in sorted(os.listdir(root)):
+                    d = os.path.join(root, name)
+                    if not os.path.isdir(d) or name.startswith("_"):
+                        continue
+                    files = [f for f in os.listdir(d)
+                             if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+                    if not files:
+                        continue
+                    classes = sorted(set(os.path.splitext(f)[0].split("_v")[0]
+                                         for f in files))
+                    items.append({"country": name, "count": len(files),
+                                  "class_count": len(classes),
+                                  "classes": classes})
+            return self._send(200, {"root": root, "countries": items,
+                                    "total_countries": len(items),
+                                    "total_assets": sum(i["count"] for i in items)})
+
+        # [TSR-API] 素材缩略图
+        if u.path == "/api/tsr/library/thumb":
+            country = (q.get("country") or [""])[0]
+            cls = (q.get("class") or [""])[0]
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            d = os.path.join(root, _tsr_slug(country))
+            target = None
+            if os.path.isdir(d) and cls:
+                for f in sorted(os.listdir(d)):
+                    if os.path.splitext(f)[0].split("_v")[0] == cls and \
+                            f.lower().endswith((".png", ".jpg", ".jpeg")):
+                        target = os.path.join(d, f)
+                        break
+            if not target or not os.path.isfile(target):
+                return self._send(404, {"error": "asset not found"})
+            return self._send_image(max_w=140)(target)
+
+        # [TSR-API] 某类别的全部素材（小图列表用）
+        if u.path == "/api/tsr/library/class":
+            country = (q.get("country") or [""])[0]
+            cls = (q.get("class") or [""])[0]
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            d = os.path.join(root, _tsr_slug(country))
+            names = []
+            if os.path.isdir(d) and cls:
+                names = sorted(f for f in os.listdir(d)
+                               if os.path.splitext(f)[0].split("_v")[0] == cls
+                               and f.lower().endswith((".png", ".jpg", ".jpeg")))
+            return self._send(200, {"country": country, "class": cls, "files": names})
+
+        # [TSR-API] 实拍图清单
+        if u.path == "/api/tsr/images":
+            d = (q.get("dir") or [""])[0]
+            limit = int((q.get("limit") or ["30"])[0])
+            offset = int((q.get("offset") or ["0"])[0])
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "目录不存在", "dir": d})
+            files = sorted(f for f in os.listdir(d)
+                           if f.lower().endswith((".jpg", ".jpeg", ".png")))
+            return self._send(200, {"dir": d, "total": len(files), "offset": offset,
+                                    "images": files[offset:offset + limit]})
+
+        # [TSR-API] 单张实拍图
+        if u.path == "/api/tsr/image":
+            d = (q.get("dir") or [""])[0]
+            f = (q.get("file") or [""])[0]
+            if not d or not f or "/" in f or "\\" in f or ".." in f:
+                return self._send(400, {"error": "参数错误"})
+            p = os.path.join(d, f)
+            if not os.path.isfile(p):
+                return self._send(404, {"error": "not found"})
+            maxw = int((q.get("max") or ["900"])[0])
+            return self._send_image(max_w=maxw)(p)
+
+        # [PRESCREEN] 查进度 / 取结果
+        if u.path == "/api/tsr/prescreen_progress":
+            tid = (q.get("task") or [""])[0]
+            if not re.fullmatch(r"[a-f0-9]{10}", tid):
+                return self._send(400, {"error": "bad task"})
+            prog_json = "/tmp/prescreen_prog_%s.json" % tid
+            out_json = "/tmp/prescreen_%s.json" % tid
+            info = {"ok": True, "finished": False, "done": 0, "total": 0}
+            if os.path.isfile(prog_json):
+                try:
+                    with open(prog_json, "r", encoding="utf-8") as fh:
+                        info.update(json.load(fh))
+                except Exception:
+                    pass
+            if info.get("finished") and os.path.isfile(out_json):
+                try:
+                    with open(out_json, "r", encoding="utf-8") as fh:
+                        full = json.load(fh)
+                    info["results"] = [r for r in full.get("results", [])
+                                       if r.get("usable", 0) > 0]
+                    info["total_files"] = full.get("total", 0)
+                except Exception as e:
+                    info["error"] = str(e)[:150]
+            return self._send(200, info)
+
+        # [TSR-API] 替换结果图
+        if u.path == "/api/tsr/result":
+            f = (q.get("file") or [""])[0]
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.(?:jpg|png)", f, re.I):
+                return self._send(400, {"error": "invalid"})
+            p = os.path.join(TSR_OUT_DIR, f)
+            if not os.path.isfile(p):
+                return self._send(404, {"error": "not found"})
+            with open(p, "rb") as fh:
+                blob = fh.read()
+            # ⚠️ 必须 no-store：预览图文件名固定（xxx_preview.jpg），
+            #    浏览器会缓存旧图，导致改了参数重新生成后看到的还是旧结果
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png" if p.endswith(".png") else "image/jpeg")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            self.wfile.write(blob)
+            return
         if u.path == "/api/job":
             jid = (q.get("id") or [""])[0]
             with JOBS_LOCK:
@@ -816,6 +1017,122 @@ class H(BaseHTTPRequestHandler):
                 f.write(blob)
             return self._send(200, {"name": name, "bytes": len(blob)})
         p = self._body()
+
+        # [PRESCREEN] YOLO 预筛（异步，带进度）
+        if u.path == "/api/tsr/prescreen":
+            body = p
+            d = str(body.get("dir") or "")
+            conf = float(body.get("conf") or 0.30)
+            min_px = int(body.get("min_px") or 24)
+            limit = int(body.get("limit") or 300)
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "目录不存在", "dir": d})
+            import subprocess as _sp
+            tid = uuid.uuid4().hex[:10]
+            out_json = "/tmp/prescreen_%s.json" % tid
+            prog_json = "/tmp/prescreen_prog_%s.json" % tid
+            try:
+                with open(prog_json, "w", encoding="utf-8") as fh:
+                    json.dump({"done": 0, "total": 0, "usable": 0, "hits": 0,
+                               "finished": False}, fh)
+            except Exception:
+                pass
+            exe = ALGO_PYTHON if os.path.isfile(ALGO_PYTHON) else "python3"
+            script_p = os.path.join(TOOLS_DIR, "prescreen_yolo.py")
+            _sp.Popen([exe, script_p, d, "--out", out_json, "--conf", str(conf),
+                       "--min-px", str(min_px), "--limit", str(limit),
+                       "--progress", prog_json],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                      start_new_session=True)
+            self._send(200, {"ok": True, "task": tid, "dir": d})
+            return
+
+        # [TSR-API] 单图检测
+        if u.path == "/api/tsr/detect":
+            b = p
+            d = str(b.get("dir") or "")
+            f = str(b.get("file") or "")
+            cf = float(b.get("conf") or 0.30)
+            if not d or not f:
+                return self._send(400, {"error": "缺少 dir/file"})
+            fp = os.path.join(d, f)
+            if not os.path.isfile(fp):
+                return self._send(400, {"error": "图片不存在"})
+            return self._send(200, _run_algo(
+                [os.path.join(TOOLS_DIR, "tsr_detect_api.py"), fp, str(cf)], timeout=180))
+
+        # [TSR-API] 单图替换预览
+        if u.path == "/api/tsr/replace":
+            body = p
+            d = str(body.get("dir") or "")
+            f = str(body.get("file") or "")
+            country = str(body.get("country") or "")
+            cls = str(body.get("target_class") or "")
+            bbox = body.get("bbox") or []
+            if not d or not f:
+                return self._send(400, {"error": "缺少 dir/file"})
+            os.makedirs(TSR_OUT_DIR, exist_ok=True)
+            p = os.path.join(d, f)
+            if not os.path.isfile(p):
+                return self._send(400, {"error": "图片不存在"})
+            out = os.path.join(TSR_OUT_DIR, _tsr_slug(os.path.splitext(f)[0]) + "_preview.jpg")
+            args = [os.path.join(TOOLS_DIR, "tsr_preview_api.py"), p, out,
+                    "--library", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                    "--country", country]
+            if cls:
+                args += ["--target-class", cls]
+            shp = str(body.get("shape") or "")
+            if shp in ("circle", "triangle", "rect"):
+                args += ["--shape", shp]
+            # 仿真参数（面板滑块）
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        args += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            if bbox and len(bbox) == 4:
+                args += ["--bbox", ",".join(str(float(v)) for v in bbox)]
+            res = _run_algo(args, timeout=300)
+            if res.get("ok"):
+                res["url"] = "/api/tsr/result?file=" + os.path.basename(out)
+            return self._send(200, res)
+
+        # [TSR-API] 批量替换
+        if u.path == "/api/tsr/batch":
+            body = p
+            d = str(body.get("dir") or "")
+            country = str(body.get("country") or "")
+            cls = str(body.get("target_class") or "")
+            limit = int(body.get("limit") or 20)
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "实拍目录不存在"})
+            os.makedirs(TSR_OUT_DIR, exist_ok=True)
+            cmd = [os.path.join(TOOLS_DIR, "batch_replace.py"),
+                   "--images", d, "--signs-dir", cfg.get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--out", TSR_OUT_DIR, "--country", country, "--limit", str(limit)]
+            if cls:
+                cmd += ["--target-class", cls]
+            shp2 = str(body.get("shape") or "")
+            if shp2 in ("circle", "triangle", "rect"):
+                cmd += ["--shape", shp2]
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        cmd += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            if body.get("vary_class"):
+                cmd += ["--vary-class"]
+            rec, err = start_job("tsr_batch", {"cmd": cmd, "out": TSR_OUT_DIR})
+            if err:
+                return self._send(400, {"error": err})
+            return self._send(self._json_code if hasattr(self, "_json_code") else 200,
+                              {"id": rec["id"], "out": TSR_OUT_DIR})
         if u.path == "/api/run":
             # 前端发的是 {action, params:{...}}；也兼容平铺的 {action, limit, ...} 老调用
             params = p.get("params") if isinstance(p, dict) else None

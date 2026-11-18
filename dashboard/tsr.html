@@ -402,6 +402,12 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
           <label class="chk"><input type="checkbox" checked disabled> 统计汇总 <span class="hint">(summary.json)</span></label>
         </div>
         <div class="grp hr">
+          <div class="h">类别策略</div>
+          <label class="chk"><input type="checkbox" id="cbVaryClass" checked>
+            类别多样化 <span class="hint">同大类下随机挑子类，避免全贴成同一类</span></label>
+          <div class="hint">关掉后：每个大类固定用中性代表素材（如限速一律 60）。</div>
+        </div>
+        <div class="grp hr">
           <div class="h">运行日志</div>
           <div class="log" id="batchLog">等待开始…</div>
         </div>
@@ -1248,6 +1254,8 @@ async function runPreview(auto){
   const body = {dir:S.dir, file:S.file, country:S.country};
   const sh = $('#fShape'); if (sh && sh.value) body.shape = sh.value;
   Object.assign(body, readSimParams());
+  const _vb = document.getElementById('cbVaryClass');
+  body.vary_class = !!(_vb && _vb.checked);
   if (S.manual && $('#fTargetClass').value.trim())
     body.target_class = $('#fTargetClass').value.trim();
   const r = await api('/api/tsr/replace', {method:'POST',
