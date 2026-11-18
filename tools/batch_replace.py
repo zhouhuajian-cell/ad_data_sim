@@ -30,7 +30,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2                                                    # noqa: E402
 from replace_sign import detect_signs, load_sign, sign_mask  # noqa: E402
-from sign_realism import paste_realistic                     # noqa: E402
+from sign_realism import paste_realistic, make_realistic     # noqa: E402
+from sign_occlusion import paste_with_occlusion              # noqa: E402
 
 # 复用 modules/tsr.py 的类别工具（保持单一事实来源）
 _MODULES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "modules")
@@ -273,6 +274,10 @@ def main():
     ap.add_argument("--min-px", type=int, default=24, help="标牌小于该像素宽就跳过")
     ap.add_argument("--all-signs", action="store_true", help="一张图里所有标牌都替换")
     ap.add_argument("--no-annotate", action="store_true", help="不输出标注")
+    ap.add_argument("--no-occlusion", action="store_true",
+                    help="不保留前景遮挡（默认保留：立柱/树枝不会被盖住）")
+    ap.add_argument("--no-shadow", action="store_true",
+                    help="不投阴影（默认按场景光照投）")
     ap.add_argument("--strict-shape", action="store_true",
                     help="严格同形状（默认不拦，形状只作参考写入标注）")
     a = ap.parse_args()
@@ -361,8 +366,16 @@ def main():
                     bbox = [cx - hw, cy - hh, cx + hw, cy + hh]
 
                 base = composed if composed is not None else im
-                composed, soft = paste_realistic(base, sign_img[:, :, :3], sm, bbox,
-                                                 strength=a.strength)
+                # 用带遮挡保留 + 投影阴影的合成：
+                #   原图里挡在标牌前面的立柱/树枝不会被新标牌盖掉，
+                #   并按场景光照方向投出渐隐阴影，避免「硬贴」感
+                def _deg(sig, alp, ref):
+                    return make_realistic(sig, alp, ref, strength=a.strength)
+                composed, cinfo = paste_with_occlusion(
+                    base, sign_img[:, :, :3], sm, bbox,
+                    degrade_fn=None if a.no_occlusion else _deg,
+                    shadow=not a.no_shadow, strength=a.strength)
+                soft = cinfo if cinfo.get("ok") else None
                 if soft is None:
                     rec["skipped"].append("bbox 过小")
                     continue

@@ -36,7 +36,8 @@ def main():
     try:
         import cv2
         from replace_sign import detect_signs, load_sign, sign_mask
-        from sign_realism import paste_realistic
+        from sign_realism import paste_realistic, make_realistic
+        from sign_occlusion import paste_with_occlusion
         import batch_replace as _br
         from batch_replace import (detect_shape, shape_matches, fit_bbox,
                                    list_signs, pick_neutral_asset)
@@ -103,8 +104,11 @@ def main():
                 continue
 
             bbox = fit_bbox(d["bbox"], m.shape, keep_ratio=True)
-            out_im, soft = paste_realistic(composed, s[:, :, :3], m, bbox, strength=1.0)
-            if soft is None:
+            out_im, cinfo = paste_with_occlusion(
+                composed, s[:, :, :3], m, bbox,
+                degrade_fn=lambda sig, alp, ref: make_realistic(sig, alp, ref, strength=1.0),
+                shadow=True, strength=1.0)
+            if not cinfo.get("ok"):
                 continue
             composed = out_im
             res["objects"].append({"class": cls, "bbox": [round(v, 1) for v in bbox],
