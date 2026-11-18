@@ -17,3 +17,8 @@ Saved/
 Binaries/
 DerivedDataCache/
 .vs/
+
+# 临时截图
+_ui*.png
+_*.png
+_*.jpg
