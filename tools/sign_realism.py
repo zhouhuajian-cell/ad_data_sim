@@ -86,14 +86,16 @@ def ref_stats(ref_patch, mask=None):
 # ---------------------------------------------------------------------------
 # 各步骤（参数都由 stats 驱动）
 # ---------------------------------------------------------------------------
-def match_tone(sign_bgr, stats, keep_contrast=0.92, min_brightness=88.0,
-               brightness_gain=1.25):
+def match_tone(sign_bgr, stats, keep_contrast=0.92, min_brightness=105.0,
+               brightness_gain=1.35):
     """亮度与对比度对齐。
 
     两个目标在打架，这里取折中：
       - 视觉融合：要和周围亮度接近，不然像贴纸
       - 训练可辨识：标牌本身反光强，不该被压到和周围一样暗
     实测：原标牌本体亮度只有 46~70（背光/阴影/镜头衰减），
+     而实测合成后偏灰（min_brightness=88 时牌面明显比原图暗），
+     调到 105 后牌面亮度接近原图观感。
     直接按它对齐会让新标牌也变暗，模型更难学。
     所以目标亮度 = max(参照亮度 × gain, min_brightness)，
     既跟随环境，又给可辨识度兜底。

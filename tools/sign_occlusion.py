@@ -47,8 +47,15 @@ def detect_occluder(image, bbox, min_area_ratio=0.015):
     roi = image[y1:y2, x1:x2]
     h, w = roi.shape[:2]
     empty = np.zeros((h, w), np.uint8)
-    if h < 10 or w < 10:
-        return empty, {"occluder_ratio": 0.0}
+
+    # ⚠️ 小标牌不做遮挡检测。
+    #    实测一块 26×26 的标牌：Otsu 只把 26.6% 判成牌面本体，
+    #    剩下的墙/背景与本体色差很大，被整块判成"遮挡物"（93.8%），
+    #    结果新标牌几乎贴不上、看起来"没变化"。
+    #    小尺寸本身分辨率不足，判不出遮挡关系，直接放行更可靠。
+    MIN_OCCL_SIZE = 40
+    if h < MIN_OCCL_SIZE or w < MIN_OCCL_SIZE:
+        return empty, {"occluder_ratio": 0.0, "skipped": "too_small"}
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -59,8 +66,13 @@ def detect_occluder(image, bbox, min_area_ratio=0.015):
         body = cv2.bitwise_not(body)
     body = cv2.morphologyEx(body, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     body_px = body > 0
+    body_ratio = float(body_px.sum()) / float(h * w)
     if body_px.sum() < 20:
-        return empty, {"occluder_ratio": 0.0}
+        return empty, {"occluder_ratio": 0.0, "skipped": "no_body"}
+    # 本体占比过低（<35%）说明 Otsu 没抓到标牌，此时算出的色差不可信
+    if body_ratio < 0.35:
+        return empty, {"occluder_ratio": 0.0, "skipped": "body_too_small",
+                       "body_ratio": round(body_ratio, 3)}
     body_lab = lab[body_px].mean(axis=0)
 
     # 与主体色差大的像素 = 可能不是牌面
@@ -89,7 +101,13 @@ def detect_occluder(image, bbox, min_area_ratio=0.015):
     if keep.any():
         keep = cv2.dilate(keep, np.ones((3, 3), np.uint8), iterations=1)
 
-    return keep, {"occluder_ratio": round(float(keep.mean() / 255.0), 3)}
+    ratio = float(keep.mean() / 255.0)
+    # 遮挡占比超过 60% 基本是误判（真实场景里很少有物体挡住标牌大半还看得见）
+    if ratio > 0.60:
+        return empty, {"occluder_ratio": 0.0, "skipped": "ratio_too_high",
+                       "raw_ratio": round(ratio, 3)}
+
+    return keep, {"occluder_ratio": round(ratio, 3)}
 
 
 # ---------------------------------------------------------------------------
