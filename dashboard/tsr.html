@@ -76,7 +76,7 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
   display:none;align-items:center;justify-content:center;cursor:zoom-out}
 .lightbox.on{display:flex}
 .lightbox canvas{position:absolute;pointer-events:none;display:none}
-.lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;
+.lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;cursor:pointer;
   box-shadow:0 0 40px rgba(0,0,0,.8);cursor:default}
 .lightbox .lbclose{position:fixed;top:16px;right:20px;font-size:28px;color:#ccc;
   cursor:pointer;line-height:1;padding:6px 12px;border-radius:3px}
@@ -1152,6 +1152,11 @@ function initLightbox(){
     var _cv = document.getElementById('lbCanvas');
     if (_cv) { _cv.style.transform = 'scale(1)'; _cv.style.transformOrigin = 'center center'; }
     lb.classList.add('on');
+    lbBoxVisible = true;
+    var _cv0 = document.getElementById('lbCanvas');
+    if (_cv0) _cv0.style.display = 'block';
+    var _tip0 = document.querySelector('.lbtip');
+    if (_tip0) _tip0.textContent = '点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭';
     im.onload = function(){ drawLbBoxes(); };
     // 图片可能已经在缓存里，onload 不会触发，补一次
     if (im.complete) setTimeout(drawLbBoxes, 30);
@@ -1233,6 +1238,21 @@ function initLightbox(){
     }
   }, true);
 
+  /* 放大视图里点击图片 → 切换检测框显示（看真实效果） */
+  var lbBoxVisible = true;
+  im.addEventListener('click', function(e){
+    e.stopPropagation();
+    lbBoxVisible = !lbBoxVisible;
+    var cv = document.getElementById('lbCanvas');
+    if (cv) cv.style.display = lbBoxVisible ? 'block' : 'none';
+    var tip = document.querySelector('.lbtip');
+    if (tip) {
+      tip.textContent = lbBoxVisible
+        ? '点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭'
+        : '检测框已隐藏 · 再点图片显示 · 滚轮缩放 · Esc 关闭';
+    }
+  });
+
   const cl = document.getElementById('lbClose');
   if (cl) cl.onclick = window.closeLightbox;
   lb.addEventListener('click', function(e){ if (e.target === lb) window.closeLightbox(); });
@@ -1289,7 +1309,7 @@ if (document.readyState === 'loading') {
   <span class="lbclose" id="lbClose">×</span>
   <img id="lbImg" src="">
   <canvas id="lbCanvas"></canvas>
-  <div class="lbtip">滚轮缩放 · 点背景或按 Esc 关闭</div>
+  <div class="lbtip">点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭</div>
 </div>
 </body>
 </html>
