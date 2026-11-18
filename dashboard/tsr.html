@@ -6,13 +6,15 @@
 <title>PerceptionSim · TSR 仿真</title>
 <style>
 :root{
-  --primary:#0F4C81; --primaryLight:#2385BB; --cyan:#36CFC9;
-  --danger:#F57269; --warning:#FFB74D;
-  --darkBg:#111827; --panelBg:#1E293B; --cardBg:#334155;
-  --textSecondary:#94A3B8; --line:#334155;
+  --primary:#2B6DA8; --primaryHover:#327EBE;
+  --danger:#C75450; --warning:#B4863A; --ok:#5B9E7A;
+  --darkBg:#11141A; --panelBg:#181C22; --cardBg:#20252C;
+  --inputBg:#22272E;
+  --txt:#D5DBE3; --textSecondary:#8C96A3; --txtMute:#5D6875;
+  --line:#2A313A;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;background:var(--darkBg);color:#e2e8f0;
+html,body{height:100%;background:var(--darkBg);color:var(--txt);
   font:15px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden}
 button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
 input,select{font:inherit;color:inherit}
@@ -21,18 +23,18 @@ input,select{font:inherit;color:inherit}
 header{height:52px;background:var(--panelBg);border-bottom:1px solid var(--line);
   display:flex;align-items:center;justify-content:space-between;padding:0 18px;flex:0 0 52px}
 .logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:700}
-.logo .cube{width:22px;height:22px;border:2px solid var(--cyan);border-radius:4px;
-  transform:rotate(12deg);position:relative}
-.logo .cube::after{content:"";position:absolute;inset:4px;border:1px solid var(--cyan);
+.logo .cube{width:22px;height:22px;border:2px solid var(--primary);border-radius:2px;
+  position:relative}
+.logo .cube::after{content:"";position:absolute;inset:4px;border:1px solid var(--primary);
   border-radius:2px;opacity:.6}
-.modsw{display:flex;gap:3px;background:#0d1420;padding:3px;border-radius:8px;margin-left:24px}
-.modsw button{padding:7px 20px;border-radius:6px;color:var(--textSecondary);font-size:14px;font-weight:500}
-.modsw button:hover{color:#e2e8f0}
-.modsw button.on{background:var(--primary);color:#fff}
+.modsw{display:flex;gap:3px;background:#12151A;padding:3px;border-radius:3px;margin-left:24px}
+.modsw button{padding:7px 20px;border-radius:3px;color:var(--textSecondary);font-size:14px;font-weight:500}
+.modsw button:hover{color:var(--txt)}
+.modsw button.on{background:#262D36;color:var(--txt);box-shadow:inset 0 -2px 0 var(--primary)}
 .topstats{display:flex;align-items:center;gap:26px;font-size:14px;color:var(--textSecondary)}
-.topstats b{color:#e2e8f0;font-weight:600}
+.topstats b{color:var(--txt);font-weight:600}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:1px}
-.dot.ok{background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
+.dot.ok{background:var(--ok)}
 .dot.bad{background:var(--danger)}
 
 /* ---------- 三栏 ---------- */
@@ -43,41 +45,56 @@ aside.side{width:208px;flex:0 0 208px;background:var(--panelBg);
   border-right:1px solid var(--line);display:flex;flex-direction:column}
 aside.side nav{padding:12px 8px;display:flex;flex-direction:column;gap:3px}
 aside.side nav button{display:flex;align-items:center;gap:11px;padding:11px 14px;
-  border-radius:7px;color:var(--textSecondary);font-size:15px;text-align:left;width:100%}
-aside.side nav button:hover{background:#26334a;color:#e2e8f0}
-aside.side nav button.on{background:var(--primary);color:#fff}
+  border-radius:3px;color:var(--textSecondary);font-size:15px;text-align:left;width:100%}
+aside.side nav button:hover{background:#26334a;color:var(--txt)}
+aside.side nav button.on{background:#20262E;color:var(--txt);box-shadow:inset 2px 0 0 var(--primary)}
 aside.side nav .idx{width:19px;font-size:12px;opacity:.6}
 aside.side .foot{margin-top:auto;padding:14px;border-top:1px solid var(--line);
   font-size:12px;color:var(--textSecondary);line-height:1.7}
-aside.side .foot b{color:var(--cyan)}
+aside.side .foot b{color:var(--primary)}
 
 /* 中间 */
 main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .toolbar{height:44px;background:var(--panelBg);border-bottom:1px solid var(--line);
-  display:flex;align-items:center;gap:12px;padding:0 14px;flex:0 0 44px;font-size:14px}
-.toolbar .seg{display:flex;gap:2px;background:#0d1420;padding:2px;border-radius:7px}
-.toolbar .seg button{padding:5px 14px;border-radius:5px;color:var(--textSecondary);font-size:13.5px}
+  display:flex;align-items:center;gap:10px;padding:0 14px;flex:0 0 44px;font-size:13.5px;
+  white-space:nowrap;overflow-x:auto;overflow-y:hidden}
+.toolbar::-webkit-scrollbar{height:0}
+.toolbar .seg{display:flex;gap:2px;flex:0 0 auto;background:#12151A;padding:2px;border-radius:3px}
+.toolbar .seg button{padding:5px 14px;border-radius:2px;color:var(--textSecondary);font-size:13.5px}
 .toolbar .seg button.on{background:var(--primary);color:#fff}
-.vsep{width:1px;height:20px;background:#3b4b63}
-.toolbar .btn{padding:6px 14px;border-radius:6px;background:#2c3b52;font-size:13.5px}
-.toolbar .btn:hover{background:#374a66}
+.vsep{width:1px;height:18px;background:var(--line);flex:0 0 1px;margin:0 2px}
+.toolbar .btn{flex:0 0 auto;padding:6px 13px;border-radius:3px;background:#272D35;font-size:13.5px}
+.toolbar .btn:hover{background:#2F3641}
 .toolbar .btn.primary{background:var(--primary)}
-.toolbar .btn.primary:hover{background:var(--primaryLight)}
+.toolbar .btn.primary:hover{background:var(--primaryHover)}
 .toolbar .right{margin-left:auto;color:var(--textSecondary);font-size:13px}
 
 /* 视口 */
-.viewport{flex:1;position:relative;background:#05080e;overflow:hidden;
+.thumbstrip{height:70px;flex:0 0 70px;background:#13171D;border-top:1px solid var(--line);
+  display:flex;gap:4px;padding:6px 8px;overflow-x:auto;overflow-y:hidden;
+  align-items:center;white-space:nowrap}
+.thumbstrip::-webkit-scrollbar{height:5px}
+.thumbstrip::-webkit-scrollbar-thumb{background:#3A424E;border-radius:3px}
+.thumbstrip button{flex:0 0 74px;min-width:74px;height:54px;border-radius:2px;overflow:hidden;
+  background:#0D1014;padding:0;border:1px solid transparent;position:relative}
+.thumbstrip button img{width:100%;height:100%;object-fit:cover;display:block;opacity:.7}
+.thumbstrip button.on{border-color:var(--primary)}
+.thumbstrip button.on img{opacity:1}
+.thumbstrip button .badge{position:absolute;right:2px;bottom:2px;font-size:10px;
+  background:rgba(0,0,0,.75);color:#9FB0C2;padding:0 3px;border-radius:2px}
+.thumbstrip .empty{color:var(--textSecondary);font-size:12px;padding:0 6px}
+.viewport{flex:1;position:relative;background:#05080e;overflow:hidden;min-height:0;
   display:flex;align-items:center;justify-content:center}
-.stage{position:relative;max-width:100%;max-height:100%}
-.stage img{display:block;max-width:100%;max-height:calc(100vh - 260px);
+.stage{position:relative;max-width:100%;max-height:100%;display:flex;align-items:center;justify-content:center}
+.stage img{display:block;max-width:100%;max-height:calc(100vh - 310px);
   object-fit:contain;border-radius:2px}
 .stage canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-.hud{position:absolute;padding:5px 11px;border-radius:6px;background:rgba(0,0,0,.62);
-  font-size:13px;backdrop-filter:blur(4px);pointer-events:none}
+.hud{position:absolute;padding:5px 11px;border-radius:3px;background:rgba(0,0,0,.62);
+  font-size:13px;pointer-events:none}
 .hud.tl{top:12px;left:12px}
 .hud.tr{top:12px;right:12px}
 .hud .warn{color:var(--warning)}
-.hud .okc{color:var(--cyan)}
+.hud .okc{color:var(--primary)}
 .ph{color:#475569;text-align:center;font-size:15px;line-height:2}
 .ph .big{font-size:44px;opacity:.35;margin-bottom:8px}
 
@@ -85,44 +102,44 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .logbar{height:38px;background:var(--panelBg);border-top:1px solid var(--line);
   display:flex;align-items:center;gap:12px;padding:0 14px;flex:0 0 38px;
   font-size:12.5px;color:var(--textSecondary)}
-.logbar .pbar{width:190px;height:7px;border-radius:4px;background:#26334a;overflow:hidden}
-.logbar .pbar i{display:block;height:100%;width:0;background:var(--cyan);transition:.3s}
+.logbar .pbar{width:190px;height:7px;border-radius:2px;background:#26334a;overflow:hidden}
+.logbar .pbar i{display:block;height:100%;width:0;background:var(--primary);transition:.3s}
 
 /* 右属性面板 */
 aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
   border-left:1px solid var(--line);display:flex;flex-direction:column}
 .proptabs{display:flex;border-bottom:1px solid var(--line);font-size:13.5px}
 .proptabs button{flex:1;padding:9px 4px;color:var(--textSecondary);border-bottom:2px solid transparent}
-.proptabs button.on{color:#fff;background:#243146;border-bottom-color:var(--cyan)}
+.proptabs button.on{color:#fff;background:#232A33;border-bottom-color:var(--primary)}
 .propbody{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:16px}
 .propbody::-webkit-scrollbar{width:6px}
 .propbody::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
 .grp{display:flex;flex-direction:column;gap:9px}
-.grp .h{font-size:14px;font-weight:600;color:#cbd5e1}
+.grp .h{font-size:14px;font-weight:600;color:var(--txt)}
 .hint{font-size:12.5px;color:var(--textSecondary);line-height:1.6}
 .row3{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
 .row2{display:grid;grid-template-columns:repeat(2,1fr);gap:7px}
-.chip{padding:7px 4px;border-radius:6px;background:#2c3b52;font-size:13px;text-align:center;
+.chip{padding:7px 4px;border-radius:3px;background:#272D35;font-size:13px;text-align:center;
   color:var(--textSecondary)}
-.chip:hover{background:#374a66}
-.chip.on{background:var(--primary);color:#fff}
+.chip:hover{background:#2F3641}
+.chip.on{background:#26303A;color:var(--txt);box-shadow:inset 0 0 0 1px var(--primary)}
 .fld label{display:block;font-size:12.5px;color:var(--textSecondary);margin-bottom:5px}
-.fld input,.fld select{width:100%;padding:8px 10px;border-radius:6px;background:var(--cardBg);
+.fld input,.fld select{width:100%;padding:8px 10px;border-radius:3px;background:var(--cardBg);
   border:1px solid transparent;outline:0;font-size:14px}
-.fld input:focus,.fld select:focus{border-color:var(--primaryLight)}
-.fld input[type=range]{padding:0;background:none;accent-color:var(--primaryLight)}
+.fld input:focus,.fld select:focus{border-color:var(--primaryHover)}
+.fld input[type=range]{padding:0;background:none;accent-color:var(--primaryHover)}
 .sldrow{display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px}
-.sldrow span:last-child{color:var(--cyan);font-variant-numeric:tabular-nums}
+.sldrow span:last-child{color:var(--primary);font-variant-numeric:tabular-nums}
 .chk{display:flex;align-items:center;gap:9px;font-size:14px;padding:4px 0;cursor:pointer}
-.chk input{accent-color:var(--cyan);width:16px;height:16px}
-.hr{border-top:1px solid #2c3b52;padding-top:14px}
-.bigbtn{width:100%;padding:12px;border-radius:8px;background:var(--primary);
+.chk input{accent-color:var(--primary);width:16px;height:16px}
+.hr{border-top:1px solid #272D35;padding-top:14px}
+.bigbtn{width:100%;padding:12px;border-radius:3px;background:var(--primary);
   color:#fff;font-size:15px;font-weight:600;margin-top:4px}
-.bigbtn:hover{background:var(--primaryLight)}
-.bigbtn:disabled{background:#334155;color:#64748b;cursor:not-allowed}
-.bigbtn.ghost{background:#2c3b52;font-weight:500}
-.bigbtn.ghost:hover{background:#374a66}
-.tag{display:inline-block;padding:3px 9px;border-radius:5px;background:#2c3b52;
+.bigbtn:hover{background:var(--primaryHover)}
+.bigbtn:disabled{background:var(--inputBg);color:#64748b;cursor:not-allowed}
+.bigbtn.ghost{background:#272D35;font-weight:500}
+.bigbtn.ghost:hover{background:#2F3641}
+.tag{display:inline-block;padding:3px 9px;border-radius:2px;background:#272D35;
   font-size:12px;color:var(--textSecondary);margin:0 4px 4px 0}
 .tag.ok{background:#0f3a2e;color:#4ade80}
 .tag.warn{background:#3a2f10;color:var(--warning)}
@@ -130,22 +147,22 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
 .list{max-height:210px;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
 .list::-webkit-scrollbar{width:5px}
 .list::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
-.list button{padding:7px 10px;border-radius:5px;background:#212d40;font-size:13px;
-  text-align:left;color:#cbd5e1;display:flex;justify-content:space-between;gap:8px}
-.list button:hover{background:#2c3b52}
-.list button.on{background:var(--primary);color:#fff}
+.list button{padding:7px 10px;border-radius:2px;background:#1F242B;font-size:13px;
+  text-align:left;color:var(--txt);display:flex;justify-content:space-between;gap:8px}
+.list button:hover{background:#272D35}
+.list button.on{background:#232A33;color:var(--txt);box-shadow:inset 2px 0 0 var(--primary)}
 .list button .n{color:var(--textSecondary);font-size:12px}
 .list button.on .n{color:#bfe0ff}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;max-height:250px;overflow-y:auto}
 .grid3::-webkit-scrollbar{width:5px}
 .grid3::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
-.grid3 button{border-radius:5px;overflow:hidden;background:#0d1420;padding:0;position:relative}
+.grid3 button{border-radius:2px;overflow:hidden;background:#12151A;padding:0;position:relative}
 .grid3 img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
-.grid3 button.on{outline:2px solid var(--cyan)}
-.log{background:#070b11;border-radius:7px;padding:10px;font:12px/1.6 ui-monospace,Consolas,monospace;
+.grid3 button.on{outline:2px solid var(--primary)}
+.log{background:#070b11;border-radius:3px;padding:10px;font:12px/1.6 ui-monospace,Consolas,monospace;
   color:#93a8c2;max-height:170px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
-.mode-tip{font-size:12.5px;color:var(--textSecondary);padding:8px 10px;border-radius:6px;
-  background:#182234;border-left:3px solid var(--primaryLight)}
+.mode-tip{font-size:12.5px;color:var(--textSecondary);padding:8px 10px;border-radius:3px;
+  background:#182234;border-left:3px solid var(--primaryHover)}
 </style>
 </head>
 <body>
@@ -160,7 +177,7 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
   <div class="topstats">
     <span><span class="dot ok" id="dEngine"></span>素材库：<b id="hLib">—</b></span>
     <span>国家：<b id="hCountry">—</b></span>
-    <span>当前国家：<b id="hCur" style="color:#36CFC9">—</b></span>
+    <span>当前国家：<b id="hCur" style="color:#4A9BD8">—</b></span>
     <span>已选图片：<b id="hImg">—</b></span>
   </div>
 </header>
@@ -169,10 +186,9 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
   <!-- 左导航 -->
   <aside class="side">
     <nav id="navTsr">
-      <button data-step="lib" class="on"><span class="idx">01</span>标牌素材库</button>
-      <button data-step="pick"><span class="idx">02</span>选择场景图</button>
-      <button data-step="prev"><span class="idx">03</span>单张预览</button>
-      <button data-step="batch"><span class="idx">04</span>批量生成</button>
+      <button data-step="lib" class="on"><span class="idx">01</span>数据源</button>
+      <button data-step="work"><span class="idx">02</span>工作台</button>
+      <button data-step="batch"><span class="idx">03</span>批量生成</button>
     </nav>
     <nav id="navObj" style="display:none">
       <button data-step="objlib" class="on"><span class="idx">01</span>目标素材</button>
@@ -204,11 +220,14 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
       <div class="vsep"></div>
       <label class="chk" style="padding:0"><input type="checkbox" id="cbBox" checked> 叠加检测框</label>
       <div class="vsep"></div>
-      <button class="btn" id="btnReload">重新检测</button>
-      <button class="btn primary" id="btnRun">▶ 生成预览</button>
-      <span class="right" id="tbInfo">分辨率 —</span>
+      <button class="btn" id="btnPrevImg">◀ 上一张</button>
+      <span id="imgIdx" style="min-width:64px;text-align:center;color:var(--txtDim);font-size:12.5px">— / —</span>
+      <button class="btn" id="btnNextImg">下一张 ▶</button>
+      <div class="vsep"></div>
+      <button class="btn" id="btnRun">生成预览</button>
+      <span class="right" id="tbInfo">—</span>
     </div>
-
+    <div class="thumbstrip" id="thumbStrip"><span class="empty">加载图片后在此快速切换</span></div>
     <div class="viewport" id="viewport">
       <div class="ph" id="ph">
         <div class="big">▣</div>
@@ -244,6 +263,20 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
       <button data-tab="gndparam">磨损参数</button>
       <button data-tab="gndout">输出</button>
     </div>
+    <div id="sourceBar" style="display:none;padding:12px;border-bottom:1px solid var(--line);background:#151920">
+      <div class="hint" style="margin-bottom:7px">实拍图目录</div>
+      <input type="text" id="fDir2" placeholder="/mnt/Data_Platform/.../images"
+        style="width:100%;padding:7px 9px;border-radius:2px;background:var(--inputBg);border:1px solid var(--line);outline:0;font-size:12.5px;margin-bottom:7px">
+      <div style="display:flex;gap:6px;margin-bottom:7px">
+        <select id="fCountrySelect"
+                style="width:100px;padding:7px 4px;border-radius:2px;background:var(--inputBg);
+                       border:1px solid var(--line);outline:0;font-size:12.5px;text-align:center">
+          <option value="">加载中…</option>
+        </select>
+        <button class="bigbtn ghost" id="btnLoadImg2" style="flex:1;margin:0;padding:7px;font-size:13px">加载图片</button>
+      </div>
+      <div class="hint" id="loadStat" style="font-size:12px;color:var(--txtMute)">未加载</div>
+    </div>
     <div class="propbody">
 
       <!-- 素材国家 -->
@@ -252,7 +285,7 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
           <div class="h">素材来源国家</div>
           <div class="hint">标牌外观因国家而异，选对国家的素材才不会贴错。</div>
           <input type="text" id="fCountryFilter" placeholder="搜索国家代码，如 BR / DE / RU"
-                 style="width:100%;padding:8px 10px;border-radius:6px;background:#334155;border:0;outline:0;margin-top:6px">
+                 style="width:100%;padding:8px 10px;border-radius:3px;background:var(--inputBg);border:0;outline:0;margin-top:6px">
           <div class="list" id="countryList"></div>
         </div>
       </div>
@@ -268,7 +301,7 @@ aside.props{width:330px;flex:0 0 330px;background:var(--panelBg);
         <div class="grp hr">
           <div class="h">指定类别</div>
           <input type="text" id="fTargetClass" placeholder="speed_limit_60" disabled
-                 style="width:100%;padding:8px 10px;border-radius:6px;background:#334155;border:0;outline:0">
+                 style="width:100%;padding:8px 10px;border-radius:3px;background:var(--inputBg);border:0;outline:0">
           <div class="hint" id="classCount">—</div>
           <div class="grid3" id="assetGrid"></div>
         </div>
@@ -434,19 +467,20 @@ const api = (p, o) => fetch(p, o).then(r => r.json().then(d => ({ok:r.ok, d, cod
 const S = {
   step:'lib', country:'BR', cls:'', manual:false,
   dir:'', file:'', view:'side', showBox:true,
-  lib:null, dets:[], prevUrl:'', curImgUrl:'', origUrl:'',
+  lib:null, dets:[], prevUrl:'', curImgUrl:'', origUrl:'', imgs:[], idx:-1,
   jobId:null, timer:null
 };
 
 /* ============ 顶栏/日志 ============ */
-function hud(k,v){ if($('#'+k)) $('#'+k).textContent = v; }
+function hud(k,v){ const e = document.getElementById(k); if (e) e.textContent = v; }
 function logline(t){ $('#logline').textContent = t; }
 function pct(t, w){ $('#pct').textContent = t; $('#pbar').style.width = (w==null?0:w)+'%'; }
 
 /* ============ 模块切换 TSR / OBJ / GND ============ */
 const MOD_CFG = {
   tsr: {nav:'#navTsr', tabs:'#propTabs', first:'country',
-        stats:['素材库：<b id="hLib">—</b>','国家：<b id="hCountry">—</b>']},
+        stats:['素材库：<b id="hLib">—</b>','国家：<b id="hCountry">—</b>',
+           '当前：<b id="hCur">—</b>']},
   obj: {nav:'#navObj', tabs:'#propTabsObj', first:'objlib',
         stats:['模型：<b>基础几何体组合</b>','类别：<b>6 类</b>']},
   gnd: {nav:'#navGnd', tabs:'#propTabsGnd', first:'gndlib',
@@ -488,10 +522,12 @@ $$('.side nav button').forEach(b => b.onclick = () => {
   b.parentElement.querySelectorAll('button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on');
   S.step = b.dataset.step;
-  const map = {lib:'country', pick:'class', prev:'class', batch:'output',
+  const map = {lib:'country', work:'class', batch:'output',
                objlib:'objlib', objpick:'objlib', objprev:'objparam', objbatch:'objout',
                gndlib:'gndlib', gndpick:'gndparam', gndprev:'gndparam', gndbatch:'gndout'};
   switchProp(map[S.step] || 'country');
+  const _sb = $('#sourceBar');
+  if (_sb) _sb.style.display = (b.dataset.step === 'lib') ? '' : 'none';
 });
 function bindTabs(sel){
   $$(sel + ' button').forEach(b => b.onclick = () => switchProp(b.dataset.tab));
@@ -550,12 +586,12 @@ function renderView(){
   const showSim  = S.view !== 'orig' && S.prevUrl;
   let html = '';
   if (S.view === 'side') {
-    html = `<div style="display:flex;gap:10px;max-width:100%;align-items:center">
+    html = `<div style="display:flex;gap:10px;max-width:100%;max-height:100%;align-items:center;justify-content:center">
       <div class="stage"><img id="imgA" src="${S.origUrl}">
         <div class="hud tl">原图</div>
         ${S.showBox? '<canvas id="cvA"></canvas>':''}</div>
       ${showSim ? `<div class="stage"><img id="imgB" src="${S.prevUrl}&t=${Date.now()}">
-        <div class="hud tl" style="color:#36CFC9">仿真后</div>
+        <div class="hud tl" style="color:#4A9BD8">仿真后</div>
         <div class="hud tr" id="hudStats"></div></div>` : ''}
     </div>`;
   } else {
@@ -587,7 +623,7 @@ function drawBoxes(cvId, imgId){
   const sx = w / img.naturalWidth, sy = h / img.naturalHeight;
   S.dets.forEach(d => {
     const [x1,y1,x2,y2] = d.bbox;
-    ctx.strokeStyle = d.usable ? '#36CFC9' : '#F57269';
+    ctx.strokeStyle = d.usable ? '#4A9BD8' : '#F57269';
     ctx.lineWidth = 2;
     ctx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy);
     const label = `${d.class} ${d.conf.toFixed(2)}`;
@@ -643,7 +679,9 @@ async function loadClasses(){
   const c = (S.lib?.countries||[]).find(x=>x.country===S.country);
   if (!c) return;
   hud('hCur', S.country);
-  $('#classCount').textContent = `${S.country} 共 ${c.class_count} 个类别，点缩略图选为指定类别`;
+  const ccEl = $('#classCount');
+  if (!ccEl) return;
+  ccEl.textContent = `${S.country} 共 ${c.class_count} 个类别，点缩略图选为指定类别`;
   const classes = c.classes.filter(k => !k.startsWith('mtsd_')).slice(0, 12);
   $('#assetGrid').innerHTML = classes.map(k =>
     `<button data-k="${k}" title="${k}">
@@ -678,6 +716,8 @@ async function loadImages(){
   if (!r.ok) { logline('[ERR] ' + (r.d.error||'目录读取失败')); pct('失败',0); return; }
   pct('就绪', 0);
   logline(`[INFO] 目录共 ${r.d.total} 张`);
+  S.imgs = r.d.images || []; S.idx = -1;
+  renderStrip();
   if ($('#imgPicker')) $('#imgPicker').remove();
   const box = document.createElement('div');
   box.id = 'imgPicker';
@@ -697,6 +737,165 @@ async function loadImages(){
     autoDetect();
   });
 }
+
+/* [WORKFLOW-V2] 图片导航 */
+function renderStrip(){
+  const strip = $('#thumbStrip');
+  if (!strip) return;
+  if (!S.imgs.length) {
+    strip.innerHTML = '<span class="empty">加载图片后在此快速切换</span>';
+    return;
+  }
+  strip.innerHTML = S.imgs.map((f, i) =>
+    '<button data-i="' + i + '" class="' + (i===S.idx?'on':'') + '">' +
+    '<img loading="lazy" src="/api/tsr/image?dir=' + encodeURIComponent(S.dir) +
+    '&file=' + encodeURIComponent(f) + '&max=110">' +
+    '<span class="badge">' + (i+1) + '</span></button>').join('');
+  strip.querySelectorAll('button').forEach(b => b.onclick = () => pickIndex(+b.dataset.i));
+  const cur = strip.querySelector('button.on');
+  if (cur) cur.scrollIntoView({block:'nearest', inline:'center'});
+}
+
+function pickIndex(i){
+  if (!S.imgs.length) return;
+  i = Math.max(0, Math.min(S.imgs.length - 1, i));
+  S.idx = i;
+  S.file = S.imgs[i];
+  S.prevUrl = ''; S.dets = [];
+  S.origUrl = '/api/tsr/image?dir=' + encodeURIComponent(S.dir) +
+              '&file=' + encodeURIComponent(S.file) + '&max=1400';
+  const el = $('#imgIdx'); if (el) el.textContent = (i+1) + ' / ' + S.imgs.length;
+  const st = $('#loadStat');
+  if (st) st.textContent = '当前 ' + (i+1) + '/' + S.imgs.length + '：' + S.file;
+  $$('#thumbStrip button').forEach(b => b.classList.toggle('on', +b.dataset.i === i));
+  renderView();
+  autoDetect();
+}
+
+function stepImage(d){ pickIndex(S.idx < 0 ? 0 : S.idx + d); }
+
+/* 数据源：目录 + 国家码 + 一键加载 */
+/* 路径归一化：Windows 的 \\IP\共享\路径 → 服务器的 /mnt/挂载点/路径
+   为什么需要：用户在 Windows 上复制的是 UNC 路径，面板跑在 Linux 服务器上，
+   直接用会报「目录不存在」。这里自动做映射，避免每次手动改。 */
+function normalizePath(raw){
+  let p = (raw || '').trim();
+  // 反斜杠统一成正斜杠
+  p = p.replace(/\\/g, '/');
+  // UNC: //192.168.20.206/Data_Platform/xxx  →  /mnt/Data_Platform/xxx
+  const m = p.match(/^\/\/([\d.]+)\/([^\/]+)(.*)$/);
+  if (m) {
+    const share = m[2], rest = m[3] || '';
+    // 共享名 → 服务器挂载点
+    const MAP = {
+      'Data_Platform': '/mnt/Data_Platform',
+      'ADAS_Logs': '/mnt/adas_logs',
+      'raw_data': '/mnt/raw_data',
+      'done_data': '/mnt/done_data',
+      'done_data_new': '/mnt/done_data_new',
+      'logs': '/mnt/logs',
+      'logs_new': '/mnt/logs_new',
+      'share': '/mnt/share',
+      'to_label': '/mnt/to_label',
+      'to_label_ext': '/mnt/to_label_ext',
+      'calibration': '/mnt/calibration'
+    };
+    const base = MAP[share] || ('/mnt/' + share.toLowerCase());
+    return base + rest;
+  }
+  return p;
+}
+
+/* 国家下拉：选项来自素材库实际存在的国家，避免手打错码 */
+const COUNTRY_CN = {
+  BR:'巴西', AR:'阿根廷', CL:'智利', CO:'哥伦比亚', PE:'秘鲁', EC:'厄瓜多尔',
+  BO:'玻利维亚', PY:'巴拉圭', UY:'乌拉圭', VE:'委内瑞拉', MX:'墨西哥',
+  RU:'俄罗斯', BY:'白俄罗斯', KZ:'哈萨克斯坦', UA:'乌克兰',
+  DE:'德国', FR:'法国', ES:'西班牙', IT:'意大利', GB:'英国', NL:'荷兰',
+  PL:'波兰', SE:'瑞典', DK:'丹麦', NO:'挪威', FI:'芬兰', PT:'葡萄牙',
+  AT:'奥地利', CH:'瑞士', BE:'比利时', CZ:'捷克', HU:'匈牙利', RO:'罗马尼亚',
+  GR:'希腊', IE:'爱尔兰', HR:'克罗地亚', RS:'塞尔维亚', BG:'保加利亚',
+  US:'美国', CA:'加拿大', AU:'澳大利亚', NZ:'新西兰', JP:'日本',
+  CN:'中国', TW:'台湾', KR:'韩国', IN:'印度', TH:'泰国', VN:'越南',
+  MY:'马来西亚', ID:'印尼', PH:'菲律宾', SG:'新加坡', AE:'阿联酋',
+  SA:'沙特', ZA:'南非', EG:'埃及', MA:'摩洛哥', TR:'土耳其', IL:'以色列',
+  LT:'立陶宛', LV:'拉脱维亚', EE:'爱沙尼亚', SI:'斯洛文尼亚', SK:'斯洛伐克',
+  LU:'卢森堡', MT:'马耳他', IS:'冰岛', CY:'塞浦路斯'
+};
+
+function countryPriority(c){
+  if (['BR','AR','CL','CO','PE','EC','BO','PY','UY','VE','MX'].includes(c)) return 0;
+  if (['RU','BY','KZ','UA'].includes(c)) return 1;
+  if (['DE','FR','ES','IT','GB','NL','PL','SE'].includes(c)) return 2;
+  return 3;
+}
+
+function fillCountrySelect(){
+  const sel = $('#fCountrySelect');
+  if (!sel || !S.lib) return;
+  const list = (S.lib.countries || []).slice().sort((a,b) => {
+    const d = countryPriority(a.country) - countryPriority(b.country);
+    return d !== 0 ? d : a.country.localeCompare(b.country);
+  });
+  // 优先选中当前国家；没有就用第一个
+  // 默认：优先 BR（南美主用场景），其次当前已选，最后列表第一个
+  let cur = S.country;
+  if (!cur || !list.some(c => c.country === cur)) {
+    cur = list.some(c => c.country === 'BR') ? 'BR' : (list[0] ? list[0].country : '');
+  }
+  sel.innerHTML = list.map(c => {
+    const cn = COUNTRY_CN[c.country] || '';
+    const label = c.country + (cn ? ' ' + cn : '') + '（' + c.count + '）';
+    return '<option value="' + c.country + '"' +
+           (c.country === cur ? ' selected' : '') + '>' + label + '</option>';
+  }).join('');
+  if (cur && cur !== S.country) { S.country = cur; }
+}
+
+async function loadFromSource(){
+  let dir = $('#fDir2').value.trim();
+  dir = normalizePath(dir);
+  $('#fDir2').value = dir;
+  const cc = ($('#fCountrySelect').value || '').trim().toUpperCase();
+  if (!dir) { alert('请填写实拍图目录'); return; }
+  S.dir = dir;
+  if (cc && cc !== S.country) { S.country = cc; loadClasses(); }
+  $('#loadStat').textContent = '加载中…';
+  const r = await api('/api/tsr/images?dir=' + encodeURIComponent(dir) + '&limit=60');
+  if (!r.ok) {
+    $('#loadStat').textContent = r.d.error || '读取失败';
+    return;
+  }
+  S.imgs = r.d.images || []; S.idx = -1;
+  renderStrip();
+  $('#loadStat').textContent = '共 ' + r.d.total + ' 张，已载入前 ' + S.imgs.length + ' 张';
+  logline('[INFO] 目录共 ' + r.d.total + ' 张');
+  if (S.imgs.length) pickIndex(0);
+}
+
+function bindWorkflowBtns(){
+  const p = $('#btnPrevImg'); if (p) p.onclick = () => stepImage(-1);
+  const n = $('#btnNextImg'); if (n) n.onclick = () => stepImage(1);
+  const b = $('#btnLoadImg2'); if (b) b.onclick = loadFromSource;
+  const cs = $('#fCountrySelect');
+  if (cs) cs.onchange = () => {
+    const cc = cs.value;
+    if (!cc) return;
+    S.country = cc;
+    hud('hCur', cc);
+    logline('[INFO] 素材国家切换为 ' + cc);
+    loadClasses();
+  };
+}
+
+/* 键盘：←/→ 切图，空格生成预览 */
+document.addEventListener('keydown', e => {
+  const tn = (e.target.tagName || '').toUpperCase();
+  if (tn === 'INPUT' || tn === 'TEXTAREA') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepImage(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); stepImage(1); }
+  else if (e.key === ' ' && S.file) { e.preventDefault(); runPreview(); }
+});
 
 async function autoDetect(){
   if (!S.file) return;
@@ -776,11 +975,13 @@ async function pollJob(){
   }
 }
 
-/* ============ 按钮绑定 ============ */
-$('#fStrength').oninput = e => $('#vStrength').textContent = (+e.target.value).toFixed(2);
-$('#btnReload').onclick = autoDetect;
-$('#btnRun').onclick = runPreview;
-$('#btnBatch').onclick = runBatch;
+/* ============ 按钮绑定（元素可能因改造而缺失，统一做存在性判断） ============ */
+(function bindMain(){
+  const fs = $('#fStrength');
+  if (fs) fs.oninput = e => { const v = $('#vStrength'); if (v) v.textContent = (+e.target.value).toFixed(2); };
+  const run = $('#btnRun');   if (run) run.onclick = runPreview;
+  const bat = $('#btnBatch'); if (bat) bat.onclick = runBatch;
+})();
 
 // 选图步骤：在右面板插入目录输入
 (function initPickInputs(){
@@ -797,17 +998,23 @@ $('#btnBatch').onclick = runBatch;
   document.getElementById('btnLoadImg').onclick = loadImages;
 })();
 
-// 初始化：先拉素材库，再渲染国家列表与类别
+/* 页面结构就绪后先绑按钮（不依赖后续初始化是否成功） */
+bindWorkflowBtns();
+
+/* 初始化：先拉素材库，再渲染国家列表与类别 */
 (async () => {
-  await loadLib();
-  renderCountries('');
-  if ($('#countryList').children.length) {
-    // 默认选中第一个国家
+  try {
+    await loadLib();
+    renderCountries('');
     const first = $('#countryList button');
     if (first) { S.country = first.dataset.c; first.classList.add('on'); }
+    await loadClasses();
+    hud('hCur', S.country);
+    fillCountrySelect();
+  } catch (e) {
+    logline('[ERR] 初始化失败：' + e.message);
+    console.error('[init]', e);
   }
-  await loadClasses();
-  hud('hCur', S.country);
 })();
 </script>
 </body>
