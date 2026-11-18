@@ -75,8 +75,10 @@ main.center{flex:1;display:flex;flex-direction:column;min-width:0}
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;
   display:none;align-items:center;justify-content:center;cursor:zoom-out}
 .lightbox.on{display:flex}
-.lightbox canvas{position:absolute;pointer-events:none;display:none}
-.lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;cursor:pointer;
+.lightbox canvas{position:absolute;pointer-events:none;display:none;
+  transform-origin:center center}
+.lightbox img{max-width:96vw;max-height:92vh;object-fit:contain;cursor:grab;
+  user-select:none;-webkit-user-drag:none;
   box-shadow:0 0 40px rgba(0,0,0,.8);cursor:default}
 .lightbox .lbclose{position:fixed;top:16px;right:20px;font-size:28px;color:#ccc;
   cursor:pointer;line-height:1;padding:6px 12px;border-radius:3px}
@@ -1329,8 +1331,7 @@ function initLightbox(){
 
   window.openLightbox = function(src){
     im.src = src;
-    scale = 1;
-    im.style.transform = 'scale(1)';
+    if (window.lbResetTransform) window.lbResetTransform();
     var _cv = document.getElementById('lbCanvas');
     if (_cv) { _cv.style.transform = 'scale(1)'; _cv.style.transformOrigin = 'center center'; }
     lb.classList.add('on');
@@ -1338,7 +1339,7 @@ function initLightbox(){
     var _cv0 = document.getElementById('lbCanvas');
     if (_cv0) _cv0.style.display = 'block';
     var _tip0 = document.querySelector('.lbtip');
-    if (_tip0) _tip0.textContent = '点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭';
+    if (_tip0) _tip0.textContent = '滚轮缩放 · 拖拽平移 · 双击复位 · 点图片隐藏框 · Esc 关闭';
     im.onload = function(){ drawLbBoxes(); };
     // 图片可能已经在缓存里，onload 不会触发，补一次
     if (im.complete) setTimeout(drawLbBoxes, 30);
@@ -1430,7 +1431,7 @@ function initLightbox(){
     var tip = document.querySelector('.lbtip');
     if (tip) {
       tip.textContent = lbBoxVisible
-        ? '点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭'
+        ? '滚轮缩放 · 拖拽平移 · 双击复位 · 点图片隐藏框 · Esc 关闭'
         : '检测框已隐藏 · 再点图片显示 · 滚轮缩放 · Esc 关闭';
     }
   });
@@ -1441,19 +1442,63 @@ function initLightbox(){
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape') window.closeLightbox();
   });
-  lb.addEventListener('wheel', function(e){
-    e.preventDefault();
-    scale *= e.deltaY > 0 ? 0.88 : 1.14;
-    scale = Math.max(0.2, Math.min(8, scale));
-    var tf = 'scale(' + scale.toFixed(3) + ')';
-    // canvas 用同样的 transform 和 transform-origin，保证框和图片始终对齐
+  /* ---- 缩放 + 拖拽 ----
+     用统一的 transform: translate(x,y) scale(k) 同时作用于 img 和 canvas，
+     保证检测框始终跟着图片走。 */
+  var lbDrag = {on:false, sx:0, sy:0, ox:0, oy:0};
+  var tx = 0, ty = 0, k = 1;
+
+  function applyTf(){
+    var tf = 'translate(' + tx + 'px,' + ty + 'px) scale(' + k.toFixed(3) + ')';
     im.style.transform = tf;
+    im.style.transformOrigin = 'center center';
     var cv = document.getElementById('lbCanvas');
-    if (cv && cv.style.display === 'block') {
+    if (cv) {
       cv.style.transform = tf;
       cv.style.transformOrigin = 'center center';
     }
+  }
+  window.lbResetTransform = function(){ tx = 0; ty = 0; k = 1; applyTf(); };
+
+  // 滚轮：以鼠标位置为中心缩放
+  lb.addEventListener('wheel', function(e){
+    e.preventDefault();
+    var rect = lb.getBoundingClientRect();
+    var mx = e.clientX - rect.left - rect.width / 2;
+    var my = e.clientY - rect.top - rect.height / 2;
+    var oldK = k;
+    k *= e.deltaY > 0 ? 0.88 : 1.14;
+    k = Math.max(0.3, Math.min(10, k));
+    // 保持鼠标下的点不动
+    tx = mx - (mx - tx) * (k / oldK);
+    ty = my - (my - ty) * (k / oldK);
+    applyTf();
   }, { passive: false });
+
+  // 拖拽平移
+  im.addEventListener('mousedown', function(e){
+    if (e.button !== 0) return;
+    e.preventDefault();
+    lbDrag.on = true;
+    lbDrag.sx = e.clientX; lbDrag.sy = e.clientY;
+    lbDrag.ox = tx; lbDrag.oy = ty;
+    im.style.cursor = 'grabbing';
+  });
+  document.addEventListener('mousemove', function(e){
+    if (!lbDrag.on) return;
+    tx = lbDrag.ox + (e.clientX - lbDrag.sx);
+    ty = lbDrag.oy + (e.clientY - lbDrag.sy);
+    applyTf();
+  });
+  document.addEventListener('mouseup', function(){
+    if (lbDrag.on) { lbDrag.on = false; im.style.cursor = 'grab'; }
+  });
+
+  // 双击复位
+  im.addEventListener('dblclick', function(e){
+    e.stopPropagation();
+    tx = 0; ty = 0; k = 1; applyTf();
+  });
 }
 
 /* ⚠️ lightbox 的 DOM 在 script 之后才解析，必须等 DOM 就绪再初始化，
@@ -1492,7 +1537,7 @@ if (document.readyState === 'loading') {
   <span class="lbclose" id="lbClose">×</span>
   <img id="lbImg" src="">
   <canvas id="lbCanvas"></canvas>
-  <div class="lbtip">点图片隐藏框 · 滚轮缩放 · 点背景或按 Esc 关闭</div>
+  <div class="lbtip">滚轮缩放 · 拖拽平移 · 双击复位 · 点图片隐藏框 · Esc 关闭</div>
 </div>
 </body>
 </html>
