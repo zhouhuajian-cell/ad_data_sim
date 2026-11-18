@@ -768,8 +768,19 @@ function pickIndex(i){
   const st = $('#loadStat');
   if (st) st.textContent = '当前 ' + (i+1) + '/' + S.imgs.length + '：' + S.file;
   $$('#thumbStrip button').forEach(b => b.classList.toggle('on', +b.dataset.i === i));
-  renderView();
-  autoDetect();
+  // 预筛阶段已经检测过，直接复用，避免逐张重复跑 YOLO
+  const pre = S._predets && S._predets[S.file];
+  if (pre && pre.length) {
+    S.dets = pre.map(x => ({
+      class: x.class, conf: x.conf, bbox: null, w: x.w, h: x.h,
+      scene_shape: x.shape, usable: x.usable
+    }));
+    // 预筛结果没有 bbox 坐标，需要补一次（只取框，轻量）
+    autoDetect(true);
+  } else {
+    renderView();
+    autoDetect();
+  }
 }
 
 function stepImage(d){ pickIndex(S.idx < 0 ? 0 : S.idx + d); }
@@ -838,11 +849,12 @@ function fillCountrySelect(){
     return d !== 0 ? d : a.country.localeCompare(b.country);
   });
   // 优先选中当前国家；没有就用第一个
-  // 默认：优先 BR（南美主用场景），其次当前已选，最后列表第一个
+  // 默认：有已选就用已选；否则优先 BR；再否则第一个
   let cur = S.country;
   if (!cur || !list.some(c => c.country === cur)) {
     cur = list.some(c => c.country === 'BR') ? 'BR' : (list[0] ? list[0].country : '');
   }
+  S.country = cur;
   sel.innerHTML = list.map(c => {
     const cn = COUNTRY_CN[c.country] || '';
     const label = c.country + (cn ? ' ' + cn : '') + '（' + c.count + '）';
@@ -860,17 +872,60 @@ async function loadFromSource(){
   if (!dir) { alert('请填写实拍图目录'); return; }
   S.dir = dir;
   if (cc && cc !== S.country) { S.country = cc; loadClasses(); }
-  $('#loadStat').textContent = '加载中…';
-  const r = await api('/api/tsr/images?dir=' + encodeURIComponent(dir) + '&limit=60');
-  if (!r.ok) {
-    $('#loadStat').textContent = r.d.error || '读取失败';
+  // 自动跑 YOLO 预筛（后台任务 + 进度轮询），只保留有标牌的帧
+  S.imgs = []; S.idx = -1; renderStrip();
+  $('#loadStat').innerHTML = '<span style="color:var(--primary)">YOLO 预筛启动…</span>';
+  logline('[INFO] 开始预筛，过滤没有标牌的帧');
+  pct('预筛', 5);
+
+  const job = await api('/api/tsr/prescreen', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dir: dir, conf: 0.30, min_px: 24, limit: 300})
+  });
+  if (!job.ok || !job.d.task) {
+    $('#loadStat').textContent = job.d.error || '预筛启动失败';
+    logline('[ERR] ' + (job.d.error || '启动失败'));
+    pct('失败', 0);
     return;
   }
-  S.imgs = r.d.images || []; S.idx = -1;
-  renderStrip();
-  $('#loadStat').textContent = '共 ' + r.d.total + ' 张，已载入前 ' + S.imgs.length + ' 张';
-  logline('[INFO] 目录共 ' + r.d.total + ' 张');
-  if (S.imgs.length) pickIndex(0);
+  const tid = job.d.task;
+
+  // 轮询进度
+  await new Promise(resolve => {
+    const tick = async () => {
+      const st = await api('/api/tsr/prescreen_progress?task=' + tid);
+      const d = st.d || {};
+      if (d.total) {
+        const pv = Math.round(100 * d.done / d.total);
+        $('#loadStat').innerHTML =
+          '<span style="color:var(--primary)">检测中 ' + d.done + '/' + d.total + '</span>' +
+          ' · 已发现 <b style="color:var(--ok)">' + (d.usable||0) + '</b> 张有标牌';
+        logline('[INFO] 预筛 ' + d.done + '/' + d.total + '，有标牌 ' + (d.usable||0) + ' 张');
+        pct('预筛 ' + pv + '%', pv);
+      }
+      if (d.finished) {
+        const results = d.results || [];
+        S.imgs = results.map(x => x.file);
+        S.prescreen = d;
+        S._predets = {};
+        results.forEach(r => { S._predets[r.file] = r.dets || []; });
+        renderStrip();
+        $('#loadStat').innerHTML =
+          '<b style="color:var(--ok)">' + S.imgs.length + '</b> / ' + (d.total_files||d.total) +
+          ' 张有标牌，已过滤 ' + ((d.total_files||d.total) - S.imgs.length) + ' 张无标牌的';
+        logline('[OK] 预筛完成：' + (d.total_files||d.total) + ' 张 → ' +
+                S.imgs.length + ' 张有标牌');
+        pct('就绪', 100);
+        setTimeout(() => pct('就绪', 0), 1200);
+        if (S.imgs.length) pickIndex(0);
+        else logline('[WARN] 该目录没有检出可用标牌，换个目录试试');
+        resolve();
+        return;
+      }
+      setTimeout(tick, 800);
+    };
+    tick();
+  });
 }
 
 function bindWorkflowBtns(){
@@ -897,14 +952,14 @@ document.addEventListener('keydown', e => {
   else if (e.key === ' ' && S.file) { e.preventDefault(); runPreview(); }
 });
 
-async function autoDetect(){
+async function autoDetect(silent){
   if (!S.file) return;
   logline('[INFO] YOLO 检测中…'); pct('检测', 45);
   const r = await api('/api/tsr/detect', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({dir:S.dir, file:S.file, conf:+$('#fConf').value})});
   pct('就绪', 0);
-  if (!r.d.ok) { logline('[ERR] 检测失败'); return; }
+  if (!r.d.ok) { if (!silent) logline('[ERR] 检测失败'); return; }
   S.dets = r.d.detections || [];
   logline(`[INFO] 检出 ${S.dets.length} 个标牌`);
   renderView();
@@ -1006,7 +1061,9 @@ bindWorkflowBtns();
   try {
     await loadLib();
     renderCountries('');
-    const first = $('#countryList button');
+    // 默认选 BR（南美主用），没有就第一个
+    const brBtn = [...document.querySelectorAll('#countryList button')].find(b => b.dataset.c === 'BR');
+    const first = brBtn || $('#countryList button');
     if (first) { S.country = first.dataset.c; first.classList.add('on'); }
     await loadClasses();
     hud('hCur', S.country);
