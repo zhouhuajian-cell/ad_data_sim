@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>批量产出 · 前后对比</title>
+<style>
+:root{
+  --bg:#0E1116; --panel:#141920; --line:#232A33; --line2:#2E3946;
+  --txt:#E6EBF2; --txtDim:#8C99AA; --txtMute:#5C6878;
+  --primary:#3E7BFA; --ok:#36CFC9; --warn:#F5A623;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);
+  font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+header{height:56px;display:flex;align-items:center;gap:16px;padding:0 20px;
+  border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
+header h1{font-size:15px;font-weight:600;letter-spacing:.3px}
+header .meta{font-size:12.5px;color:var(--txtDim);margin-left:auto}
+header .meta b{color:var(--ok);font-weight:600}
+.toolbar{display:flex;gap:10px;align-items:center;padding:12px 20px;
+  border-bottom:1px solid var(--line);background:#11161D;flex-wrap:wrap}
+.toolbar input,.toolbar select{background:#1A212B;border:1px solid var(--line2);
+  color:var(--txt);border-radius:4px;padding:7px 11px;font-size:13px;outline:0}
+.toolbar input{min-width:230px}
+.toolbar input:focus,.toolbar select:focus{border-color:var(--primary)}
+.btn{background:var(--primary);border:0;color:#fff;border-radius:4px;
+  padding:7px 15px;font-size:13px;cursor:pointer;font-weight:500}
+.btn:hover{filter:brightness(1.1)}
+.btn.ghost{background:transparent;border:1px solid var(--line2);color:var(--txtDim)}
+.btn.ghost:hover{border-color:var(--primary);color:var(--txt)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
+  gap:14px;padding:16px 20px 40px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.card .pair{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
+.card .pair figure{position:relative;aspect-ratio:1.6;overflow:hidden;background:#000}
+.card .pair img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+.card .pair figcaption{position:absolute;top:6px;left:6px;font-size:10.5px;
+  padding:2px 6px;border-radius:2px;background:rgba(8,16,26,.82);color:#9FB0C4}
+.card .pair figure:last-child figcaption{color:var(--ok)}
+.card .body{padding:9px 11px;display:flex;align-items:center;gap:8px}
+.cls{font-size:12px;color:var(--primary);font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.stem{font-size:10.5px;color:var(--txtMute);white-space:nowrap}
+.zoom{font-size:11px;color:var(--txtMute);background:transparent;border:1px solid var(--line2);
+  border-radius:3px;padding:2px 7px;cursor:pointer}
+.zoom:hover{color:var(--txt);border-color:var(--primary)}
+.empty{padding:80px 20px;text-align:center;color:var(--txtMute);font-size:14px}
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:99;display:none;
+  align-items:center;justify-content:center}
+.lb.on{display:flex}
+.lb img{max-width:94vw;max-height:92vh;object-fit:contain;cursor:grab;user-select:none}
+#lbPair img{max-width:46vw;max-height:90vh;display:block;cursor:grab;user-select:none}
+.lb .tip{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+  color:#7C8A9B;font-size:12.5px}
+.lb .close{position:fixed;top:14px;right:20px;font-size:26px;color:#9AA7B6;cursor:pointer}
+.more{text-align:center;padding:10px 0 40px}
+</style>
+</head>
+<body>
+<header>
+  <h1>批量产出 · 前后对比</h1>
+  <div class="meta">共 <b id="nTotal">0</b> 张 · 当前显示 <b id="nShow">0</b> 张</div>
+</header>
+
+<div class="toolbar">
+  <input id="fDir" placeholder="产出目录，如 /data/render/tsr_final_1000">
+  <button class="btn" id="btnLoad">加载</button>
+  <select id="fClass"><option value="">全部类别</option></select>
+  <select id="fSize">
+    <option value="0">全部尺寸</option>
+    <option value="40">≥ 40px</option>
+    <option value="60">≥ 60px</option>
+    <option value="80">≥ 80px</option>
+  </select>
+  <button class="btn ghost" id="btnMore">显示更多</button>
+</div>
+
+<div class="grid" id="grid"></div>
+<div class="empty" id="empty" style="display:none">填目录后点「加载」</div>
+<div class="more" id="moreWrap" style="display:none">
+  <button class="btn ghost" id="btnMore2">加载更多</button>
+</div>
+
+<div class="lb" id="lb">
+  <span class="close" id="lbClose">×</span>
+  <img id="lbImg" src="">
+  <div class="tip">滚轮缩放 · 拖拽平移 · 双击复位 · Esc 关闭</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let ALL = [], SHOWN = 0, PAGE = 60, DIR = '';
+
+function esc(s){ return String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function load(){
+  const d = ($('#fDir').value || '').trim();
+  if (!d) { alert('请填产出目录'); return; }
+  DIR = d;
+  $('#grid').innerHTML = '';
+  $('#empty').style.display = 'none';
+  const r = await fetch('/api/tsr/gallery?dir=' + encodeURIComponent(d) + '&limit=4000');
+  const j = await r.json();
+  if (j.error) { alert(j.error); return; }
+  ALL = j.items || [];
+  $('#nTotal').textContent = j.count || ALL.length;
+
+  // 类别下拉
+  const cls = new Set();
+  ALL.forEach(it => (it.objects || []).forEach(o => cls.add(o.class)));
+  $('#fClass').innerHTML = '<option value="">全部类别</option>' +
+    [...cls].sort().map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+
+  SHOWN = 0;
+  render(true);
+}
+
+function filtered(){
+  const cls = $('#fClass').value;
+  const minSz = +$('#fSize').value || 0;
+  return ALL.filter(it => {
+    const objs = it.objects || [];
+    if (!objs.length) return false;
+    if (cls && !objs.some(o => o.class === cls)) return false;
+    if (minSz) {
+      const mx = Math.max(...objs.map(o => Math.min(o.bbox[2]-o.bbox[0], o.bbox[3]-o.bbox[1])));
+      if (mx < minSz) return false;
+    }
+    return true;
+  });
+}
+
+function render(reset){
+  const list = filtered();
+  if (reset) { $('#grid').innerHTML = ''; SHOWN = 0; }
+  const slice = list.slice(SHOWN, SHOWN + PAGE);
+  $('#grid').insertAdjacentHTML('beforeend', slice.map(it => {
+    const o = (it.objects || [])[0] || {};
+    const stem = it.stem;
+    const srcUrl = '/api/tsr/src?dir=' + encodeURIComponent(DIR) + '&stem=' + encodeURIComponent(stem) + '&max=700';
+    const compUrl = '/api/tsr/result?dir=' + encodeURIComponent(DIR) + '&file=' + encodeURIComponent(it.composed);
+    const sz = o.bbox ? Math.round(Math.min(o.bbox[2]-o.bbox[0], o.bbox[3]-o.bbox[1])) : 0;
+    return `<div class="card">
+      <div class="pair">
+        <figure><img loading="lazy" data-full="${esc(srcUrl)}" src="${esc(srcUrl)}" alt="原图">
+          <figcaption>原图</figcaption></figure>
+        <figure><img loading="lazy" data-full="${esc(compUrl)}" src="${esc(compUrl)}" alt="仿真后">
+          <figcaption>仿真后</figcaption></figure>
+      </div>
+      <div class="body">
+        <span class="cls" title="${esc(o.class||'')}">${esc(o.class||'-')}</span>
+        <span class="stem">${sz}px</span>
+        <button class="zoom" data-stem="${esc(stem)}" data-act="zoom">放大</button>
+        <button class="zoom" data-stem="${esc(stem)}" data-act="locate">定位标牌</button>
+      </div>
+    </div>`;
+  }).join(''));
+  SHOWN += slice.length;
+  $('#nShow').textContent = SHOWN;
+  $('#moreWrap').style.display = SHOWN < list.length ? 'block' : 'none';
+  if (!filtered().length) {
+    $('#empty').style.display = 'block';
+    $('#empty').textContent = '没有符合条件的帧（换个类别或降低尺寸门槛）';
+  }
+}
+
+// 放大查看
+$('#grid').addEventListener('click', e => {
+  if (e.target.tagName === 'IMG') {
+    openLb(e.target.dataset.full || e.target.src);
+  } else if (e.target.classList.contains('zoom')) {
+    const card = e.target.closest('.card');
+    const imgs = [...card.querySelectorAll('img')].map(i => i.dataset.full || i.src);
+    const act = e.target.dataset.act || 'zoom';
+    openPair(imgs[0], imgs[1]);
+    // locateSign：直接缩放到标牌位置
+    if (act === 'locate') setTimeout(() => locateSign(e.target.dataset.stem), 400);
+  }
+});
+
+/* 把大图缩放到标牌位置。
+   transform-origin 是 center center，变换公式：
+     屏幕坐标 = 视口中心 + (图片归一化坐标 - 0.5) × 显示尺寸 × 缩放 + 平移
+   要让标牌中心落到视口中心，需要
+     平移 = -(标牌归一化坐标 - 0.5) × 显示尺寸 × 缩放
+   显示尺寸是图片在 lightbox 里未被缩放时的实际渲染尺寸（不是视口尺寸）。 */
+async function locateSign(stem){
+  try {
+    const url = '/api/tsr/src?dir=' + encodeURIComponent(DIR)
+              + '&stem=' + encodeURIComponent(stem) + '&bbox=1';
+    const j = await fetch(url).then(x => x.json());
+    const o = (j.objects || [])[0];
+    if (!o || !o.bbox) return;
+    const [x1, y1, x2, y2] = o.bbox;
+    const W = j.width || 1920, H = j.height || 1080;
+
+    const pair = document.querySelector('#lbPair');
+    const img = pair ? pair.querySelector('img') : null;
+    if (!img) return;
+
+    // 复位到 1:1，量出图片在页面上的实际渲染矩形
+    lbTx = 0; lbTy = 0; lbK = 1; applyLb();
+    await new Promise(r => setTimeout(r, 80));
+
+    const ir = img.getBoundingClientRect();
+    const iw = ir.width, ih = ir.height;     // 未缩放时的显示尺寸
+    const icx = ir.left + iw / 2;            // 图片中心（视口坐标）
+    const icy = ir.top + ih / 2;
+
+    // 标牌中心在「图片归一化坐标」里的位置
+    const nx = ((x1 + x2) / 2) / W;
+    const ny = ((y1 + y2) / 2) / H;
+
+    // 目标缩放：标牌占视口宽度约 50%
+    const signW = Math.max((x2 - x1) / W, 0.002);
+    lbK = Math.min(12, Math.max(2, 0.5 / signW));
+
+    // transform-origin 是 center center：缩放围绕元素中心进行。
+    // 要让「图片上归一化点 (nx,ny)」落到视口中心，需要
+    //   translate = 视口中心 - 图片中心 - (nx-0.5)*iw*k , 同理 y
+    lbTx = innerWidth / 2 - icx - (nx - 0.5) * iw * lbK;
+    lbTy = innerHeight / 2 - icy - (ny - 0.5) * ih * lbK;
+    applyLb();
+  } catch (err) { console.warn('locateSign', err); }
+}
+
+let lbTx = 0, lbTy = 0, lbK = 1, lbDrag = null;
+function applyLb(){
+  const t = document.getElementById('lbPair') || $('#lbImg');
+  if (t) {
+    t.style.transform = `translate(${lbTx}px,${lbTy}px) scale(${lbK})`;
+    t.style.transformOrigin = 'center center';
+  }
+}
+function openLb(src){
+  $('#lbPair') && $('#lbPair').remove();
+  $('#lbImg').style.display = 'block';
+  $('#lbImg').src = src;
+  lbTx = lbTy = 0; lbK = 1; applyLb();
+  $('#lb').classList.add('on');
+}
+function openPair(a, b){
+  $('#lbImg').style.display = 'none';
+  $('#lbPair') && $('#lbPair').remove();
+  const div = document.createElement('div');
+  div.id = 'lbPair';
+  div.style.cssText = 'display:flex;gap:8px;align-items:center;justify-content:center;flex:0 0 auto';
+  div.innerHTML = `<figure style="margin:0;position:relative;flex:0 0 auto">
+      <img src="${a}" style="max-height:88vh;max-width:44vw;width:auto;height:auto;display:block;object-fit:contain">
+      <figcaption style="position:absolute;top:6px;left:6px;font-size:11px;
+        background:rgba(8,16,26,.85);padding:2px 7px;border-radius:2px;color:#9FB0C4">原图</figcaption>
+    </figure>
+    <figure style="margin:0;position:relative;flex:0 0 auto">
+      <img src="${b}" style="max-height:88vh;max-width:44vw;width:auto;height:auto;display:block;object-fit:contain">
+      <figcaption style="position:absolute;top:6px;left:6px;font-size:11px;
+        background:rgba(8,16,26,.85);padding:2px 7px;border-radius:2px;color:#36CFC9">仿真后</figcaption>
+    </figure>`;
+  $('#lb').insertBefore(div, $('#lbClose').nextSibling);
+  lbTx = lbTy = 0; lbK = 1; applyLb();
+  $('#lb').classList.add('on');
+}
+$('#lbClose').onclick = () => { $('#lb').classList.remove('on'); };
+$('#lb').addEventListener('click', e => { if (e.target.id === 'lb' || e.target.classList.contains('close')) $('#lb').classList.remove('on'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#lb').classList.remove('on'); });
+$('#lb').addEventListener('wheel', e => {
+  e.preventDefault();
+  const old = lbK;
+  lbK *= e.deltaY > 0 ? 0.88 : 1.14;
+  lbK = Math.max(0.3, Math.min(10, lbK));
+  lbTx = (e.clientX - innerWidth/2) - (e.clientX - innerWidth/2 - lbTx) * (lbK/old);
+  lbTy = (e.clientY - innerHeight/2) - (e.clientY - innerHeight/2 - lbTy) * (lbK/old);
+  applyLb();
+}, {passive:false});
+let lbTarget = null;   // 当前拖拽变换的目标（单图是 #lbImg，并排是 #lbPair）
+$('#lb').addEventListener('mousedown', e => {
+  if (e.target.id === 'lb' || e.target.classList.contains('close')) return;
+  if (e.target.tagName !== 'IMG' && e.target.id !== 'lbPair') return;
+  lbTarget = document.getElementById('lbPair') || $('#lbImg');
+  lbDrag = {x: e.clientX, y: e.clientY, tx: lbTx, ty: lbTy};
+  e.target.style.cursor = 'grabbing';
+  e.preventDefault();
+});
+document.addEventListener('mousemove', e => {
+  if (!lbDrag) return;
+  lbTx = lbDrag.tx + (e.clientX - lbDrag.x);
+  lbTy = lbDrag.ty + (e.clientY - lbDrag.y);
+  applyLb();
+});
+document.addEventListener('mouseup', () => { lbDrag = null; });
+$('#lb').addEventListener('dblclick', () => { lbTx = lbTy = 0; lbK = 1; applyLb(); });
+document.addEventListener('mouseup', () => {
+  document.querySelectorAll('#lb img').forEach(i => { if (!lbDrag) i.style.cursor = 'grab'; });
+});
+
+$('#btnLoad').onclick = load;
+$('#fClass').onchange = () => render(true);
+$('#fSize').onchange = () => render(true);
+$('#btnMore').onclick = () => render(false);
+$('#btnMore2').onclick = () => render(false);
+
+// 默认填最近的产出目录（后端会挑最新的 walk_/tsr_ 目录）
+(async () => {
+  try {
+    const r = await fetch('/api/tsr/gallery?limit=1');
+    const j = await r.json();
+    if (j.dir) {
+      $('#fDir').value = j.dir;
+      load();
+    } else {
+      $('#empty').style.display = 'block';
+      $('#empty').textContent = '请填写产出目录后点「加载」';
+    }
+  } catch(e) {
+    $('#empty').style.display = 'block';
+    $('#empty').textContent = '请填写产出目录后点「加载」';
+  }
+})();
+</script>
+</body>
+</html>

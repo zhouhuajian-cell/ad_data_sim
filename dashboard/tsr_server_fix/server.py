@@ -1,0 +1,1422 @@
+# -*- coding: utf-8 -*-
+# server.py — UE5 合成流水线可视化操作台（零依赖单文件，服务器系统 python3 直接跑）
+# 干什么：网页上做 环境核查/生成任务/启动停止渲染/进度/后处理/日志查看，只暴露白名单动作。
+# 怎么跑：python3 server.py [端口]  → 浏览器开 http://<服务器IP>:8010
+# 成功判据：/api/status 出 JSON；点"环境核查"出 PASS/FAIL 列表；渲染按钮对应 tmux 会话起停。
+# ⚠️ 只调白名单脚本、参数走 argv 不过 shell；不碰 ad_mining 与其 venv。
+# ⚠️ 后台自动化：显卡记录随面板常驻；渲染结束（或停止）后自动处理+打包+抽检，
+#    失败重试与跳过已完成都在这层做，界面上不再提供对应按钮（见 AUTO_* 常量）。
+import json
+import csv
+import datetime
+import re
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+try:                      # 单实例锁只在 POSIX 上有；Windows 本地调试时跳过（不拦启动）
+    import fcntl
+except ImportError:       # pragma: no cover
+    fcntl = None
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE, "config.json")
+JOBS_DIR = os.path.join(BASE, "jobs")
+LOG_DIR = os.path.join(BASE, "logs")          # 后台自动化自己的日志（显卡记录、自动处理序列）
+DEFAULT_CONFIG = {
+    "scripts_dir": "/opt/ue5_synth",
+    "queue_file": "/data/queue/tasks.jsonl",
+    "done_dir": "/data/queue/done",
+    "raw_dir": "/data/render/raw",
+    "meta_dir": "/data/render/meta",
+    "final_dir": "/data/render/final",
+    "dataset_dir": "/data/render/dataset",
+    "uproject": "/data/avsynth/avsynth.uproject",
+    "ue_dir": "/data/UE_5.3",
+    "logs_dir": "/data/logs",
+    "queue_cfg_dir": "/opt/ue5_synth/config",
+    "project_dir": "/data/avsynth",
+    "real_dir": "",
+    "overlay_dir": "/data/render/overlay",
+    # 方案模块 5/6 的产物位置：VOC XML 目录与难例清单（pack 会自动读取清单做过滤）
+    "voc_dir": "/data/render/dataset/voc",
+    "hardcase_csv": "/data/render/dataset/hardcase_list.csv",
+    # 渲染参数（界面上只暴露这两个；其余用脚本默认值，改这里即可）
+    "render_queue": "/data/queue/tasks.jsonl",
+    "render_resolution": "1920x1080",
+}
+# 解释器：用跑本服务的这个 python（Ubuntu 的 python3 / Windows 的 python.exe 都对）
+# 环境里取不到 sys.executable 时回退 python3，保持老行为。
+PY = sys.executable or "python3"
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+JOB_PROCS = {}  # jid -> Popen；Popen 不能塞进 JOBS（/api/job 会 json.dumps rec）
+
+# ---- 后台自动化常量 ----
+AUTO_POST = os.environ.get("UE5_AUTO_POST", "1") == "1"          # 渲染结束后自动处理+打包+抽检
+AUTO_GPU_WATCH = os.environ.get("UE5_AUTO_GPU", "1") == "1"      # 常驻显卡记录
+AUTO_POLL_SEC = float(os.environ.get("UE5_AUTO_POLL", "15"))     # 自动化轮询间隔（秒）
+AUTO_POST_IDLE_SEC = float(os.environ.get("UE5_POST_IDLE", "60"))  # 渲染停止后等多久再自动跑（防抖）
+AUTO_POST_RETRY_SEC = 900.0                                       # 自动处理失败后多久重试
+GPU_WATCH_PROCS = {}   # per-action 单例标记（见 _start_action_proc）
+
+def now_str():
+    return time.strftime("%F %T")
+
+def log_auto(msg):
+    """后台自动化日志：面板控制台 + dashboard/logs/auto.log（保留最近 2000 行）。"""
+    line = "[%s] %s" % (now_str(), msg)
+    print("[auto] " + msg)
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        p = os.path.join(LOG_DIR, "auto.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        # 简单截断：超过 1MB 就只留后 2000 行
+        if os.path.getsize(p) > 1024 * 1024:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                keep = f.read().splitlines()[-2000:]
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("\n".join(keep) + "\n")
+    except Exception:
+        pass
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            # utf-8-sig：Windows 上用 PowerShell/记事本写的配置带 BOM 也能读（否则会静默回退默认）
+            with open(CONFIG_PATH, encoding="utf-8-sig") as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass
+    return cfg
+
+def save_config(patch):
+    cfg = load_config()
+    for k, v in (patch or {}).items():
+        if k in DEFAULT_CONFIG and isinstance(v, str):
+            cfg[k] = v
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=1)
+    return cfg
+
+def read_metrics(minutes=10):
+    """Read the actual GPU watcher CSV. Missing measurements stay absent."""
+    cfg = load_config()
+    result = {"gpu_mem": [], "mem_used": [], "gpu_util": []}
+    path = os.path.join(cfg["logs_dir"], "gpu_watch.csv")
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                try:
+                    ts = datetime.datetime.strptime(row["ts"], "%Y-%m-%d_%H:%M:%S")
+                    if ts < cutoff:
+                        continue
+                    result["gpu_mem"].append([row["ts"], round(float(row["gpu_mem_mb"]) / 1024, 3)])
+                    result["gpu_util"].append([row["ts"], float(row["gpu_util_pct"])])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return result
+
+def read_dataset_stats():
+    cfg = load_config()
+    result = {"total_frames": 0, "by_class": {}, "hardcase_count": 0,
+              "hardcase_by_rule": {}, "datasets": []}
+    path = os.path.join(cfg["dataset_dir"], "instances_all.json")
+    if not os.path.isfile(path):
+        path = os.path.join(cfg["dataset_dir"], "annotations", "instances_all.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        result["total_frames"] = len(data.get("images", []))
+        classes = {c["id"]: c["name"] for c in data.get("categories", [])}
+        for ann in data.get("annotations", []):
+            name = classes.get(ann.get("category_id"), "unknown")
+            result["by_class"][name] = result["by_class"].get(name, 0) + 1
+        result["datasets"].append({"name": os.path.basename(cfg["dataset_dir"]),
+                                   "frames": result["total_frames"], "path": path})
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        with open(cfg["hardcase_csv"], newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        result["hardcase_count"] = len(set(r.get("frame_id") for r in rows if r.get("frame_id")))
+        for row in rows:
+            for rule in (row.get("rules") or "").split(";"):
+                if rule:
+                    result["hardcase_by_rule"][rule] = result["hardcase_by_rule"].get(rule, 0) + 1
+    except OSError:
+        pass
+    return result
+
+def image_inbox():
+    return os.path.join(load_config()["project_dir"], "AssetInbox")
+
+def list_images():
+    folder = image_inbox()
+    if not os.path.isdir(folder):
+        return []
+    return [{"name": n, "bytes": os.path.getsize(os.path.join(folder, n))}
+            for n in sorted(os.listdir(folder))
+            if re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", n, re.I)
+            and os.path.isfile(os.path.join(folder, n))]
+
+def int_param(p, key, default=None):
+    """取整型参数：缺省/空串用 default，非法值抛 ValueError（由 /api/run 转成 400）。"""
+    v = p.get(key)
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise ValueError("%s 必须是整数，收到 %r" % (key, v))
+
+
+SMOKE_SCRIPT = "/data/avsynth/ObjSmokeTools/run_obj_smoke.sh"
+SMOKE_ROOT = "/data/render"
+SMOKE_ANNOTATIONS = {"obj": "coco/annotations/instances_all.json",
+                     "gnd": "ground_annotations.json"}
+SMOKE_LAUNCH_LOCK = threading.Lock()
+
+
+def smoke_artifact(run, kind):
+    match = re.fullmatch(r"(obj|gnd)_smoke\.[A-Za-z0-9]{6}", run)
+    if not match:
+        return None
+    relative = ("overlay/contact_sheet.jpg" if kind == "sheet"
+                else SMOKE_ANNOTATIONS[match.group(1)])
+    if kind == "scene":
+        if match.group(1) != "obj":
+            return None
+        relative = "scene_annotations.json"
+    path = os.path.join(SMOKE_ROOT, run, relative)
+    return path if os.path.realpath(path) == path and os.path.isfile(path) else None
+
+
+def smoke_status(mode):
+    with JOBS_LOCK:
+        jobs = [dict(j) for j in JOBS.values()]
+    latest = max((j for j in jobs if j["action"] == mode + "_smoke"),
+                 key=lambda j: j["started_ts"], default=None)
+    job = None
+    if latest:
+        log = tail(latest["log"], 30)
+        match = re.search(r"^输出目录 (/data/render/((?:obj|gnd)_smoke\.[A-Za-z0-9]{6}))$", log, re.M)
+        if match and (latest["status"] == "fail" or latest["status"] == "running"):
+            ue_log = os.path.join(match.group(1), "ue.log")
+            if os.path.realpath(ue_log) == ue_log:
+                log += "\n" + tail(ue_log, 12)
+        job = {"status": latest["status"], "log": log}
+
+    completed = []
+    for name in os.listdir(SMOKE_ROOT):
+        if name.startswith(mode + "_smoke."):
+            sheet = smoke_artifact(name, "sheet")
+            if sheet and smoke_artifact(name, "annotations"):
+                completed.append((os.path.getmtime(sheet), name))
+    busy = render_session_running() or any(
+        j["status"] == "running" and j["action"] in
+        ("obj_smoke", "gnd_smoke", "setup_assets", "preview", "render_start")
+        for j in jobs)
+    result = max(completed, default=(0, None))[1]
+    is_truck = result and mode == "obj" and os.path.isfile(
+        os.path.join(SMOKE_ROOT, result, "obj_truck_0001.json"))
+    is_workzone = result and mode == "obj" and smoke_artifact(result, "scene")
+    return {"job": job, "busy": busy, "result": result,
+            "result_sample": "workzone" if is_workzone else ("truck" if is_truck else "traffic")}
+
+
+def build_cmd(action, p, cfg):
+    """白名单动作 → argv 列表（不走 shell，参数原样传递）。非法参数抛 ValueError。"""
+    s, py = cfg["scripts_dir"], PY
+    if action == "envcheck":
+        return ["bash", os.path.join(s, "linux/env_check.sh")]
+    if action == "compile":
+        return ["bash", os.path.join(s, "linux/compile_ue5.sh"), cfg["ue_dir"]]
+    if action == "queue_gen":
+        d = p.get("cfg_dir") or cfg["queue_cfg_dir"]
+        return [py, os.path.join(s, "common/queue_gen.py"),
+                "--scenes", os.path.join(d, "scenes.json"),
+                "--lights", os.path.join(d, "lights.json"),
+                "--targets", os.path.join(d, "targets.json"),
+                "--cameras", os.path.join(d, "cameras.json"),
+                "-o", p.get("out") or cfg["queue_file"],
+                "--seed", str(int_param(p, "seed", 20261113))]
+
+    if action in ("obj_smoke", "gnd_smoke"):
+        mode = action.split("_")[0]
+        sample = p.get("sample", "traffic")
+        if sample != "traffic" and (mode != "obj" or sample not in ("truck", "workzone")):
+            raise ValueError("不支持的小样类型")
+        return ["runuser", "-u", "algo", "--", "bash", SMOKE_SCRIPT, mode, sample]
+    if action == "setup_assets":
+        return ["bash", os.path.join(cfg["scripts_dir"], "linux", "run_setup.sh"),
+                cfg["uproject"], cfg["ue_dir"]]
+    if action == "preview":
+        return ["bash", os.path.join(cfg["scripts_dir"], "linux", "run_setup.sh"),
+                cfg["uproject"], cfg["ue_dir"], "preview_scene.py"]
+    if action == "case_check":
+        return [py, os.path.join(s, "common/case_check.py"),
+                p.get("project_dir") or cfg["project_dir"]]
+    if action == "render_start":
+        return ["bash", os.path.join(s, "linux/run_batch.sh"),
+                cfg["uproject"], p.get("queue") or cfg["queue_file"], cfg["ue_dir"]]
+    if action == "render_stop":
+        return ["tmux", "kill-session", "-t", "ue5_render"]
+    if action == "gpu_watch":
+        return ["bash", os.path.join(s, "linux/gpu_watch.sh"),
+                os.path.join(cfg["logs_dir"], "gpu_watch.csv")]
+    if action == "post":
+        cmd = [py, os.path.join(s, "post/postprocess.py"),
+               "--raw", cfg["raw_dir"], "--meta", cfg["meta_dir"],
+               "--out", p.get("out") or cfg["final_dir"]]
+        if p.get("params"):
+            cmd += ["--params", p["params"]]
+        if p.get("real") or cfg["real_dir"]:
+            cmd += ["--real", p.get("real") or cfg["real_dir"]]
+        limit = int_param(p, "limit")
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("limit 不能是负数，收到 %r" % limit)
+            cmd += ["--limit", str(limit)]
+        return cmd
+    if action == "voc":
+        # 方案模块 5：导出 PASCAL VOC XML（与图像同名，额外产出 ImageSets）
+        return [py, os.path.join(s, "post/voc_export.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", p.get("out") or cfg.get("voc_dir") or os.path.join(cfg["dataset_dir"], "voc")]
+    if action == "hardcase":
+        # 方案模块 5+6：难例判定与清单（pack 会读取它做过滤）
+        return [py, os.path.join(s, "post/hardcase_export.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", p.get("out") or cfg.get("hardcase_csv")
+                or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")]
+    if action == "pack":
+        fmt = str(p.get("format") or "coco")
+        if fmt not in ("coco", "yolo"):
+            raise ValueError("format 只能是 coco 或 yolo，收到 %r" % fmt)
+        cmd = [py, os.path.join(s, "post/pack_dataset.py"),
+               "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+               "--out", p.get("out") or cfg["dataset_dir"],
+               "--format", fmt, "--seed", str(int_param(p, "seed", 20261113))]
+        # 难例清单存在时自动纳入打包（ratio 默认 1.0 = 全保留，难例本身就是要补的数据）
+        hc_csv = cfg.get("hardcase_csv") or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")
+        if os.path.exists(hc_csv):
+            cmd += ["--hardcase-csv", hc_csv,
+                    "--hardcase-ratio", str(float(p.get("hardcase_ratio", 1.0)))]
+        return cmd
+    # [TSR-API] tsr_batch 动作：跑 tools/batch_replace.py
+    if action == "tsr_batch":
+        cmd = p.get("cmd") or []
+        if not cmd:
+            raise ValueError("tsr_batch 缺少 cmd")
+        return [ALGO_PYTHON] + [str(c) for c in cmd] if False else cmd
+
+    if action == "dryrun":
+        # 链路自检：工具本体的参数契约由它自己管，这里只保证解释器与脚本路径
+        return [py, os.path.join(s, "tools/dryrun_check.py")]
+    if action == "overlay":
+        # 真值抽检图：把 bbox 画到成品图上，供人工目检（表 11 抽检项）
+        return [py, os.path.join(s, "tools/overlay_boxes.py"),
+                "--meta", cfg["meta_dir"], "--images", cfg["final_dir"],
+                "--out", cfg["overlay_dir"],
+                "--limit", str(int_param(p, "limit", 20)),
+                "--cols", "4"]
+    return None
+
+def precheck(action, cfg):
+    """动作前置检查：启动作业前把"缺什么、怎么办"直接说清楚。
+
+    为什么要这层：脚本自己报错时人已经点完按钮了，看到的是 tmux/bash 的英文报错；
+    无人值守场景下，缺工程/缺引擎是最常见的"看起来点得动其实跑不了"。
+    """
+
+    if action in ("obj_smoke", "gnd_smoke"):
+        if not os.path.isfile(SMOKE_SCRIPT):
+            return "交通场景小样脚本未安装"
+        if smoke_status(action.split("_")[0])["busy"]:
+            return "UE 正在运行作业，请稍后再试"
+    if action in ("setup_assets", "preview"):
+        if render_session_running():
+            return "渲染正在运行，先停止渲染再制作验证资产"
+        if not os.path.isfile(os.path.join(cfg["project_dir"], "Content", "Python", "setup_assets.py")):
+            return "工程缺少 setup_assets.py，先同步工程脚本"
+        if not os.path.isfile(cfg["uproject"]):
+            return "UE 工程文件不存在"
+    if action == "render_start":
+        up = cfg["uproject"]
+        if not os.path.exists(up):
+            return ("还没准备好：服务器上找不到工程文件 %s。\n"
+                    "先在 Windows 上运行 windows/sync_project.ps1 把工程下发到服务器；"
+                    "工程在别的目录时，去「高级操作 → 配置」把 uproject / project_dir 改成实际路径。" % up)
+        cap = os.path.join(cfg["project_dir"], "Content", "Python", "batch_capture.py")
+        if not os.path.exists(cap):
+            return ("还没准备好：工程里没有批量捕获脚本 %s。\n"
+                    "把仓库 engine/Content/Python/ 下的 batch_capture.py 和 capture_math.py "
+                    "复制到 <Windows 工程>/Content/Python/，再重新下发工程。" % cap)
+        ue_cmd = os.path.join(cfg["ue_dir"], "Engine", "Binaries", "Linux", "UnrealEditor-Cmd")
+        if not os.path.exists(ue_cmd):
+            return ("还没准备好：引擎还没编译好（找不到 %s）。\n"
+                    "先在「高级操作 → 编译引擎」跑一次（1~3 小时、内存吃满，选空闲窗口）；"
+                    "引擎装在别处就去配置里改 ue_dir。" % ue_cmd)
+        if not os.path.exists(cfg["queue_file"]):
+            return ("还没准备好：任务清单 %s 不存在。\n先在第 2 步「生成拍摄清单」。" % cfg["queue_file"])
+    if action == "post" and not os.path.isdir(cfg["raw_dir"]):
+        return ("还没准备好：原始图目录 %s 不存在。\n先在第 3 步出图，出图会自动建这个目录。" % cfg["raw_dir"])
+    if action == "pack" and not os.path.isdir(cfg["meta_dir"]):
+        return ("还没准备好：真值目录 %s 不存在。\n先在第 3 步出图，真值 JSON 会写到这个目录。" % cfg["meta_dir"])
+    if action == "overlay" and count_dir(cfg["final_dir"], ".png", cap=1) == 0:
+        return ("还没准备好：还没有处理后的图。\n先在第 4 步「开始处理」，再生成抽检图。")
+    return None
+
+# [TSR-API] TSR 仿真相关常量与辅助
+TOOLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+TOOLS_DIR = os.path.abspath(TOOLS_DIR)
+DEFAULT_TSR_LIBRARY = "/data/tsr_library_v2"   # 官方矢量图库渲染的高清素材
+TSR_OUT_DIR = "/data/render/tsr_batch"
+# 像素/AI 相关脚本必须用 ad_mining 的 venv（有 ultralytics/opencv），面板本体零依赖
+ALGO_PYTHON = "/opt/ad_mining/venv/bin/python"
+
+
+def _tsr_slug(s):
+    """把国家码/文件名变成安全的路径片段，防目录穿越。"""
+    return "".join(c if (c.isalnum() or c in "_-") else "_" for c in str(s)).strip("_")[:96]
+
+
+def _run_algo(args, timeout=300):
+    """在 ad_mining 的 venv 里跑一个 tools 脚本，返回它 stdout 的 JSON。"""
+    import subprocess
+    exe = ALGO_PYTHON if os.path.isfile(ALGO_PYTHON) else "python3"
+    try:
+        p = subprocess.run([exe] + [str(a) for a in args],
+                           capture_output=True, text=True, timeout=timeout)
+        out = (p.stdout or "").strip()
+        if not out:
+            return {"ok": False, "error": (p.stderr or "脚本无输出")[:300]}
+        return json.loads(out.splitlines()[-1])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def start_job(action, params, auto=False):
+    """启动作业。auto=True 表示由后台自动化触发（不参与"同类作业去重"之外的界面提示）。"""
+    cfg = load_config()
+    try:
+        cmd = build_cmd(action, params or {}, cfg)
+    except ValueError as e:
+        return None, "参数错误: %s" % e
+    if not cmd:
+        return None, "未知动作: %s" % action
+    err = precheck(action, cfg)
+    if err:
+        return None, err
+    with JOBS_LOCK:
+        for j in JOBS.values():
+            if j["action"] == action and j["status"] == "running":
+                return None, "已有同类作业在跑（%s），等它结束或先杀掉它" % j["id"]
+    jid = uuid.uuid4().hex[:12]
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    logp = os.path.join(JOBS_DIR, "%s_%s.log" % (action, jid))
+    logf = None
+    try:
+        logf = open(logp, "w", encoding="utf-8", errors="replace")
+        logf.write("$ %s\n[启动 %s]\n" % (" ".join(cmd), time.strftime("%F %T")))
+        logf.flush()
+        # Linux 生产：独立进程组，kill 时整组收掉（bash/tmux 子树）；Windows 无 setsid 概念
+        kw = {"cwd": BASE, "env": dict(os.environ, PYTHONIOENCODING="utf-8")}
+        if os.name == "posix":
+            kw["start_new_session"] = True
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, **kw)
+    except Exception as e:
+        if logf:
+            logf.close()
+        return None, "启动失败: %s" % e
+    rec = {"id": jid, "action": action, "cmd": cmd, "log": logp,
+           "started": time.strftime("%F %T"), "started_ts": time.time(), "pid": proc.pid,
+           "status": "running", "ret": None, "ended": ""}
+    with JOBS_LOCK:
+        JOBS[jid] = rec
+        JOB_PROCS[jid] = proc  # Popen 单独存：rec 要能 json.dumps
+    def monitor():
+        ret = proc.wait()
+        logf.close()  # 子进程结束关日志句柄，避免长跑服务句柄泄漏
+        with JOBS_LOCK:
+            rec["status"] = "ok" if ret == 0 else "fail"
+            rec["ret"] = ret
+            rec["ended"] = time.strftime("%F %T")
+            JOB_PROCS.pop(jid, None)
+    threading.Thread(target=monitor, daemon=True).start()
+    return rec, None
+
+def kill_job(jid):
+    with JOBS_LOCK:
+        rec = JOBS.get(jid)
+        proc = JOB_PROCS.get(jid)
+    if not rec or rec["status"] != "running":
+        return False
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(rec["pid"]), 9)  # Linux 生产：杀整个进程组
+        elif proc is not None:
+            proc.terminate()  # Windows 没有 killpg：先温和结束
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()  # 3 秒还不退再强杀
+        else:
+            return False
+        return True
+    except Exception:
+        return False
+
+def render_session_running():
+    try:
+        return subprocess.run(
+            ["tmux", "has-session", "-t", "ue5_render"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        return False
+
+def action_running(action):
+    with JOBS_LOCK:
+        return any(j["action"] == action and j["status"] == "running" for j in JOBS.values())
+
+def last_result(action):
+    """最近一次该动作的作业记录（自动化据此判断"上次失败了没 / 结果还新不新"）。
+
+    ⚠️ 不能按 id 排序：id 是随机 12 位十六进制，字典序与时间无关（实测踩到——一直拿到旧的失败记录）。"""
+    with JOBS_LOCK:
+        cand = [j for j in JOBS.values() if j["action"] == action]
+    if not cand:
+        return None
+    return max(cand, key=lambda x: x.get("started_ts") or 0.0)
+
+# ---- 后台自动化 1：显卡记录常驻 ------------------------------------------------------
+GPU_WATCH_PROC = {"proc": None}
+
+class _ExistingProc(object):
+    """已在运行、但不由本进程 Popen 出来的子进程：只用于 poll() 判断"还活着吗"。"""
+    def __init__(self, pid):
+        self.pid = pid
+    def poll(self):
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except OSError:
+            return 1
+
+def ensure_gpu_watch():
+    """显卡记录随面板常驻（每秒一行 CSV）。只留一个实例，面板重启后自动补起。
+
+    ⚠️ 只靠内存里的 Popen 判断不够：面板每次重启都会新起一个，旧面板留下的不会退出（实测累积了 6 个
+    同时写同一个 CSV）。这里先按进程名查全系统实例，已有就复用，超过了就只留最早的一个。"""
+    if not AUTO_GPU_WATCH:
+        return
+    p = GPU_WATCH_PROC.get("proc")
+    if p is not None and p.poll() is None:
+        return
+    if action_running("gpu_watch"):
+        return
+    code, out = 0, ""
+    try:
+        r = subprocess.run(["pgrep", "-f", "gpu_watch.sh"], capture_output=True, text=True, timeout=5)
+        code, out = r.returncode, r.stdout
+    except Exception:
+        code = 1
+    pids = [int(x) for x in out.split() if x.strip().isdigit() and int(x) != os.getpid()]
+    if pids:
+        # 只保留最早那个（此时 pids 已按 pgrep 输出顺序≈pid 顺序），其余清掉，避免多写同一 CSV
+        keep = min(pids)
+        for pid in pids:
+            if pid != keep:
+                try:
+                    os.kill(pid, 15)
+                    log_auto("清理重复的显卡记录进程 pid=%d（保留 %d）" % (pid, keep))
+                except Exception:
+                    pass
+        log_auto("显卡记录已在运行（pid=%d），复用" % keep)
+        GPU_WATCH_PROC["proc"] = _ExistingProc(keep)   # 复用分支也要给状态一个可判断的对象
+        return
+    cfg = load_config()
+    csv = os.path.join(cfg["logs_dir"], "gpu_watch.csv")
+    cmd = ["bash", os.path.join(cfg["scripts_dir"], "linux/gpu_watch.sh"), csv]
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        logf = open(os.path.join(LOG_DIR, "gpu_watch.out"), "a", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, cwd=BASE)
+        GPU_WATCH_PROC["proc"] = proc
+        log_auto("显卡记录已启动（pid=%d → %s）" % (proc.pid, csv))
+    except Exception as e:
+        log_auto("显卡记录启动失败：%s（这台机器可能没有 bash/gpu_watch.sh）" % e)
+
+# ---- 后台自动化 2：渲染结束 → 处理 → 打包 → 抽检 --------------------------------------
+AUTO_STATE = {"phase": "idle", "render_seen": False, "idle_since": 0.0,
+              "last_try": 0.0, "last_done": -1}
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+def _ended_ts(rec):
+    try:
+        return time.mktime(time.strptime(rec["ended"], "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return 0.0
+
+def _dispatch(action, params, label):
+    rec, err = start_job(action, params, auto=True)
+    if err:
+        log_auto("[%s] 跳过：%s" % (label, err.replace("\n", " ")))
+        return False
+    log_auto("[%s] 已启动（job=%s）" % (label, rec["id"]))
+    return True
+
+def auto_pipeline_tick():
+    """渲染结束后自动跑后处理链；每一步都可重入（脚本自身会跳过已完成的帧）。
+
+    判定顺序（每一步都要有日志，出问题能直接看出卡在哪个条件）：
+      有帧可处理 → 处理 → 打包 → 抽检 → done；任一步失败按退避重试。
+    """
+    if not AUTO_POST:
+        return
+    cfg = load_config()
+    if render_session_running():
+        AUTO_STATE["render_seen"] = True
+        AUTO_STATE["idle_since"] = 0.0
+        AUTO_STATE["phase"] = "rendering"
+        return
+    done = count_dir(cfg["done_dir"], ".done")
+    fin = count_dir(cfg["final_dir"], ".png")
+    if done <= 0:
+        AUTO_STATE["phase"] = "idle"
+        return
+    # 渲染刚停：等一小段防抖，避免最后几帧还在落盘时就开跑
+    if AUTO_STATE["idle_since"] == 0.0:
+        AUTO_STATE["idle_since"] = time.time()
+        return
+    if time.time() - AUTO_STATE["idle_since"] < AUTO_POST_IDLE_SEC:
+        AUTO_STATE["phase"] = "waiting"
+        return
+    for action in ("post", "voc", "hardcase", "pack", "overlay"):
+        if action_running(action):
+            AUTO_STATE["phase"] = "running:" + action
+            return
+    lp = last_result("post")
+    post_ok = bool(lp and lp["status"] == "ok")
+    lp_end = (_ended_ts(lp) if post_ok else 0.0) or AUTO_STATE["idle_since"]
+    sheet = os.path.join(cfg["overlay_dir"], "contact_sheet.jpg")
+    need_post = (not post_ok) or fin < done
+    # 方案模块 5：VOC XML 与难例清单也要跟着真值更新（缺产物或比 post 旧就重跑）
+    voc_ann = os.path.join(cfg.get("voc_dir") or os.path.join(cfg["dataset_dir"], "voc"), "Annotations")
+    hc_csv = cfg.get("hardcase_csv") or os.path.join(cfg["dataset_dir"], "hardcase_list.csv")
+    need_voc = not need_post and (not has_entries(voc_ann) or _mtime(voc_ann) < lp_end)
+    need_hc = not need_post and (not os.path.exists(hc_csv) or _mtime(hc_csv) < lp_end)
+    need_pack = not need_post and not need_voc and not need_hc and (
+        not has_entries(cfg["dataset_dir"]) or _mtime(cfg["dataset_dir"]) < lp_end)
+    need_overlay = not need_post and not need_voc and not need_hc and not need_pack and (
+        not os.path.exists(sheet) or _mtime(sheet) < lp_end)
+    if not (need_post or need_voc or need_hc or need_pack or need_overlay):
+        AUTO_STATE["phase"] = "done"
+        if not AUTO_STATE.get("_done_logged"):
+            AUTO_STATE["_done_logged"] = True
+            log_auto("自动链已完成：处理 %d 帧，训练集与抽检图均已更新" % fin)
+        return
+    # 处理失败必须退避：否则会每隔 15 秒刷一个失败作业（实测踩到）
+    if need_post and AUTO_STATE["last_done"] == done and \
+            time.time() - AUTO_STATE["last_try"] < AUTO_POST_RETRY_SEC:
+        AUTO_STATE["phase"] = "retry-wait"
+        return
+    if need_post:
+        if _dispatch("post", {"limit": "0"}, "自动处理"):
+            AUTO_STATE["phase"] = "dispatched:post"
+            AUTO_STATE["last_try"] = time.time()
+            AUTO_STATE["last_done"] = done
+        return
+    if need_voc:
+        if _dispatch("voc", {}, "自动导出 VOC"):
+            AUTO_STATE["phase"] = "dispatched:voc"
+        return
+    if need_hc:
+        if _dispatch("hardcase", {}, "自动难例清单"):
+            AUTO_STATE["phase"] = "dispatched:hardcase"
+        return
+    if need_pack:
+        if _dispatch("pack", {"format": "coco"}, "自动打包"):
+            AUTO_STATE["phase"] = "dispatched:pack"
+        return
+    if need_overlay:
+        if _dispatch("overlay", {"limit": "20"}, "自动抽检"):
+            AUTO_STATE["phase"] = "dispatched:overlay"
+        return
+
+def auto_loop():
+    """后台守护线程：显卡记录常驻 + 自动后处理链。不依赖界面上任何人点按钮。"""
+    time.sleep(3)
+    last_tick = 0.0
+    while True:
+        try:
+            ensure_gpu_watch()
+            if time.time() - last_tick >= AUTO_POLL_SEC:
+                last_tick = time.time()
+                auto_pipeline_tick()
+        except Exception as e:
+            log_auto("自动化循环异常：%s" % e)
+        time.sleep(5)
+
+def tail(path, lines=200, max_bytes=512 * 1024):
+    try:
+        if not os.path.exists(path):
+            return "(文件不存在: %s)" % os.path.basename(path)
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                blob = f.read().split(b"\n", 1)[-1]
+            else:
+                blob = f.read()
+        txt = blob.decode("utf-8", "replace")
+        return "\n".join(txt.splitlines()[-lines:])
+    except Exception as e:
+        return "(读取失败: %s)" % e
+
+def count_lines(path):
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+def count_dir(path, suffix="", cap=20000):
+    """数目录里的文件（带上限，避免几十万帧时每次轮询都全量扫）。"""
+    n = 0
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                if e.is_file() and (not suffix or e.name.endswith(suffix)):
+                    n += 1
+                    if n >= cap:
+                        return cap
+    except Exception:
+        return 0
+    return n
+
+def has_entries(path):
+    try:
+        with os.scandir(path) as it:
+            return next(it, None) is not None
+    except Exception:
+        return False
+
+def probe_status():
+    cfg = load_config()
+    st = {"cfg": cfg, "time": time.strftime("%F %T")}
+    try:
+        mi = {}
+        for ln in open("/proc/meminfo"):
+            k, _, v = ln.partition(":")
+            mi[k] = v.strip()
+        st["mem_total_g"] = round(int(mi["MemTotal"].split()[0]) / 1048576, 1)
+        st["mem_avail_g"] = round(int(mi["MemAvailable"].split()[0]) / 1048576, 1)
+        sw = open("/proc/swaps").read().strip().splitlines()
+        st["swap_on"] = len(sw) > 1
+    except Exception:
+        st["mem_total_g"] = st["mem_avail_g"] = -1
+        st["swap_on"] = None
+    for key, path in (("disk_root", "/"), ("disk_data", "/data")):
+        try:
+            st[key + "_free_g"] = round(shutil.disk_usage(path).free / 1073741824, 1)
+        except Exception:
+            st[key + "_free_g"] = -1
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,memory.used,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3).stdout.strip().splitlines()[0]
+        # 型号名里可能带逗号（如 "NVIDIA A100, 80GB"），从右往左切 3 刀拿数值字段
+        name, m, u, t = [x.strip() for x in out.rsplit(",", 3)]
+        st["gpu"] = {"name": name or "未知型号", "mem_mb": int(m),
+                     "util": int(u), "temp": int(t)}
+    except Exception:
+        st["gpu"] = None
+    st["render_running"] = render_session_running()
+    st["tasks_total"] = count_lines(cfg["queue_file"])
+    st["tasks_done"] = count_dir(cfg["done_dir"], ".done")
+    st["final_count"] = count_dir(cfg["final_dir"], ".png")
+    st["dataset_ready"] = has_entries(cfg["dataset_dir"])
+    st["overlay_ready"] = os.path.exists(
+        os.path.join(cfg["overlay_dir"], "contact_sheet.jpg"))
+    # 出图前环境是否就绪（缺工程/脚本/引擎时，前端直接提示怎么办，不用点下去等报错）
+    st["uproject_exists"] = os.path.exists(cfg["uproject"])
+    st["capture_script_exists"] = os.path.exists(
+        os.path.join(cfg["project_dir"], "Content", "Python", "batch_capture.py"))
+    st["ue_ready"] = os.path.exists(
+        os.path.join(cfg["ue_dir"], "Engine", "Binaries", "Linux", "UnrealEditor-Cmd"))
+    # 后台自动化状态：显卡记录是否常驻 + 自动后处理链当前阶段
+    gw = GPU_WATCH_PROC.get("proc")
+    st["auto"] = {
+        "enabled": AUTO_POST,
+        "gpu_watch": bool(gw is not None and gw.poll() is None),
+        "phase": AUTO_STATE["phase"],
+        "last_log": (tail(os.path.join(LOG_DIR, "auto.log"), 3)
+                     if os.path.exists(os.path.join(LOG_DIR, "auto.log")) else ""),
+    }
+    with JOBS_LOCK:
+        st["jobs"] = [{k: j[k] for k in ("id", "action", "status", "ret", "started", "ended")}
+                      for j in sorted(JOBS.values(), key=lambda x: x["started"], reverse=True)[:12]]
+    return st
+
+try:
+    HTML_PAGE = open(os.path.join(BASE, "index.html"), encoding="utf-8").read()
+except Exception:
+    HTML_PAGE = "<h1>index.html 缺失</h1>"
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _send(self, code, obj, ctype="application/json; charset=utf-8"):
+        body = obj if isinstance(obj, bytes) else json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+    def _send_image(self, max_w=900):
+        """返回一个「读文件→按需缩放→发出」的闭包。缩放用 PIL，没有就原样发。"""
+        def _go(path):
+            try:
+                with open(path, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "image not found"})
+            try:
+                from PIL import Image
+                import io as _io
+                im = Image.open(path)
+                if im.width > max_w:
+                    h = int(im.height * max_w / float(im.width))
+                    im = im.resize((max_w, h), Image.LANCZOS)
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                buf = _io.BytesIO()
+                im.save(buf, "JPEG", quality=88)
+                blob = buf.getvalue()
+                return self._send(200, blob, "image/jpeg")
+            except Exception:
+                ctype = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+                return self._send(200, blob, ctype)
+        return _go
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if not n:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode("utf-8"))
+        except Exception:
+            return {}
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+
+        if u.path in ("/gallery", "/gallery.html"):
+            with open(os.path.join(BASE, "gallery.html"), "rb") as f:
+                return self._send(200, f.read(), "text/html; charset=utf-8")
+
+        if u.path in ("/bev", "/obj", "/gnd"):
+            with open(os.path.join(BASE, "obj.html"), "rb") as f:
+                return self._send(200, f.read(), "text/html; charset=utf-8")
+        status = re.fullmatch(r"/api/(obj|gnd)/status", u.path)
+        if status:
+            return self._send(200, smoke_status(status.group(1)))
+        result = re.fullmatch(r"/api/(obj|gnd)/result/([^/]+)/(sheet|annotations|scene)", u.path)
+        if result:
+            mode, run, kind = result.groups()
+            artifact = smoke_artifact(run, kind) if run.startswith(mode + "_") else None
+            if artifact:
+                with open(artifact, "rb") as f:
+                    return self._send(200, f.read(), "image/jpeg" if kind == "sheet" else "application/json")
+            return self._send(404, {"error": "结果文件不存在"})
+        if u.path in ("/", "/index.html"):
+            return self._send(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        # [TSR-API] 提供 tsr.html
+        if u.path in ("/tsr", "/tsr.html"):
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsr.html")
+            try:
+                with open(fp, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "tsr.html 缺失"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            self.wfile.write(blob)
+            return
+        if u.path == "/api/status":
+            return self._send(200, probe_status())
+        if u.path == "/api/config":
+            return self._send(200, load_config())
+        if u.path == "/api/metrics":
+            try:
+                minutes = max(1, min(1440, int((q.get("minutes") or ["10"])[0])))
+            except ValueError:
+                return self._send(400, {"error": "invalid minutes"})
+            return self._send(200, read_metrics(minutes))
+        if u.path == "/api/dataset_stats":
+            return self._send(200, read_dataset_stats())
+        if u.path == "/api/assets":
+            content = os.path.join(load_config()["project_dir"], "Content")
+            return self._send(200, {"images": list_images(),
+                                    "map": "/Game/Maps/codex_validation",
+                                    "map_exists": os.path.isfile(os.path.join(content, "Maps", "codex_validation.umap")),
+                                    "materials": [
+                                        {"path": "/Game/Validation/M_LinearDepth",
+                                         "exists": os.path.isfile(os.path.join(content, "Validation", "M_LinearDepth.uasset"))},
+                                        {"path": "/Game/Validation/M_SemanticMask",
+                                         "exists": os.path.isfile(os.path.join(content, "Validation", "M_SemanticMask.uasset"))}]})
+        if u.path == "/api/preview/image":
+            path = os.path.join(load_config()["project_dir"], "Saved", "web_preview.png")
+            try:
+                with open(path, "rb") as f:
+                    return self._send(200, f.read(), "image/png")
+            except OSError:
+                return self._send(404, {"error": "尚无预览图"})
+        if u.path == "/api/asset/image":
+            name = (q.get("name") or [""])[0]
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", name, re.I):
+                return self._send(400, {"error": "invalid image name"})
+            try:
+                with open(os.path.join(image_inbox(), name), "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "image not found"})
+            return self._send(200, blob, "image/png" if name.lower().endswith(".png") else "image/jpeg")
+
+        # [TSR-API] 素材库概况
+        if u.path == "/api/tsr/library":
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            items = []
+            if os.path.isdir(root):
+                for name in sorted(os.listdir(root)):
+                    d = os.path.join(root, name)
+                    if not os.path.isdir(d) or name.startswith("_"):
+                        continue
+                    files = [f for f in os.listdir(d)
+                             if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+                    if not files:
+                        continue
+                    classes = sorted(set(os.path.splitext(f)[0].split("_v")[0]
+                                         for f in files))
+                    items.append({"country": name, "count": len(files),
+                                  "class_count": len(classes),
+                                  "classes": classes})
+            return self._send(200, {"root": root, "countries": items,
+                                    "total_countries": len(items),
+                                    "total_assets": sum(i["count"] for i in items)})
+
+        # [TSR-API] 素材缩略图
+        if u.path == "/api/tsr/library/thumb":
+            country = (q.get("country") or [""])[0]
+            cls = (q.get("class") or [""])[0]
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            d = os.path.join(root, _tsr_slug(country))
+            target = None
+            if os.path.isdir(d) and cls:
+                for f in sorted(os.listdir(d)):
+                    if os.path.splitext(f)[0].split("_v")[0] == cls and \
+                            f.lower().endswith((".png", ".jpg", ".jpeg")):
+                        target = os.path.join(d, f)
+                        break
+            if not target or not os.path.isfile(target):
+                return self._send(404, {"error": "asset not found"})
+            return self._send_image(max_w=140)(target)
+
+        # [TSR-API] 某类别的全部素材（小图列表用）
+        if u.path == "/api/tsr/library/class":
+            country = (q.get("country") or [""])[0]
+            cls = (q.get("class") or [""])[0]
+            root = load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY
+            d = os.path.join(root, _tsr_slug(country))
+            names = []
+            if os.path.isdir(d) and cls:
+                names = sorted(f for f in os.listdir(d)
+                               if os.path.splitext(f)[0].split("_v")[0] == cls
+                               and f.lower().endswith((".png", ".jpg", ".jpeg")))
+            return self._send(200, {"country": country, "class": cls, "files": names})
+
+        # [TSR-API] 实拍图清单
+        if u.path == "/api/tsr/images":
+            d = (q.get("dir") or [""])[0]
+            limit = int((q.get("limit") or ["30"])[0])
+            offset = int((q.get("offset") or ["0"])[0])
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "目录不存在", "dir": d})
+            files = sorted(f for f in os.listdir(d)
+                           if f.lower().endswith((".jpg", ".jpeg", ".png")))
+            return self._send(200, {"dir": d, "total": len(files), "offset": offset,
+                                    "images": files[offset:offset + limit]})
+
+        # [TSR-API] 单张实拍图
+        if u.path == "/api/tsr/src":
+            # 批量产出的原图：按 annotations 里记的 source_path 读取
+            d = (q.get("dir") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            maxw = int((q.get("max") or ["900"])[0])
+            ap = os.path.join(d, "annotations", stem + ".json")
+            if not os.path.isfile(ap):
+                return self._send(404, {"error": "标注不存在"})
+            with open(ap, "r", encoding="utf-8") as f:
+                a = json.load(f)
+            # bbox=1：只返回标注信息（前端用来定位标牌），不发图片
+            if (q.get("bbox") or [""])[0] == "1":
+                return self._send(200, {
+                    "objects": a.get("objects", []),
+                    "width": a.get("width", 1920),
+                    "height": a.get("height", 1080),
+                    "source_image": a.get("source_image", ""),
+                })
+            sp = a.get("source_path", "")
+            return self._send_image(max_w=maxw)(sp)
+
+        if u.path == "/api/tsr/image":
+            d = (q.get("dir") or [""])[0]
+            f = (q.get("file") or [""])[0]
+            if not d or not f or "/" in f or "\\" in f or ".." in f:
+                return self._send(400, {"error": "参数错误"})
+            p = os.path.join(d, f)
+            if not os.path.isfile(p):
+                return self._send(404, {"error": "not found"})
+            maxw = int((q.get("max") or ["900"])[0])
+            return self._send_image(max_w=maxw)(p)
+
+        # [PRESCREEN] 查进度 / 取结果
+        if u.path == "/api/tsr/walk_progress":
+            tag = (q.get("job") or [""])[0]
+            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
+            if not os.path.isfile(prog):
+                return self._send(200, {"phase": "unknown"})
+            with open(prog, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
+            if os.path.isfile(logf):
+                try:
+                    with open(logf, "r", encoding="utf-8", errors="replace") as f:
+                        d["tail"] = "".join(f.readlines()[-6:])
+                except Exception:
+                    pass
+            return self._send(200, d)
+
+        if u.path == "/api/tsr/prescreen_progress":
+            tid = (q.get("task") or [""])[0]
+            if not re.fullmatch(r"[a-f0-9]{10}", tid):
+                return self._send(400, {"error": "bad task"})
+            prog_json = "/tmp/prescreen_prog_%s.json" % tid
+            out_json = "/tmp/prescreen_%s.json" % tid
+            info = {"ok": True, "finished": False, "done": 0, "total": 0}
+            if os.path.isfile(prog_json):
+                try:
+                    with open(prog_json, "r", encoding="utf-8") as fh:
+                        info.update(json.load(fh))
+                except Exception:
+                    pass
+            if info.get("finished") and os.path.isfile(out_json):
+                try:
+                    with open(out_json, "r", encoding="utf-8") as fh:
+                        full = json.load(fh)
+                    info["results"] = [r for r in full.get("results", [])
+                                       if r.get("usable", 0) > 0]
+                    info["total_files"] = full.get("total", 0)
+                except Exception as e:
+                    info["error"] = str(e)[:150]
+            return self._send(200, info)
+
+        # [TSR-API] 替换结果图
+        if u.path == "/api/tsr/gallery":
+            # 批量产出的相册：返回文件名 + 原图 + 合成图 URL
+            d = (q.get("dir") or [""])[0]
+            limit = int((q.get("limit") or ["400"])[0])
+            if not d:
+                # 在多个产出根目录下找带 annotations 的目录，按修改时间取最新。
+                # 注意：批量的 --out 可以直接指定 /data/render/xxx，不一定在 TSR_OUT_DIR 下，
+                # 所以两个根目录都要扫。
+                cands = []
+                for root in (TSR_OUT_DIR, "/data/render"):
+                    if not os.path.isdir(root):
+                        continue
+                    for x in os.listdir(root):
+                        full = os.path.join(root, x)
+                        if os.path.isdir(full) and os.path.isdir(os.path.join(full, "annotations")):
+                            cands.append((os.path.getmtime(full), full))
+                cands.sort()
+                walks = [c for c in cands if "/walk_" in c[1] + "/"]
+                d = (walks or cands)[-1][1] if (walks or cands) else ""
+            if not d or not os.path.isdir(d):
+                return self._send(404, {"error": "目录不存在", "dir": d})
+            ann_dir = os.path.join(d, "annotations")
+            items = []
+            if os.path.isdir(ann_dir):
+                for fn in sorted(os.listdir(ann_dir))[:limit]:
+                    if not fn.endswith(".json"):
+                        continue
+                    try:
+                        with open(os.path.join(ann_dir, fn), "r", encoding="utf-8") as f:
+                            a = json.load(f)
+                    except Exception:
+                        continue
+                    items.append({
+                        "stem": fn[:-5],
+                        "composed": a.get("image", ""),
+                        "source_name": a.get("source_image", ""),
+                        "country": "",
+                        "objects": a.get("objects", []),
+                    })
+            return self._send(200, {"dir": d, "count": len(items), "items": items})
+
+        if u.path == "/api/tsr/result":
+            f = (q.get("file") or [""])[0]
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.(?:jpg|png)", f, re.I):
+                return self._send(400, {"error": "invalid"})
+            selected_dir = (q.get("dir") or [""])[0]
+            if selected_dir:
+                root = os.path.realpath("/data/render")
+                selected = os.path.realpath(selected_dir)
+                if os.path.commonpath([root, selected]) != root:
+                    return self._send(400, {"error": "目录不在渲染目录内"})
+                p = os.path.realpath(os.path.join(selected, f))
+                if os.path.dirname(p) != selected or not os.path.isfile(p):
+                    return self._send(404, {"error": "结果文件不存在"})
+            else:
+                p = os.path.join(TSR_OUT_DIR, f)
+            if not selected_dir and not os.path.isfile(p):
+                # 批量产出可能直接落在 /data/render/<目录>/ 下，也要能取到
+                alt = None
+                rroot = "/data/render"
+                if os.path.isdir(rroot):
+                    for x in os.listdir(rroot):
+                        cand = os.path.join(rroot, x, f)
+                        if os.path.isfile(cand):
+                            alt = cand
+                            break
+                if alt:
+                    p = alt
+                else:
+                    return self._send(404, {"error": "not found"})
+            with open(p, "rb") as fh:
+                blob = fh.read()
+            # ⚠️ 必须 no-store：预览图文件名固定（xxx_preview.jpg），
+            #    浏览器会缓存旧图，导致改了参数重新生成后看到的还是旧结果
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png" if p.endswith(".png") else "image/jpeg")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            self.wfile.write(blob)
+            return
+        if u.path == "/api/job":
+            jid = (q.get("id") or [""])[0]
+            with JOBS_LOCK:
+                rec = JOBS.get(jid)
+            if not rec:
+                return self._send(404, {"error": "no job"})
+            return self._send(200, dict(rec, out=tail(rec["log"], 300)))
+        if u.path == "/api/log":
+            jid = (q.get("job") or [""])[0]
+            if jid:
+                with JOBS_LOCK:
+                    rec = JOBS.get(jid)
+                if not rec:
+                    return self._send(404, {"error": "no job"})
+                try:
+                    offset = max(0, int((q.get("offset") or ["0"])[0]))
+                except ValueError:
+                    return self._send(400, {"error": "invalid offset"})
+                try:
+                    with open(rec["log"], "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        size = f.tell()
+                        offset = min(offset, size)
+                        f.seek(offset)
+                        blob = f.read(65536)
+                except OSError:
+                    blob = b""
+                return self._send(200, {"job": jid, "out": blob.decode("utf-8", "replace"),
+                                        "offset": offset + len(blob)})
+            name = (q.get("name") or ["batch.log"])[0]
+            if "/" in name or "\\" in name or ".." in name:
+                return self._send(400, {"error": "bad name"})
+            try:
+                lines = int((q.get("lines") or ["200"])[0])
+            except (TypeError, ValueError):
+                lines = 200
+            return self._send(200, {"name": name,
+                                    "out": tail(os.path.join(load_config()["logs_dir"], name),
+                                                min(lines, 1000))})
+        if u.path == "/api/overlay":
+            # 只允许读配置目录下这一张固定文件，不接受任意路径
+            p = os.path.join(load_config()["overlay_dir"], "contact_sheet.jpg")
+            if not os.path.exists(p):
+                return self._send(404, {"error": "还没有抽检图"})
+            try:
+                with open(p, "rb") as f:
+                    blob = f.read()
+            except Exception as e:
+                return self._send(500, {"error": "读取失败: %s" % e})
+            return self._send(200, blob, "image/jpeg")
+        return self._send(404, {"error": "not found"})
+    def do_POST(self):
+        u = urlparse(self.path)
+
+        smoke = re.fullmatch(r"/api/(obj|gnd)/run", u.path)
+        if smoke:
+            payload = self._body()
+            if not isinstance(payload, dict):
+                return self._send(400, {"error": "小样参数须为 JSON 对象"})
+            with SMOKE_LAUNCH_LOCK:
+                rec, error = start_job(smoke.group(1) + "_smoke", payload)
+            if error:
+                return self._send(409, {"error": error})
+            return self._send(202, {"id": rec["id"]})
+        if u.path == "/api/preview":
+            rec, err = start_job("preview", {})
+            return self._send(400, {"error": err}) if err else self._send(200, {"id": rec["id"]})
+        if u.path == "/api/assets/upload":
+            name = self.headers.get("X-Filename", "")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg)", name, re.I):
+                return self._send(400, {"error": "文件名仅允许英数字、点、下划线、连字符及 PNG/JPEG 扩展名"})
+            size = int(self.headers.get("Content-Length") or 0)
+            if not 0 < size <= 20 * 1024 * 1024:
+                return self._send(400, {"error": "图片须小于 20 MB"})
+            blob = self.rfile.read(size)
+            if not (blob.startswith(b"\x89PNG\r\n\x1a\n") if name.lower().endswith(".png")
+                    else blob.startswith(b"\xff\xd8\xff")):
+                return self._send(400, {"error": "图片内容与扩展名不符"})
+            folder = image_inbox()
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(blob)
+            return self._send(200, {"name": name, "bytes": len(blob)})
+        p = self._body()
+
+        # [PRESCREEN] YOLO 预筛（异步，带进度）
+        if u.path == "/api/tsr/prescreen":
+            body = p
+            d = str(body.get("dir") or "")
+            conf = float(body.get("conf") or 0.30)
+            min_px = int(body.get("min_px") or 24)
+            limit = int(body.get("limit") or 300)
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "目录不存在", "dir": d})
+            import subprocess as _sp
+            tid = uuid.uuid4().hex[:10]
+            out_json = "/tmp/prescreen_%s.json" % tid
+            prog_json = "/tmp/prescreen_prog_%s.json" % tid
+            try:
+                with open(prog_json, "w", encoding="utf-8") as fh:
+                    json.dump({"done": 0, "total": 0, "usable": 0, "hits": 0,
+                               "finished": False}, fh)
+            except Exception:
+                pass
+            exe = ALGO_PYTHON if os.path.isfile(ALGO_PYTHON) else "python3"
+            script_p = os.path.join(TOOLS_DIR, "prescreen_yolo.py")
+            _sp.Popen([exe, script_p, d, "--out", out_json, "--conf", str(conf),
+                       "--min-px", str(min_px), "--limit", str(limit),
+                       "--progress", prog_json],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                      start_new_session=True)
+            self._send(200, {"ok": True, "task": tid, "dir": d})
+            return
+
+        # [TSR-API] 单图检测
+        if u.path == "/api/tsr/detect":
+            b = p
+            d = str(b.get("dir") or "")
+            f = str(b.get("file") or "")
+            cf = float(b.get("conf") or 0.30)
+            if not d or not f:
+                return self._send(400, {"error": "缺少 dir/file"})
+            fp = os.path.join(d, f)
+            if not os.path.isfile(fp):
+                return self._send(400, {"error": "图片不存在"})
+            return self._send(200, _run_algo(
+                [os.path.join(TOOLS_DIR, "tsr_detect_api.py"), fp, str(cf)], timeout=180))
+
+        # [TSR-API] 单图替换预览
+        if u.path == "/api/tsr/replace":
+            body = p
+            d = str(body.get("dir") or "")
+            f = str(body.get("file") or "")
+            country = str(body.get("country") or "")
+            cls = str(body.get("target_class") or "")
+            bbox = body.get("bbox") or []
+            if not d or not f:
+                return self._send(400, {"error": "缺少 dir/file"})
+            os.makedirs(TSR_OUT_DIR, exist_ok=True)
+            p = os.path.join(d, f)
+            if not os.path.isfile(p):
+                return self._send(400, {"error": "图片不存在"})
+            out = os.path.join(TSR_OUT_DIR, _tsr_slug(os.path.splitext(f)[0]) + "_preview.jpg")
+            args = [os.path.join(TOOLS_DIR, "tsr_preview_api.py"), p, out,
+                    "--library", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                    "--country", country]
+            if cls:
+                args += ["--target-class", cls]
+            shp = str(body.get("shape") or "")
+            if shp in ("circle", "triangle", "rect"):
+                args += ["--shape", shp]
+            # 仿真参数（面板滑块）
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        args += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            if bbox and len(bbox) == 4:
+                args += ["--bbox", ",".join(str(float(v)) for v in bbox)]
+            res = _run_algo(args, timeout=300)
+            if res.get("ok"):
+                res["url"] = "/api/tsr/result?file=" + os.path.basename(out)
+            return self._send(200, res)
+
+        # [TSR-API] 批量替换
+        if u.path == "/api/tsr/walk":
+            # 遍历式批量：递归扫描目录树，自动挑有标牌的帧
+            body = p
+            root = str(body.get("root") or "").strip()
+            if not root or not os.path.isdir(root):
+                return self._send(400, {"error": "目录不存在：" + root})
+            country = str(body.get("country") or "BR")
+            limit = int(body.get("limit") or 1000)
+            min_sign = int(body.get("min_sign") or 40)
+            conf = float(body.get("conf") or 0.30)
+            tag = time.strftime("%m%d_%H%M%S")
+            out_dir = os.path.join(TSR_OUT_DIR, "walk_" + tag)
+            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
+            cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "batch_walk.py"),
+                   "--images", root, "--country", country,
+                   "--out", out_dir, "--limit", str(limit),
+                   "--min-sign", str(min_sign), "--conf", str(conf),
+                   "--signs-dir", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--jobs-progress", prog]
+            if body.get("vary_class", True):
+                cmd.append("--vary-class")
+            if body.get("grow") is not None:
+                try:
+                    cmd += ["--grow", str(float(body["grow"]))]
+                except (TypeError, ValueError):
+                    pass
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        cmd += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
+            lf = open(logf, "w")
+            subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+            return self._send(200, {"ok": True, "job": tag,
+                                    "out": out_dir, "progress": prog, "log": logf})
+
+        if u.path == "/api/tsr/batch":
+            body = p
+            d = str(body.get("dir") or "")
+            country = str(body.get("country") or "")
+            cls = str(body.get("target_class") or "")
+            limit = int(body.get("limit") or 20)
+            if not d or not os.path.isdir(d):
+                return self._send(400, {"error": "实拍目录不存在"})
+            os.makedirs(TSR_OUT_DIR, exist_ok=True)
+            cmd = [os.path.join(TOOLS_DIR, "batch_replace.py"),
+                   "--images", d, "--signs-dir", cfg.get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--out", TSR_OUT_DIR, "--country", country, "--limit", str(limit)]
+            if cls:
+                cmd += ["--target-class", cls]
+            shp2 = str(body.get("shape") or "")
+            if shp2 in ("circle", "triangle", "rect"):
+                cmd += ["--shape", shp2]
+            for k in ("bright_gain", "haze_gain", "contrast_gain",
+                      "satur_keep", "feather_ratio"):
+                v = body.get(k)
+                if v is not None:
+                    try:
+                        cmd += ["--" + k.replace("_", "-"), str(float(v))]
+                    except (TypeError, ValueError):
+                        pass
+            if body.get("vary_class"):
+                cmd += ["--vary-class"]
+            rec, err = start_job("tsr_batch", {"cmd": cmd, "out": TSR_OUT_DIR})
+            if err:
+                return self._send(400, {"error": err})
+            return self._send(self._json_code if hasattr(self, "_json_code") else 200,
+                              {"id": rec["id"], "out": TSR_OUT_DIR})
+        if u.path == "/api/run":
+            # 前端发的是 {action, params:{...}}；也兼容平铺的 {action, limit, ...} 老调用
+            params = p.get("params") if isinstance(p, dict) else None
+            if not isinstance(params, dict):
+                params = p if isinstance(p, dict) else {}
+            rec, err = start_job(p.get("action", ""), params)
+            if err:
+                return self._send(400, {"error": err})
+            return self._send(200, {"id": rec["id"]})
+        if u.path == "/api/kill":
+            return self._send(200, {"killed": kill_job(p.get("id", ""))})
+        if u.path == "/api/config":
+            return self._send(200, save_config(p))
+        return self._send(404, {"error": "not found"})
+
+def acquire_single_instance_lock():
+    """只允许一个面板进程：否则后台自动化（显卡记录 + 自动处理链）会被起两份。
+    返回锁文件句柄；Windows（无 fcntl）或拿不到锁返回 None，由调用方决定是否退出。"""
+    if fcntl is None:
+        return None
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        f = open(os.path.join(LOG_DIR, ".panel.lock"), "w")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except Exception:
+        return None
+
+def main():
+    port = int(os.environ.get("UE5_PANEL_PORT") or (sys_argv_port() or 8010))
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    lock = acquire_single_instance_lock()
+    if fcntl is not None and lock is None:
+        log_auto("已有面板进程在跑（锁被占用），本进程退出")
+        sys.exit(3)
+    if AUTO_POST or AUTO_GPU_WATCH:
+        threading.Thread(target=auto_loop, daemon=True).start()
+        log_auto("后台自动化已启用：显卡记录=%s，渲染结束自动处理=%s（轮询 %ds）"
+                 % (AUTO_GPU_WATCH, AUTO_POST, int(AUTO_POLL_SEC)))
+    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    print("[panel] http://0.0.0.0:%d  (Ctrl-C 停)" % port)
+    srv.serve_forever()
+
+def sys_argv_port():
+    return sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].isdigit() else None
+
+if __name__ == "__main__":
+    main()

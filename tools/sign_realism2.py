@@ -157,7 +157,120 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
     return np.clip(p, 0, 255).astype(np.uint8), (np.clip(soft, 0, 1) * 255).astype(np.uint8)
 
 
-def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True):
+def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
+    """劣化 v3 —— 借鉴 Gemini 方案的三个改进点。
+
+    相比 v2 的改动：
+
+    1) L 通道用 P5~P95 黑白点线性映射，而不是均值+标准差。
+       均值会被牌面上的极端值（黑字、白底）带偏；
+       分位数映射的是「实际动态范围」，更接近真实。
+
+    2) 模糊按拉普拉斯方差迭代搜索匹配，而不是按固定公式估 sigma。
+       原图多糊，贴的牌就多糊 —— 用二分迭代逼近，误差小得多。
+
+    3) 噪点从原图的高频残差里估，而不是拍一个常数。
+       残差 = 原图 - 中值滤波，它的标准差就是真实噪点水平。
+
+    4) 色温（LAB 的 A/B 通道）做软迁移，权重 0.35，
+       避免红圈被环境色洗白。
+    """
+    import cv2
+    import numpy as np
+
+    if ref_patch.shape[:2] != sign_bgr.shape[:2]:
+        ref_patch = cv2.resize(ref_patch, (sign_bgr.shape[1], sign_bgr.shape[0]))
+
+    valid = mask > 127
+    if valid.sum() < 20:
+        return sign_bgr, mask
+
+    p = sign_bgr.astype(np.float32)
+
+    # ---- 1) LAB 空间的 L 通道黑白点映射 ----
+    bg_lab = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+    as_lab = cv2.cvtColor(np.clip(p, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    bg_l = bg_lab[:, :, 0][valid]
+    as_l = as_lab[:, :, 0][valid]
+    p5_bg, p95_bg = np.percentile(bg_l, [5, 95])
+    p5_as, p95_as = np.percentile(as_l, [5, 95])
+
+    # 目标亮度：跟随环境，但受 brightness_gain 控制
+    gain = PARAMS["bright_gain"]
+    scene_bright = scene.get("bright", 150.0)
+    target_mid = scene_bright * gain
+    # 把原牌的中位亮度拉到 target_mid 附近
+    bg_mid = (p5_bg + p95_bg) * 0.5
+    shift = target_mid - bg_mid
+
+    scale_l = (p95_bg - p5_bg) / (p95_as - p5_as + 1e-5)
+    # 限制对比度缩放，避免过度拉伸
+    scale_l = float(np.clip(scale_l, 0.55, 1.6))
+    as_lab[:, :, 0] = (as_lab[:, :, 0] - p5_as) * scale_l + p5_bg + shift
+    as_lab[:, :, 0] = np.clip(as_lab[:, :, 0], 0, 255)
+
+    # ---- 4) 色温软迁移 ----
+    for ch in (1, 2):
+        diff = float(np.mean(bg_lab[:, :, ch][valid]) - np.mean(as_lab[:, :, ch][valid]))
+        as_lab[:, :, ch] = np.clip(as_lab[:, :, ch] + diff * 0.35, 0, 255)
+
+    p = cv2.cvtColor(as_lab.astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+
+    # ---- 雾度：暗部抬升（沿用 v2 的环境雾估计） ----
+    hz = scene.get("haze", 0.3) * strength * PARAMS["haze_gain"]
+    if hz > 0.02:
+        k = hz * 0.30
+        p = p * (1 - k) + 255 * 0.82 * k
+        hsv = cv2.cvtColor(np.clip(p, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] *= (1 - hz * (1.0 - PARAMS["satur_keep"]))
+        p = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+
+    # ---- 2) 模糊迭代匹配 ----
+    bg_gray = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+    bg_lap = float(np.var(cv2.Laplacian(bg_gray, cv2.CV_64F)[valid]))
+    target_lap = bg_lap * 1.10          # 允许比原图略清晰 10%
+    best = p.copy()
+    for sigma in np.linspace(0.0, 2.5, 12):
+        if sigma < 0.15:
+            cur = p
+        else:
+            ksz = int(2 * round(2 * sigma) + 1)
+            cur = cv2.GaussianBlur(p, (ksz, ksz), sigmaX=sigma)
+        g = cv2.cvtColor(np.clip(cur, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY)
+        lap = float(np.var(cv2.Laplacian(g, cv2.CV_64F)[valid]))
+        best = cur
+        if lap <= target_lap:
+            break
+    p = best
+
+    # ---- 3) 噪点从原图高频残差估 ----
+    bg_smooth = cv2.medianBlur(ref_patch.astype(np.uint8), 3)
+    residual = (ref_patch.astype(np.float32) - bg_smooth.astype(np.float32))[valid]
+    noise_std = float(np.std(residual)) * 0.85
+    if noise_std > 1.0:
+        noise_std = min(noise_std, 8.0)
+        p = p + np.random.normal(0, noise_std, p.shape).astype(np.float32)
+
+    ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
+                           [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if ok:
+        p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
+
+    # ---- 边缘 alpha：先腐蚀 1px 去掉原牌边缘残留，再羽化 ----
+    soft = mask.astype(np.float32) / 255.0
+    er = cv2.erode((soft * 255).astype(np.uint8),
+                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+    h, w = soft.shape
+    feather_px = min(2.0, max(0.8, min(h, w) * PARAMS["feather_ratio"]))
+    kf = int(max(3, 2 * round(feather_px * 1.5) + 1))
+    soft = cv2.GaussianBlur(er.astype(np.float32) / 255.0, (kf, kf), feather_px)
+
+    return np.clip(p, 0, 255).astype(np.uint8), (np.clip(soft, 0, 1) * 255).astype(np.uint8)
+
+
+def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True,
+             use_v3=False):
     """带环境氛围匹配与边缘过渡的贴合。
 
     返回 (合成图, 信息)
@@ -175,7 +288,10 @@ def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True):
 
     sig = cv2.resize(sign_bgr, (tw, th), interpolation=cv2.INTER_NEAREST)
     alp = cv2.resize(sign_alpha, (tw, th), interpolation=cv2.INTER_NEAREST)
-    sig, soft = degrade_v2(sig, alp, ref, scene, strength)
+    if use_v3:
+        sig, soft = degrade_v3(sig, alp, ref, scene, strength)
+    else:
+        sig, soft = degrade_v2(sig, alp, ref, scene, strength)
 
     a = (soft.astype(np.float32) / 255.0)[:, :, None]
     out = image.astype(np.float32).copy()

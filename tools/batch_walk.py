@@ -56,9 +56,17 @@ def main():
                     help="标牌短边最小像素（太小看不出效果，默认 40）")
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--signs-dir", default="/data/tsr_library_v2")
-    ap.add_argument("--vary-class", action="store_true", default=True)
+    ap.add_argument("--vary-class", action="store_true")
+    for name in ("bright-gain", "haze-gain", "contrast-gain", "satur-keep", "feather-ratio"):
+        ap.add_argument("--" + name, type=float, default=None)
+    # 实测检测框/原牌红圈的比值在 0.76~1.39 之间乱跳，任何固定倍数都会在
+    # 某些帧上偏大、另一些帧上偏小。1.12 在多数帧上能盖住原牌边缘
+    # （偏小会让原牌描边露出来，比偏大更明显），所以默认用 1.12。
     ap.add_argument("--grow", type=float, default=1.12,
-                    help="粘贴区域放大倍数（默认 1.12：YOLO 框不含红色外圈，需放大盖住）")
+                    help="粘贴区域放大倍数（默认 1.12，盖住原牌描边；"
+                         "1.0 按检测框原尺寸，实测会露出原牌边缘）")
+    ap.add_argument("--realism", default="v3", choices=["v2", "v3"],
+                    help="劣化算法版本：v3（P5-P95黑白点映射+迭代模糊匹配）或 v2（旧版）")
     ap.add_argument("--jobs-progress", default="",
                     help="进度写到这个文件，面板可轮询")
     a = ap.parse_args()
@@ -68,7 +76,10 @@ def main():
     os.makedirs(ann_dir, exist_ok=True)
 
     from replace_sign import detect_signs, load_sign, sign_mask
-    from sign_realism2 import paste_v2
+    from sign_realism2 import paste_v2, set_params
+    effective_params = set_params(bright_gain=a.bright_gain, haze_gain=a.haze_gain,
+                                  contrast_gain=a.contrast_gain, satur_keep=a.satur_keep,
+                                  feather_ratio=a.feather_ratio)
     from sign_occlusion import detect_occluder, add_backing_plate
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
@@ -123,6 +134,23 @@ def main():
             if not dets:
                 skip_small += 1
                 continue
+
+            # A detector may return several classes for the same physical sign.
+            chosen = []
+            for det in sorted(dets, key=lambda item: item["conf"], reverse=True):
+                x1, y1, x2, y2 = det["bbox"]
+                area = max(0, x2 - x1) * max(0, y2 - y1)
+                duplicate = False
+                for kept in chosen:
+                    a1, b1, a2, b2 = kept["bbox"]
+                    intersection = max(0, min(x2, a2) - max(x1, a1)) * max(0, min(y2, b2) - max(y1, b1))
+                    other_area = max(0, a2 - a1) * max(0, b2 - b1)
+                    if min(area, other_area) > 0 and intersection / min(area, other_area) >= 0.65:
+                        duplicate = True
+                        break
+                if not duplicate:
+                    chosen.append(det)
+            dets = chosen
 
             im = cv2.imread(p)
             if im is None:
@@ -182,7 +210,8 @@ def main():
                 #   从原牌四角采样底板颜色，但四角往往是背景而不是底板，
                 #   贴上去多出一块明显的灰方块，比不带底板更突兀。
                 #   现在保持纯圆形贴图，退化到「只盖住牌面」。
-                out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox)
+                out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox,
+                                         use_v3=a.realism == "v3")
                 if not cinfo.get("ok"):
                     continue
                 objects.append({
@@ -206,6 +235,8 @@ def main():
                 "source_dir": seq,
                 "source_path": p,
                 "width": W, "height": H,
+                "simulation_params": dict(effective_params),
+                "bbox_grow": a.grow,
                 "objects": objects,
             }
             with open(os.path.join(ann_dir, stem + ".json"), "w", encoding="utf-8") as f:
@@ -234,6 +265,8 @@ def main():
         "elapsed_sec": round(dt, 1),
         "min_sign_px": a.min_sign,
         "vary_class": a.vary_class,
+        "simulation_params": dict(effective_params),
+        "bbox_grow": a.grow,
         "class_distribution": dict(sorted(cls_count.items(), key=lambda kv: -kv[1])),
         "items": summary,
     }
