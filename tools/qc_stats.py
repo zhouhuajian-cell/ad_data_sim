@@ -99,13 +99,21 @@ def main():
             reason, bb, sh = frame_fail
             gate = reason.split("_")[0] if "_" in reason else reason
             # 归一化：去掉具体数值，聚合同类问题
-            key = reason.split("(")[0].split("_fill_")[0]
-            if reason.startswith("Gate1_fill_"):
-                key = "Gate1_fill_mismatch"
-            elif reason.startswith("Gate3_bright_"):
-                key = "Gate3_brightness"
-            elif reason.startswith("Gate2_edge_jump_"):
+            # 归一化：把带具体数值的原因聚成同类
+            if reason.startswith("Gate1_contour_small"):
+                key = "Gate1_contour_small"
+            elif reason.startswith("Gate1_fill_extreme"):
+                key = "Gate1_fill_extreme"
+            elif reason.startswith("Gate1_no_contour"):
+                key = "Gate1_no_contour"
+            elif reason.startswith("Gate1_contour_tiny"):
+                key = "Gate1_contour_tiny"
+            elif reason.startswith("Gate2_edge_jump"):
                 key = "Gate2_edge_jump"
+            elif reason.startswith("Gate3_bright"):
+                key = "Gate3_brightness"
+            else:
+                key = reason
             gate_counter[gate] += 1
             reason_counter[key] += 1
             shape_counter[sh] += 1

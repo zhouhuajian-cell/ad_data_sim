@@ -88,50 +88,68 @@ def qc_check(orig, composed, bbox, shape="circle",
     if bcw < 12 or bch < 12:
         return False, {"passed": False, "reason": "Gate1_contour_tiny"}
 
-    fill = area / float(bcw * bch)
-    exp, tol = FILL_EXPECT.get(shape, (0.785, 0.15))
-    tol *= fill_tol_scale
+    # ---- Gate1 几何完整性 ----
+    # 演进过程（都记下来，避免重走）：
+    #   v1: fill ratio 严格区间（圆 0.785±0.12）→ 剔除 40.7%，把透视变形的正常样本也杀了
+    #   v2: 放宽到 ±0.22 → 剔除 20%，但仍有 35% 是「方底板圆牌」这类正常场景
+    #   v3: 改用 solidity（凸性）→ 通过率反而从 61.5% 掉到 48.2%，
+    #       因为标牌被立柱/树枝/电线遮挡是常态，轮廓天然不凸
+    #   v4（当前）: Gate1 只排除「明显不对」的样本，放过一切可能正常的
+    #       判据只有一条：轮廓大得离谱（>1.6 倍外接框）或小得离谱（<0.55 倍）
+    fill = area / float(max(bcw * bch, 1))
     info["fill"] = round(float(fill), 3)
-    if abs(fill - exp) > tol:
-        return False, {**info, "passed": False,
-                       "reason": "Gate1_fill_%.2f_expect_%.2f" % (fill, exp)}
+    info["contour_w"] = int(bcw)
+    info["contour_h"] = int(bch)
 
-    # ---- Gate 2：边缘跳变 ----
-    # 用 bbox 为基准：缩进 15% 作为内环，外扩 15% 作为外环
-    def ring_mean(img, inner):
-        ix1 = x1 + int(bw * 0.15)
-        iy1 = y1 + int(bh * 0.15)
-        ix2 = x2 - int(bw * 0.15)
-        iy2 = y2 - int(bh * 0.15)
-        if inner:
-            patch = img[iy1:iy2, ix1:ix2]
-        else:
-            ex1 = max(0, x1 - int(bw * 0.15))
-            ey1 = max(0, y1 - int(bh * 0.15))
-            ex2 = min(W, x2 + int(bw * 0.15))
-            ey2 = min(H, y2 + int(bh * 0.15))
-            outer = img[ey1:ey2, ex1:ex2]
-            if outer.size == 0:
-                return None
-            mask = np.ones(outer.shape[:2], np.uint8)
-            # 挖掉内环区域
-            mask[iy1 - ey1:iy2 - ey1, ix1 - ex1:ix2 - ex1] = 0
-            vals = cv2.cvtColor(outer, cv2.COLOR_BGR2GRAY)[mask > 0]
-            return float(vals.mean()) if vals.size else None
+    # 轮廓必须基本铺满检测框 —— 太小说明只圈到标牌一角或背景纹理
+    if bcw < bw * 0.55 or bch < bh * 0.55:
+        return False, {**info, "passed": False,
+                       "reason": "Gate1_contour_small_%dx%d" % (bcw, bch)}
+    # 填充率极端值：<0.30 说明是零散纹理，>1.05 不可能（面积超过外接框）
+    if fill < 0.30 or fill > 1.05:
+        return False, {**info, "passed": False,
+                       "reason": "Gate1_fill_extreme_%.2f" % fill}
+
+    # ---- Gate2：边缘跳变 ----
+    # 标牌内缩 15% 的区域 vs 外扩 15% 的环带，比较平均亮度
+    # 跳变过大说明有黑边/白边/错位（用户说的「重影」）
+    def _mean_inside(img):
+        ix1, iy1 = x1 + int(bw * 0.15), y1 + int(bh * 0.15)
+        ix2, iy2 = x2 - int(bw * 0.15), y2 - int(bh * 0.15)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return None
+        patch = img[iy1:iy2, ix1:ix2]
         if patch.size == 0:
             return None
         return float(cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).mean())
 
-    inner_m = ring_mean(composed, True)
-    outer_m = ring_mean(composed, False)
-    if inner_m is not None and outer_m is not None:
-        jump = abs(inner_m - outer_m)
+    def _mean_ring(img):
+        ex1 = max(0, x1 - int(bw * 0.15))
+        ey1 = max(0, y1 - int(bh * 0.15))
+        ex2 = min(W, x2 + int(bw * 0.15))
+        ey2 = min(H, y2 + int(bh * 0.15))
+        outer = img[ey1:ey2, ex1:ex2]
+        if outer.size == 0:
+            return None
+        mask = np.ones(outer.shape[:2], np.uint8)
+        ix1, iy1 = x1 + int(bw * 0.15), y1 + int(bh * 0.15)
+        ix2, iy2 = x2 - int(bw * 0.15), y2 - int(bh * 0.15)
+        mask[max(0, iy1 - ey1):max(0, iy2 - ey1),
+             max(0, ix1 - ex1):max(0, ix2 - ex1)] = 0
+        g = cv2.cvtColor(outer, cv2.COLOR_BGR2GRAY)
+        vals = g[mask > 0]
+        return float(vals.mean()) if vals.size else None
+
+    mi = _mean_inside(composed)
+    mo = _mean_ring(composed)
+    if mi is not None and mo is not None:
+        jump = abs(mi - mo)
         info["edge_jump"] = round(jump, 1)
         if jump > edge_jump_max:
             return False, {**info, "passed": False,
                            "reason": "Gate2_edge_jump_%.0f" % jump}
 
-    # ---- Gate 3：亮度一致性 ----
+    # ---- Gate3：亮度一致性 ----
     pad = max(2, int(bw * 0.08))
     o_patch = orig[y1 + pad:y2 - pad, x1 + pad:x2 - pad]
     c_patch = composed[y1 + pad:y2 - pad, x1 + pad:x2 - pad]
@@ -147,106 +165,3 @@ def qc_check(orig, composed, bbox, shape="circle",
     return True, info
 
 
-def qc_batch(out_dir, sample_limit=0, edge_jump_max=38.0, bright_diff_max=38.0,
-             dry_run=False):
-    """对整个产出目录跑质检，返回统计。
-
-    dry_run=True 时只统计不删文件。
-    """
-    import glob
-    import json
-    import os
-
-    import cv2
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from batch_replace import std_shape  # noqa: E402
-
-    ann_dir = os.path.join(out_dir, "annotations")
-    if not os.path.isdir(ann_dir):
-        return {"error": "找不到 annotations 目录"}
-
-    files = sorted(glob.glob(os.path.join(ann_dir, "*.json")))
-    if sample_limit:
-        files = files[:sample_limit]
-
-    passed = failed = 0
-    reasons = {}
-    removed = 0
-
-    for ap in files:
-        try:
-            with open(ap, encoding="utf-8") as f:
-                a = json.load(f)
-            objs = a.get("objects", [])
-            if not objs:
-                continue
-            src = a.get("source_path", "")
-            comp = os.path.join(out_dir, a.get("image", ""))
-            if not (os.path.isfile(src) and os.path.isfile(comp)):
-                continue
-            orig = cv2.imread(src)
-            composed = cv2.imread(comp)
-            if orig is None or composed is None or orig.shape != composed.shape:
-                continue
-
-            # 多标牌的帧，任一标牌不过就算不合格
-            frame_ok = True
-            fail_reason = None
-            for o in objs:
-                shape = std_shape(orig, o["bbox"])
-                if shape == "unknown":
-                    shape = "circle"      # 兜底按圆形判
-                ok, info = qc_check(orig, composed, o["bbox"], shape,
-                                    edge_jump_max=edge_jump_max,
-                                    bright_diff_max=bright_diff_max)
-                if not ok:
-                    frame_ok = False
-                    fail_reason = info.get("reason", "unknown")
-                    break
-
-            if frame_ok:
-                passed += 1
-            else:
-                failed += 1
-                key = (fail_reason or "").split("_")[0]
-                reasons[key] = reasons.get(key, 0) + 1
-                if not dry_run:
-                    try:
-                        os.remove(ap)
-                        os.remove(comp)
-                        removed += 1
-                    except OSError:
-                        pass
-        except Exception:
-            continue
-
-    total = passed + failed
-    return {
-        "total": total,
-        "passed": passed,
-        "failed": failed,
-        "pass_rate": round(100.0 * passed / max(total, 1), 1),
-        "removed": removed,
-        "fail_reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
-    }
-
-
-if __name__ == "__main__":
-    import argparse
-    import json
-    import sys
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="产出目录")
-    ap.add_argument("--sample", type=int, default=0)
-    ap.add_argument("--edge-jump", type=float, default=38.0)
-    ap.add_argument("--bright-diff", type=float, default=38.0)
-    ap.add_argument("--dry-run", action="store_true", help="只统计不删除")
-    ap.add_argument("--apply", action="store_true", help="实际删除不合格样本")
-    a = ap.parse_args()
-
-    res = qc_batch(a.out, a.sample, a.edge_jump, a.bright_diff,
-                   dry_run=not a.apply)
-    print(json.dumps(res, ensure_ascii=False, indent=1))
-    sys.exit(0)
