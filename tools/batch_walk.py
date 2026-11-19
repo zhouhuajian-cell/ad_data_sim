@@ -50,6 +50,8 @@ def main():
     ap.add_argument("--country", default="BR")
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=1000, help="成功生成的目标张数")
+    ap.add_argument("--shuffle", action="store_true",
+                    help="随机打乱文件顺序（避免只扫到某个标牌密度低的区域）")
     ap.add_argument("--max-scan", type=int, default=200000,
                     help="最多扫描多少个文件就停（防止扫全盘太慢）")
     ap.add_argument("--min-sign", type=int, default=40,
@@ -67,6 +69,11 @@ def main():
                          "1.0 按检测框原尺寸，实测会露出原牌边缘）")
     ap.add_argument("--tune", action="store_true",
                     help="逐帧自动寻优 grow/brightness（QC 不通过时尝试其他参数组合）")
+    ap.add_argument("--sd", action="store_true",
+                    help="用 Stable Diffusion 局部重绘精修（光影融合），需要 /data/models/sd15-inpaint")
+    ap.add_argument("--sd-strength", type=float, default=None,
+                    help="SD 重绘幅度；不给就按标牌尺寸自动选 0.20~0.28")
+    ap.add_argument("--sd-model", default="/data/models/sd15-inpaint")
     ap.add_argument("--gate4", action="store_true",
                     help="启用 Gate4 模型自检：合成图喂回 YOLO，认不出来就丢弃")
     ap.add_argument("--gate4-conf", type=float, default=0.35)
@@ -93,6 +100,7 @@ def main():
                                   feather_ratio=a.feather_ratio)
     from sign_occlusion import detect_occluder, add_backing_plate
     from auto_qc import qc_check, gate4_model_check
+    from sd_refine import refine as sd_refine, make_sign_mask, strength_for_size as sd_strength
     from auto_tune import best_params_for_frame
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
@@ -101,6 +109,11 @@ def main():
     t0 = time.time()
     print("[1/3] 扫描目录…", flush=True)
     files = walk_images(a.images, a.max_scan)
+    if a.shuffle:
+        import random as _rnd
+        _rnd.seed(42)          # 固定种子，结果可复现
+        _rnd.shuffle(files)
+        print("  已随机打乱顺序（种子 42）")
     print("  找到 %d 个图片文件（%.1fs）" % (len(files), time.time() - t0), flush=True)
 
     table = list_signs(a.signs_dir, a.country)
@@ -113,6 +126,8 @@ def main():
     qc_reject = 0
     tune_saved = 0
     g4_reject = 0
+    sd_count = 0
+    sd_fail = 0
     qc_reasons = {}
     summary = []
     total = len(files)
@@ -293,6 +308,29 @@ def main():
                         qc_reasons[why.split("_")[0]] = qc_reasons.get(why.split("_")[0], 0) + 1
                         continue
 
+            # SD 局部重绘：让模型按周围环境重新打光，去掉"贴纸感"
+            # 放在 Gate4 之前，因为 Gate4 要检验的正是精修后的成品
+            if a.sd:
+                sd_applied = 0
+                for ob in objects:
+                    try:
+                        bb = ob["bbox"]
+                        sz = min(bb[2] - bb[0], bb[3] - bb[1])
+                        mk = make_sign_mask(out_im.shape, bb)
+                        st = a.sd_strength if a.sd_strength is not None else sd_strength(sz)
+                        out_im, sinfo = sd_refine(out_im, mk, strength=st,
+                                                  sign_px=sz, model_dir=a.sd_model,
+                                                  seed=int(sz))
+                        if sinfo.get("ok"):
+                            sd_applied += 1
+                            ob["sd_strength"] = sinfo["strength"]
+                    except Exception as e:
+                        if sd_fail < 3:
+                            print("    [SD-ERR] %s" % str(e)[:80], flush=True)
+                        sd_fail += 1
+                if sd_applied:
+                    sd_count += 1
+
             # Gate4：模型自检 —— 合成图喂回 YOLO，认不出来就说明这帧对训练没价值
             if a.gate4:
                 g4_ok = True
@@ -349,6 +387,9 @@ def main():
         "tune_saved": tune_saved,
         "gate4_enabled": a.gate4,
         "gate4_reject": g4_reject,
+        "sd_enabled": a.sd,
+        "sd_refined": sd_count,
+        "sd_fail": sd_fail,
         "qc_reject_reasons": qc_reasons,
         "simulation_params": dict(effective_params),
         "bbox_grow": a.grow,
@@ -368,6 +409,8 @@ def main():
             print("寻优救回 %d 张" % tune_saved)
     if a.gate4:
         print("Gate4 模型自检剔除 %d 张" % g4_reject)
+    if a.sd:
+        print("SD 精修 %d 张（失败 %d）" % (sd_count, sd_fail))
         print("质检剔除 %d 张%s" % (qc_reject,
               ("（%s）" % ", ".join("%s:%d" % kv for kv in qc_reasons.items())) if qc_reasons else ""))
     print("类别分布 Top10:")
