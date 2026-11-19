@@ -157,6 +157,63 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
     return np.clip(p, 0, 255).astype(np.uint8), (np.clip(soft, 0, 1) * 255).astype(np.uint8)
 
 
+def _jpeg_quality_for(ref_patch):
+    """按原图局部清晰度决定 JPEG 质量。
+
+    用户建议：原图很糊 → 45~50；偏高清 → 65~75。
+    用拉普拉斯方差衡量，经验映射：
+      < 120   很糊   → 46
+      120~400 一般   → 56
+      400~900 较清晰 → 66
+      > 900   高清   → 74
+    """
+    import cv2
+    if ref_patch is None or ref_patch.size == 0:
+        return 56
+    g = cv2.cvtColor(ref_patch.astype("uint8"), cv2.COLOR_BGR2GRAY)
+    lap = float(cv2.Laplacian(g, cv2.CV_64F).var())
+    # 阈值实测校准（180 个真实标牌样本）：
+    #   lap 中位 6151、5% 分位 1772、95% 分位 17417
+    # 标牌文字边缘锐利，拉普拉斯方差天然很大，
+    # 之前按 120/400/900 设阈值导致 99% 都被判成"高清"。
+    # 现按实测 25/50/75 分位重设：4140 / 6151 / 9751
+    if lap < 2500:
+        return 46
+    if lap < 4140:
+        return 52
+    if lap < 6151:
+        return 58
+    if lap < 9751:
+        return 66
+    return 74
+
+
+def apply_jpeg_artifact(blended, mask, quality):
+    """在融合之后的成品上打 JPEG 压缩伪影（只作用于标牌及外扩 2px）。
+
+    为什么放在融合之后：
+      放在前面的话，压缩块会被边缘 alpha 再削一遍，
+      而且伪影不会外溢到牌的边缘外侧 —— 缺少车载视频那种
+      「标牌周围一圈也糊」的观感。放在后面才对得上真实编码顺序。
+    """
+    import cv2
+    import numpy as np
+
+    if blended is None or blended.size == 0:
+        return blended
+    ok, buf = cv2.imencode(".jpg", blended, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        return blended
+    compressed = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    # 只在标牌及外扩 2px 范围内应用，避免污染周围真实背景
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    dil = cv2.dilate(mask, k, iterations=1)
+    soft = (cv2.GaussianBlur(dil, (3, 3), 0).astype(np.float32) / 255.0)[:, :, None]
+    out = compressed.astype(np.float32) * soft + blended.astype(np.float32) * (1.0 - soft)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
     """劣化 v3 —— 借鉴 Gemini 方案的三个改进点。
 
@@ -266,11 +323,6 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
         noise_std = min(noise_std, 8.0)
         p = p + np.random.normal(0, noise_std, p.shape).astype(np.float32)
 
-    ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
-                           [cv2.IMWRITE_JPEG_QUALITY, 70])
-    if ok:
-        p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
-
     # ---- 边缘 alpha：先腐蚀 1px 去掉原牌边缘残留，再羽化 ----
     soft = mask.astype(np.float32) / 255.0
     er = cv2.erode((soft * 255).astype(np.uint8),
@@ -321,8 +373,17 @@ def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True,
         roi[:] = roi * (1 - ring[:, :, None] * 0.35) + edge_val * (ring[:, :, None] * 0.35)
 
     out[y1:y2, x1:x2] = np.clip(roi, 0, 255)
-    return np.clip(out, 0, 255).astype(np.uint8), {
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    # ③ 融合之后再打 JPEG 压缩伪影（用户指定的顺序）
+    jq = _jpeg_quality_for(ref)
+    full_mask = np.zeros(out.shape[:2], np.uint8)
+    full_mask[y1:y2, x1:x2] = soft.astype(np.uint8)
+    out = apply_jpeg_artifact(out, full_mask, jq)
+
+    return out, {
         "ok": True, "scene": {k: round(v, 1) for k, v in scene.items()},
+        "jpeg_quality": jq,
         "target_brightness": round(scene["bright"] * (0.95 - 0.15 * scene["haze"]), 1),
     }
 
