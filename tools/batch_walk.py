@@ -64,6 +64,14 @@ def main():
     # 实测检测框/原牌红圈的比值在 0.76~1.39 之间乱跳，任何固定倍数都会在
     # 某些帧上偏大、另一些帧上偏小。1.12 在多数帧上能盖住原牌边缘
     # （偏小会让原牌描边露出来，比偏大更明显），所以默认用 1.12。
+    ap.add_argument("--pipe6", action="store_true", default=True,
+                    help="使用 6 步严格流水线（默认开）：形状校验→红圈精定位→三锚点对齐→轻微退化→窄羽化融合→JPEG+QC")
+    ap.add_argument("--pipe6-jpeg", type=int, default=60,
+                    help="6 步流水线的 JPEG 质量（55~65，默认 60）")
+    ap.add_argument("--pipe6-pad", type=float, default=1.04,
+                    help="红圈精定位后的外扩系数（默认 1.04 盖死原红边）")
+    ap.add_argument("--legacy-pipe", action="store_true",
+                    help="回退到旧的 sign_realism2 流水线")
     ap.add_argument("--no-rotate", action="store_true",
                     help="禁用标牌旋转对齐（默认开：按 minAreaRect 估角度旋转素材）")
     ap.add_argument("--auto-grow", action="store_true", default=True,
@@ -113,6 +121,7 @@ def main():
     from sign_occlusion import detect_occluder, add_backing_plate
     from auto_qc import qc_check, gate4_model_check
     from fix_grow import grow_for_frame
+    from pipeline6 import run_pipeline6
     from sign_rotate import estimate_angle, rotate_asset
     from sd_refine import refine as sd_refine, make_sign_mask, strength_for_size as sd_strength
     from auto_tune import best_params_for_frame
@@ -142,6 +151,8 @@ def main():
     g4_reject = 0
     sd_count = 0
     rot_applied = 0
+    p6_fail = 0
+    p6_reasons = {}
     sd_fail = 0
     qc_reasons = {}
     summary = []
@@ -279,6 +290,35 @@ def main():
                 #   从原牌四角采样底板颜色，但四角往往是背景而不是底板，
                 #   贴上去多出一块明显的灰方块，比不带底板更突兀。
                 #   现在保持纯圆形贴图，退化到「只盖住牌面」。
+                # ===== 6 步严格流水线（默认）=====
+                # 形状校验 → 红圈精定位 → 三锚点对齐 → 轻微退化
+                # → 窄羽化融合 → JPEG 压缩 + 贴回
+                if a.pipe6 and not a.legacy_pipe:
+                    # 这里必须现算 dst_shape —— 之前误用了 QC 分支里的 sh0，
+                    # 那个变量在当前作用域根本不存在，导致 NameError。
+                    sh_dst = std_shape(im, d["bbox"])
+                    if sh_dst == "unknown":
+                        sh_dst = "circle"
+                    s_rgba = np.dstack([s[:, :, :3], m]) if s.shape[2] == 3 else s
+                    out_im, p6 = run_pipeline6(
+                        out_im, d["bbox"], s_rgba, sh_dst,
+                        jpeg_quality=a.pipe6_jpeg, pad_ratio=a.pipe6_pad)
+                    if not p6.get("ok"):
+                        p6_fail += 1
+                        p6_reasons[p6.get("reason", "unknown").split("_")[0]] = \
+                            p6_reasons.get(p6.get("reason", "unknown").split("_")[0], 0) + 1
+                        continue
+                    bbox_used = p6["bbox"]
+                    objects.append({
+                        "class": cls_name,
+                        "category": cls_name.split("_")[0],
+                        "bbox": [round(float(v), 1) for v in bbox_used],
+                        "score": round(float(d["conf"]), 3),
+                        "material": os.path.basename(path),
+                        "pipeline": "v6",
+                    })
+                    continue
+
                 out_im, cinfo = paste_v2(out_im, s[:, :, :3], m, bbox,
                                          use_v3=a.realism == "v3")
                 if not cinfo.get("ok"):
@@ -425,6 +465,8 @@ def main():
         "gate4_enabled": a.gate4,
         "gate4_reject": g4_reject,
         "rotate_applied": rot_applied,
+        "pipe6_fail": p6_fail,
+        "pipe6_fail_reasons": p6_reasons,
         "sd_enabled": a.sd,
         "sd_refined": sd_count,
         "sd_fail": sd_fail,
@@ -449,6 +491,9 @@ def main():
         print("Gate4 模型自检剔除 %d 张" % g4_reject)
     if not a.no_rotate:
         print("旋转对齐 %d 个标牌" % rot_applied)
+    if a.pipe6 and not a.legacy_pipe:
+        print("6 步流水线失败 %d 个%s" % (p6_fail,
+              ("（%s）" % ", ".join("%s:%d" % kv for kv in p6_reasons.items())) if p6_reasons else ""))
     if a.sd:
         print("SD 精修 %d 张（失败 %d）" % (sd_count, sd_fail))
         print("质检剔除 %d 张%s" % (qc_reject,

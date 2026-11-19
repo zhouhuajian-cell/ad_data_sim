@@ -2,76 +2,106 @@ import cv2
 import numpy as np
 
 
-def align_photometry_v3_patch(
+def refine_red_circle_bbox(bg_img: np.ndarray, yolo_bbox: tuple, pad_ratio: float = 1.04) -> tuple:
+    """
+    红圈精定位：在 YOLO 框内找真实红圈的外接框，消除 YOLO 偏移和原红边残留
+    yolo_bbox: (x1, y1, x2, y2)
+    """
+    h_img, w_img = bg_img.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in yolo_bbox]
+    bw, bh = x2 - x1, y2 - y1
+
+    # 稍微外扩搜索区，防止 YOLO 框把红圈切掉了一点
+    sx1, sy1 = max(0, x1 - int(bw * 0.15)), max(0, y1 - int(bh * 0.15))
+    sx2, sy2 = min(w_img, x2 + int(bw * 0.15)), min(h_img, y2 + int(bh * 0.15))
+    roi = bg_img[sy1:sy2, sx1:sx2]
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # 宽容度较高的双区间红色掩码（覆盖阴天暗红和晴天亮红）
+    m1 = cv2.inRange(hsv, np.array([0, 35, 30]), np.array([12, 255, 255]))
+    m2 = cv2.inRange(hsv, np.array([160, 35, 30]), np.array([180, 255, 255]))
+    red_mask = cv2.bitwise_or(m1, m2)
+
+    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return (x1, y1, x2, y2)
+
+    main_cnt = max(contours, key=cv2.contourArea)
+    rx, ry, rw, rh = cv2.boundingRect(main_cnt)
+
+    # 合理性校验：如果找到的红圈太小（噪点），回退原 YOLO 框
+    if rw < bw * 0.5 or rh < bh * 0.5:
+        return (x1, y1, x2, y2)
+
+    # 以真实红圈中心微扩 1.04x，刚好盖死原红边
+    cx, cy = sx1 + rx + rw / 2.0, sy1 + ry + rh / 2.0
+    nw, nh = rw * pad_ratio, rh * pad_ratio
+    nx1, ny1 = max(0, int(cx - nw / 2.0)), max(0, int(cy - nh / 2.0))
+    nx2, ny2 = min(w_img, int(cx + nw / 2.0)), min(h_img, int(cy + nh / 2.0))
+    return (nx1, ny1, nx2, ny2)
+
+
+def align_color_three_anchors(
     bg_roi: np.ndarray,
-    asset_roi: np.ndarray,
-    mask_roi: np.ndarray,
-    ab_weight: float = 0.35,
-    sat_cap_ratio: float = 1.05
+    asset_bgr: np.ndarray,
+    asset_alpha: np.ndarray
 ) -> np.ndarray:
     """
-    补丁1：LAB P10~P90 动态范围压扁 + HSV 饱和度强制压制
-    解决阴天/灰雾场景下“白底过亮、黑字死黑、红圈太鲜艳”的问题
+    白/红/黑三锚点语义颜色对齐：
+    彻底消除因红白面积比不同导致的“白底发青、亮度过高、红圈发光”
     """
-    valid = mask_roi > 127
-    if valid.sum() < 10:
-        return asset_roi
+    valid = asset_alpha > 127
+    if valid.sum() < 20:
+        return asset_bgr
 
-    # --- 1. LAB 空间：P10~P90 亮度映射（压扁对比度，融入空气灰雾）---
-    bg_lab = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2LAB).astype(np.float32)
-    as_lab = cv2.cvtColor(asset_roi, cv2.COLOR_BGR2LAB).astype(np.float32)
+    bg_hsv = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2HSV)
+    as_hsv = cv2.cvtColor(asset_bgr, cv2.COLOR_BGR2HSV)
 
-    bg_l = bg_lab[:, :, 0][valid]
-    as_l = as_lab[:, :, 0][valid]
-    p10_bg, p90_bg = np.percentile(bg_l, [10, 90])
-    p10_as, p90_as = np.percentile(as_l, [10, 90])
+    # --- 1. 提取原图与素材的【红圈】掩码 ---
+    def get_red_mask(hsv_img, s_min=45):
+        m1 = (hsv_img[:, :, 0] <= 12) | (hsv_img[:, :, 0] >= 160)
+        m2 = hsv_img[:, :, 1] >= s_min
+        return m1 & m2 & valid
 
-    scale_l = (p90_bg - p10_bg) / (p90_as - p10_as + 1e-5)
-    as_lab[:, :, 0] = np.clip((as_lab[:, :, 0] - p10_as) * scale_l + p10_bg, 0, 255)
+    bg_red = get_red_mask(bg_hsv, s_min=35)
+    as_red = get_red_mask(as_hsv, s_min=60)
 
-    # A/B 通道色温软迁移
-    for ch in (1, 2):
-        diff = np.mean(bg_lab[:, :, ch][valid]) - np.mean(as_lab[:, :, ch][valid])
-        as_lab[:, :, ch] = np.clip(as_lab[:, :, ch] + diff * ab_weight, 0, 255)
+    # --- 2. 提取原图与素材的【白底】和【黑字】锚点 (BGR 空间直接线性映射，绝不偏色) ---
+    bg_gray = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2GRAY)
+    as_gray = cv2.cvtColor(asset_bgr, cv2.COLOR_BGR2GRAY)
 
-    out_bgr = cv2.cvtColor(as_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    # 白底：非红、低饱和、高亮度区域
+    bg_non_red = valid & (~bg_red)
+    as_non_red = valid & (~as_red)
 
-    # --- 2. HSV 空间：S 通道（饱和度）强制对齐（把鲜红圈压成实拍脏红）---
-    bg_hsv = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2HSV).astype(np.float32)
-    as_hsv = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    if bg_non_red.sum() > 10 and as_non_red.sum() > 10:
+        bg_w_thresh = np.percentile(bg_gray[bg_non_red], 75)
+        bg_k_thresh = np.percentile(bg_gray[bg_non_red], 15)
+        as_w_thresh = np.percentile(as_gray[as_non_red], 75)
+        as_k_thresh = np.percentile(as_gray[as_non_red], 15)
 
-    # 用 P90 饱和度代表红圈等高饱和区域的上限，避免被白底拉偏
-    bg_s90 = np.percentile(bg_hsv[:, :, 1][valid], 90)
-    as_s90 = np.percentile(as_hsv[:, :, 1][valid], 90)
+        W_bg = np.mean(bg_roi[bg_non_red & (bg_gray >= bg_w_thresh)], axis=0)
+        K_bg = np.mean(bg_roi[bg_non_red & (bg_gray <= bg_k_thresh)], axis=0)
+        W_as = np.mean(asset_bgr[as_non_red & (as_gray >= as_w_thresh)], axis=0)
+        K_as = np.mean(asset_bgr[as_non_red & (as_gray <= as_k_thresh)], axis=0)
 
-    if as_s90 > 1e-3:
-        # 只压降不强行提饱和，防止原图发灰时把素材拉爆
-        sat_scale = min(1.0, (bg_s90 * sat_cap_ratio) / as_s90)
-        as_hsv[:, :, 1] = np.clip(as_hsv[:, :, 1] * sat_scale, 0, 255)
+        # 对整张素材先做 BGR 三通道白/黑锚点映射（白底直接对齐原图暖灰白，黑字对齐原图深灰）
+        scale = (W_bg - K_bg) / (W_as - K_as + 1e-5)
+        out_f = (asset_bgr.astype(np.float32) - K_as) * scale + K_bg
+        out_bgr = np.clip(out_f, 0, 255).astype(np.uint8)
+    else:
+        out_bgr = asset_bgr.copy()
 
-    return cv2.cvtColor(as_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    # --- 3. 单独对齐【红圈】的饱和度(S)与亮度(V) ---
+    if bg_red.sum() > 10 and as_red.sum() > 10:
+        out_hsv = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+        bg_r_s = np.mean(bg_hsv[:, :, 1][bg_red])
+        bg_r_v = np.mean(bg_hsv[:, :, 2][bg_red])
+        as_r_s = np.mean(out_hsv[:, :, 1][as_red])
+        as_r_v = np.mean(out_hsv[:, :, 2][as_red])
 
+        out_hsv[:, :, 1][as_red] = np.clip(out_hsv[:, :, 1][as_red] * (bg_r_s / (as_r_s + 1e-5)), 0, 255)
+        out_hsv[:, :, 2][as_red] = np.clip(out_hsv[:, :, 2][as_red] * (bg_r_v / (as_r_v + 1e-5)), 0, 255)
+        out_bgr = cv2.cvtColor(out_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-def apply_dashcam_jpeg_artifact(
-    blended_roi: np.ndarray,
-    mask_roi: np.ndarray,
-    quality: int = 58
-) -> np.ndarray:
-    """
-    补丁2：模拟车载低码率视频压缩块与边缘涂抹感
-    在 Alpha 融合之后、贴回整图之前调用
-    """
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
-    ok, enc_buf = cv2.imencode(".jpg", blended_roi, encode_param)
-    if not ok:
-        return blended_roi
-
-    compressed = cv2.imdecode(enc_buf, cv2.IMREAD_COLOR)
-
-    # 仅在牌面及外扩 2px 区域内应用压缩结果，避免二次压缩污染周围真实背景
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    dilated = cv2.dilate(mask_roi, k, iterations=1)
-    soft_m = (cv2.GaussianBlur(dilated, (3, 3), 0).astype(np.float32) / 255.0)[:, :, None]
-
-    out = compressed.astype(np.float32) * soft_m + blended_roi.astype(np.float32) * (1.0 - soft_m)
-    return np.clip(out, 0, 255).astype(np.uint8)
+    return out_bgr
