@@ -140,7 +140,7 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
         if n_std > 0.4:
             p = p + np.random.normal(0, n_std, p.shape).astype(np.float32)
         ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
-                               [cv2.IMWRITE_JPEG_QUALITY, 90])
+                               [cv2.IMWRITE_JPEG_QUALITY, 58])
         if ok:
             p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
 
@@ -193,8 +193,8 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
 
     bg_l = bg_lab[:, :, 0][valid]
     as_l = as_lab[:, :, 0][valid]
-    p5_bg, p95_bg = np.percentile(bg_l, [5, 95])
-    p5_as, p95_as = np.percentile(as_l, [5, 95])
+    p5_bg, p95_bg = np.percentile(bg_l, [10, 90])   # P10~P90 比 P5~P95 更稳
+    p5_as, p95_as = np.percentile(as_l, [10, 90])
 
     # 目标亮度：跟随环境，但受 brightness_gain 控制
     gain = PARAMS["bright_gain"]
@@ -222,9 +222,20 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
     if hz > 0.02:
         k = hz * 0.30
         p = p * (1 - k) + 255 * 0.82 * k
-        hsv = cv2.cvtColor(np.clip(p, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] *= (1 - hz * (1.0 - PARAMS["satur_keep"]))
-        p = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+
+    # ---- 饱和度：按背景 P90 自适应压制（P10_P90 补丁） ----
+    # 原做法用全局 satur_keep 系数，遇到"阴天灰场景 + 鲜红圈"时压不够；
+    # 改成用背景高饱和区的 P90 作上限，只压不提，防止把素材拉到过饱和。
+    bg_hsv = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    cur_hsv = cv2.cvtColor(np.clip(p, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    bg_s90 = float(np.percentile(bg_hsv[:, :, 1][valid], 90))
+    as_s90 = float(np.percentile(cur_hsv[:, :, 1][valid], 90))
+    if as_s90 > 1e-3:
+        sat_scale = min(1.0, (bg_s90 * 1.05) / as_s90)
+        # 与全局 satur_keep 取较小值，保证不会比原来更饱和
+        sat_scale = min(sat_scale, 1.0)
+        cur_hsv[:, :, 1] = np.clip(cur_hsv[:, :, 1] * sat_scale, 0, 255)
+        p = cv2.cvtColor(cur_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
     # ---- 2) 模糊迭代匹配 ----
     bg_gray = cv2.cvtColor(ref_patch.astype(np.uint8), cv2.COLOR_BGR2GRAY)
@@ -253,7 +264,7 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
         p = p + np.random.normal(0, noise_std, p.shape).astype(np.float32)
 
     ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
-                           [cv2.IMWRITE_JPEG_QUALITY, 90])
+                           [cv2.IMWRITE_JPEG_QUALITY, 58])
     if ok:
         p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
 

@@ -22,3 +22,19 @@ DerivedDataCache/
 _ui*.png
 _*.png
 _*.jpg
+
+# 模型文件（不纳入版本控制，太大）
+sdxl_files/
+sd_files/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+# 报告 html（几十 MB，图片内嵌）
+TSR_*张_*.html
+TSR仿真_*.html
+
+# 临时
+_*.jpg
+_*.png

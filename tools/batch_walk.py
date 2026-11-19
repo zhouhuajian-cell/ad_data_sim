@@ -64,6 +64,12 @@ def main():
     # 实测检测框/原牌红圈的比值在 0.76~1.39 之间乱跳，任何固定倍数都会在
     # 某些帧上偏大、另一些帧上偏小。1.12 在多数帧上能盖住原牌边缘
     # （偏小会让原牌描边露出来，比偏大更明显），所以默认用 1.12。
+    ap.add_argument("--no-rotate", action="store_true",
+                    help="禁用标牌旋转对齐（默认开：按 minAreaRect 估角度旋转素材）")
+    ap.add_argument("--auto-grow", action="store_true", default=True,
+                    help="按框内红圈占比动态决定 grow（默认开）：框刚好圈住牌时不放大，避免压到相邻标牌")
+    ap.add_argument("--fixed-grow", action="store_true",
+                    help="禁用动态 grow，一律用 --grow 的值")
     ap.add_argument("--grow", type=float, default=1.12,
                     help="粘贴区域放大倍数（默认 1.12，盖住原牌描边；"
                          "1.0 按检测框原尺寸，实测会露出原牌边缘）")
@@ -106,6 +112,8 @@ def main():
                                   feather_ratio=a.feather_ratio)
     from sign_occlusion import detect_occluder, add_backing_plate
     from auto_qc import qc_check, gate4_model_check
+    from fix_grow import grow_for_frame
+    from sign_rotate import estimate_angle, rotate_asset
     from sd_refine import refine as sd_refine, make_sign_mask, strength_for_size as sd_strength
     from auto_tune import best_params_for_frame
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
@@ -133,6 +141,7 @@ def main():
     tune_saved = 0
     g4_reject = 0
     sd_count = 0
+    rot_applied = 0
     sd_fail = 0
     qc_reasons = {}
     summary = []
@@ -232,16 +241,38 @@ def main():
                 s = load_sign(path)
                 m = sign_mask(s)
                 # 先把检测框收缩到原标牌实际轮廓，避免新牌比原牌大一圈
+                # 旋转对齐：标牌在画面里有旋转角时，素材也要转同样角度。
+                # 实测 200 帧里 81.5% 是圆/方牌（旋转对称，角度无意义），
+                # 16% 能估出角度、其中 |角度| 90 分位 33 度 —— 这部分贴正的会明显假。
+                if not a.no_rotate:
+                    try:
+                        ang, ainfo = estimate_angle(out_im, d["bbox"])
+                        if abs(ang) >= 1.0:
+                            s_rot = rotate_asset(s, ang)
+                            m_rot = sign_mask(s_rot)
+                            s, m = s_rot, m_rot
+                            rot_applied += 1
+                    except Exception:
+                        pass
+
                 # 实测结论（14 个样本，用红色外圈做真值）：
                 #   YOLO 框画的是「白色内圈」，不含红色外圈；
                 #   红圈比框平均大 (+5.3, +11.0) px。
                 #   所以贴图要按「框 × 1.12」放大，而不是缩小 ——
                 #   缩小会让原牌红圈整圈露在外面（用户反馈的那种「重影」）。
                 # --grow 控制放大倍数，默认 1.12。
+                # 动态 grow：框刚好圈住红圈时（占比 >= 0.97）不放大，
+                # 否则会越过框边界压到方底板上相邻的标牌。
+                g_use = a.grow
+                if not a.fixed_grow:
+                    try:
+                        g_use = grow_for_frame(out_im, d["bbox"], fallback=a.grow)
+                    except Exception:
+                        g_use = a.grow
                 cx = (d["bbox"][0] + d["bbox"][2]) * 0.5
                 cy = (d["bbox"][1] + d["bbox"][3]) * 0.5
-                hw = (d["bbox"][2] - d["bbox"][0]) * 0.5 * a.grow
-                hh = (d["bbox"][3] - d["bbox"][1]) * 0.5 * a.grow
+                hw = (d["bbox"][2] - d["bbox"][0]) * 0.5 * g_use
+                hh = (d["bbox"][3] - d["bbox"][1]) * 0.5 * g_use
                 grown = [cx - hw, cy - hh, cx + hw, cy + hh]
                 bbox = fit_bbox(grown, m.shape)
                 # 底板方案试过并放弃：
@@ -393,6 +424,7 @@ def main():
         "tune_saved": tune_saved,
         "gate4_enabled": a.gate4,
         "gate4_reject": g4_reject,
+        "rotate_applied": rot_applied,
         "sd_enabled": a.sd,
         "sd_refined": sd_count,
         "sd_fail": sd_fail,
@@ -415,6 +447,8 @@ def main():
             print("寻优救回 %d 张" % tune_saved)
     if a.gate4:
         print("Gate4 模型自检剔除 %d 张" % g4_reject)
+    if not a.no_rotate:
+        print("旋转对齐 %d 个标牌" % rot_applied)
     if a.sd:
         print("SD 精修 %d 张（失败 %d）" % (sd_count, sd_fail))
         print("质检剔除 %d 张%s" % (qc_reject,
