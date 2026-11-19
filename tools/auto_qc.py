@@ -164,4 +164,82 @@ def qc_check(orig, composed, bbox, shape="circle",
 
     return True, info
 
+_yolo_cache = {}
+
+
+def _get_model(weights="/opt/ad_mining/tsr_sign.pt"):
+    """懒加载 YOLO，整个进程只加载一次（22MB 模型反复加载很慢）。"""
+    if weights not in _yolo_cache:
+        try:
+            from ultralytics import YOLO
+            _yolo_cache[weights] = YOLO(weights)
+        except Exception:
+            _yolo_cache[weights] = None
+    return _yolo_cache[weights]
+
+
+def gate4_model_check(composed, bbox, target_class, weights="/opt/ad_mining/tsr_sign.pt",
+                      conf_min=0.35, pad_ratio=0.35):
+    """Gate 4：感知模型自检 —— 把合成后的标牌喂回 YOLO，看能不能认出来。
+
+    为什么需要这一道：
+      前三道门控（几何/边缘/亮度）都是像素级判断，只能证明「贴得不突兀」，
+      不能证明「模型能识别」。而我们的产出最终是给训练用的 ——
+      如果连现有检测模型都认不出来，这个样本对训练就没有价值。
+
+    做法：
+      从合成图里裁出标牌区域（外扩 pad_ratio），送进 YOLO。
+      只要模型在该区域检出任意标牌、且置信度 >= conf_min，就算通过。
+      （不严格比对类别名 —— 各数据集类别命名不统一，能认出来就说明画质合格）
+
+    返回 (passed, info)
+    """
+    import cv2
+
+    model = _get_model(weights)
+    if model is None:
+        return True, {"model_check": "skipped"}      # 模型不可用就不拦
+
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    H, W = composed.shape[:2]
+    bw, bh = x2 - x1, y2 - y1
+    if bw < 24 or bh < 24:
+        return True, {"model_check": "too_small"}
+
+    pad = int(max(bw, bh) * pad_ratio)
+    cx1 = max(0, x1 - pad)
+    cy1 = max(0, y1 - pad)
+    cx2 = min(W, x2 + pad)
+    cy2 = min(H, y2 + pad)
+    crop = composed[cy1:cy2, cx1:cx2]
+    if crop.size == 0:
+        return True, {"model_check": "empty_crop"}
+
+    # 放大到至少 320px，YOLO 对小图不敏感
+    h, w = crop.shape[:2]
+    if max(h, w) < 320:
+        sc = 320.0 / max(h, w)
+        crop = cv2.resize(crop, (int(w * sc), int(h * sc)), interpolation=cv2.INTER_CUBIC)
+
+    try:
+        res = model(crop, conf=conf_min, verbose=False)[0]
+    except Exception:
+        return True, {"model_check": "infer_failed"}
+
+    if res.boxes is None or len(res.boxes) == 0:
+        return False, {"model_check": "no_detection"}
+
+    confs = [float(b.conf[0]) for b in res.boxes]
+    best = max(confs)
+    cls_ids = [int(b.cls[0]) for b in res.boxes]
+    names = model.names if hasattr(model, "names") else {}
+    best_idx = confs.index(best)
+    best_cls = names.get(cls_ids[best_idx], str(cls_ids[best_idx]))
+
+    if best < conf_min:
+        return False, {"model_check": "low_conf_%.2f" % best}
+    return True, {"model_check": "ok", "pred_class": str(best_cls),
+                  "pred_conf": round(best, 2)}
+
+
 

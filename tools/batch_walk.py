@@ -65,6 +65,11 @@ def main():
     ap.add_argument("--grow", type=float, default=1.12,
                     help="粘贴区域放大倍数（默认 1.12，盖住原牌描边；"
                          "1.0 按检测框原尺寸，实测会露出原牌边缘）")
+    ap.add_argument("--tune", action="store_true",
+                    help="逐帧自动寻优 grow/brightness（QC 不通过时尝试其他参数组合）")
+    ap.add_argument("--gate4", action="store_true",
+                    help="启用 Gate4 模型自检：合成图喂回 YOLO，认不出来就丢弃")
+    ap.add_argument("--gate4-conf", type=float, default=0.35)
     ap.add_argument("--qc", action="store_true",
                     help="开启自动质检：写盘前跑三道门控，不合格的样本直接丢弃")
     ap.add_argument("--qc-edge", type=float, default=38.0,
@@ -87,7 +92,8 @@ def main():
                                   contrast_gain=a.contrast_gain, satur_keep=a.satur_keep,
                                   feather_ratio=a.feather_ratio)
     from sign_occlusion import detect_occluder, add_backing_plate
-    from auto_qc import qc_check
+    from auto_qc import qc_check, gate4_model_check
+    from auto_tune import best_params_for_frame
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
                                fit_to_inner, measure_face)
@@ -105,6 +111,8 @@ def main():
 
     ok = skip_no_sign = skip_small = fail = 0
     qc_reject = 0
+    tune_saved = 0
+    g4_reject = 0
     qc_reasons = {}
     summary = []
     total = len(files)
@@ -252,8 +260,50 @@ def main():
                         why = info0.get("reason", "unknown")
                         break
                 if not frame_ok:
-                    qc_reject += 1
-                    qc_reasons[why.split("_")[0]] = qc_reasons.get(why.split("_")[0], 0) + 1
+                    # 寻优：换 grow/brightness 再试，能救回来就用救回来的
+                    if a.tune:
+                        tuned_ok = False
+                        for d0 in [x[0] for x in keep_dets]:
+                            sh0 = std_shape(im, d0["bbox"])
+                            if sh0 == "unknown":
+                                sh0 = "circle"
+                            cands0 = [(nm, pp) for nm, pp in table.items()
+                                      if (nm == d0["class"] or nm.startswith(d0["class"] + "_"))
+                                      and asset_shape(nm) == ("triangle" if sh0 == "triangle"
+                                                              else "rect" if sh0 == "square" else "circle")]
+                            if not cands0:
+                                continue
+                            _, path0 = cands0[0]
+                            s0 = load_sign(path0)
+                            m0 = sign_mask(s0)
+                            g_, bg_, info_, comp_ = best_params_for_frame(
+                                im, s0[:, :, :3], m0, d0["bbox"], sh0,
+                                stop_on_first_pass=False)
+                            if info_.get("passed"):
+                                out_im = comp_
+                                tuned_ok = True
+                                tune_saved += 1
+                                break
+                        if not tuned_ok:
+                            qc_reject += 1
+                            qc_reasons[why.split("_")[0]] = qc_reasons.get(why.split("_")[0], 0) + 1
+                            continue
+                    else:
+                        qc_reject += 1
+                        qc_reasons[why.split("_")[0]] = qc_reasons.get(why.split("_")[0], 0) + 1
+                        continue
+
+            # Gate4：模型自检 —— 合成图喂回 YOLO，认不出来就说明这帧对训练没价值
+            if a.gate4:
+                g4_ok = True
+                for ob in objects:
+                    ok4, info4 = gate4_model_check(out_im, ob["bbox"], ob["class"],
+                                                   conf_min=a.gate4_conf)
+                    if not ok4:
+                        g4_ok = False
+                        g4_reject += 1
+                        break
+                if not g4_ok:
                     continue
 
             out_jpg = os.path.join(a.out, stem + "_composed.jpg")
@@ -296,6 +346,9 @@ def main():
         "vary_class": a.vary_class,
         "qc_enabled": a.qc,
         "qc_reject": qc_reject,
+        "tune_saved": tune_saved,
+        "gate4_enabled": a.gate4,
+        "gate4_reject": g4_reject,
         "qc_reject_reasons": qc_reasons,
         "simulation_params": dict(effective_params),
         "bbox_grow": a.grow,
@@ -311,6 +364,10 @@ def main():
     print("跳过：无标牌 %d，标牌太小 %d；失败 %d"
           % (skip_no_sign, skip_small, fail))
     if a.qc:
+        if a.tune:
+            print("寻优救回 %d 张" % tune_saved)
+    if a.gate4:
+        print("Gate4 模型自检剔除 %d 张" % g4_reject)
         print("质检剔除 %d 张%s" % (qc_reject,
               ("（%s）" % ", ".join("%s:%d" % kv for kv in qc_reasons.items())) if qc_reasons else ""))
     print("类别分布 Top10:")
