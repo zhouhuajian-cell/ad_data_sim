@@ -65,6 +65,12 @@ def main():
     ap.add_argument("--grow", type=float, default=1.12,
                     help="粘贴区域放大倍数（默认 1.12，盖住原牌描边；"
                          "1.0 按检测框原尺寸，实测会露出原牌边缘）")
+    ap.add_argument("--qc", action="store_true",
+                    help="开启自动质检：写盘前跑三道门控，不合格的样本直接丢弃")
+    ap.add_argument("--qc-edge", type=float, default=38.0,
+                    help="边缘跳变阈值（默认 38）")
+    ap.add_argument("--qc-bright", type=float, default=38.0,
+                    help="亮度偏差阈值（默认 38）")
     ap.add_argument("--realism", default="v3", choices=["v2", "v3"],
                     help="劣化算法版本：v3（P5-P95黑白点映射+迭代模糊匹配）或 v2（旧版）")
     ap.add_argument("--jobs-progress", default="",
@@ -81,6 +87,7 @@ def main():
                                   contrast_gain=a.contrast_gain, satur_keep=a.satur_keep,
                                   feather_ratio=a.feather_ratio)
     from sign_occlusion import detect_occluder, add_backing_plate
+    from auto_qc import qc_check
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
                                fit_to_inner, measure_face)
@@ -97,6 +104,8 @@ def main():
     print("  素材库 %s: %d 个类别" % (a.country, len(table)), flush=True)
 
     ok = skip_no_sign = skip_small = fail = 0
+    qc_reject = 0
+    qc_reasons = {}
     summary = []
     total = len(files)
 
@@ -227,6 +236,26 @@ def main():
                 skip_no_sign += 1
                 continue
 
+            # 自动质检：任一标牌不过就不写盘，直接计入 qc_reject
+            if a.qc:
+                frame_ok = True
+                why = ""
+                for d0, ob in zip([x[0] for x in keep_dets], objects):
+                    sh0 = std_shape(im, d0["bbox"])
+                    if sh0 == "unknown":
+                        sh0 = "circle"
+                    ok0, info0 = qc_check(im, out_im, ob["bbox"], sh0,
+                                          edge_jump_max=a.qc_edge,
+                                          bright_diff_max=a.qc_bright)
+                    if not ok0:
+                        frame_ok = False
+                        why = info0.get("reason", "unknown")
+                        break
+                if not frame_ok:
+                    qc_reject += 1
+                    qc_reasons[why.split("_")[0]] = qc_reasons.get(why.split("_")[0], 0) + 1
+                    continue
+
             out_jpg = os.path.join(a.out, stem + "_composed.jpg")
             cv2.imwrite(out_jpg, out_im, [cv2.IMWRITE_JPEG_QUALITY, 95])
             rec = {
@@ -265,6 +294,9 @@ def main():
         "elapsed_sec": round(dt, 1),
         "min_sign_px": a.min_sign,
         "vary_class": a.vary_class,
+        "qc_enabled": a.qc,
+        "qc_reject": qc_reject,
+        "qc_reject_reasons": qc_reasons,
         "simulation_params": dict(effective_params),
         "bbox_grow": a.grow,
         "class_distribution": dict(sorted(cls_count.items(), key=lambda kv: -kv[1])),
@@ -278,6 +310,9 @@ def main():
     print("扫描 %d 个文件，生成 %d 张（%.0f 秒）" % (total, ok, dt))
     print("跳过：无标牌 %d，标牌太小 %d；失败 %d"
           % (skip_no_sign, skip_small, fail))
+    if a.qc:
+        print("质检剔除 %d 张%s" % (qc_reject,
+              ("（%s）" % ", ".join("%s:%d" % kv for kv in qc_reasons.items())) if qc_reasons else ""))
     print("类别分布 Top10:")
     for c, n in list(rep["class_distribution"].items())[:10]:
         print("  %-28s %4d" % (c, n))
