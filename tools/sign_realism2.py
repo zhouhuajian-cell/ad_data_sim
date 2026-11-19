@@ -70,7 +70,7 @@ def scene_stats(image, bbox, ring_ratio=1.6):
 # 可调参数（面板滑块控制）
 # 默认值来自用户实测调优（阴雨天南美实拍场景），偏暗一档更贴近真实拍摄
 PARAMS = {
-    "bright_gain": 0.50,     # 目标亮度 = 环境亮分位 × gain（调小变暗）
+    "bright_gain": 0.62,     # 目标亮度 = 环境亮分位 × gain（调小变暗）
     "haze_gain": 0.75,       # 雾度强度（调小更实、对比更强）
     "contrast_gain": 1.15,   # 对比度相对环境的倍数（调小更灰）
     "satur_keep": 0.70,      # 雾天饱和度保留比例（调小更灰）
@@ -140,7 +140,7 @@ def degrade_v2(sign_bgr, mask, ref_patch, scene, strength=1.0):
         if n_std > 0.4:
             p = p + np.random.normal(0, n_std, p.shape).astype(np.float32)
         ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
-                               [cv2.IMWRITE_JPEG_QUALITY, 58])
+                               [cv2.IMWRITE_JPEG_QUALITY, 70])
         if ok:
             p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
 
@@ -193,8 +193,8 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
 
     bg_l = bg_lab[:, :, 0][valid]
     as_l = as_lab[:, :, 0][valid]
-    p5_bg, p95_bg = np.percentile(bg_l, [10, 90])   # P10~P90 比 P5~P95 更稳
-    p5_as, p95_as = np.percentile(as_l, [10, 90])
+    p5_bg, p95_bg = np.percentile(bg_l, [5, 95])
+    p5_as, p95_as = np.percentile(as_l, [5, 95])
 
     # 目标亮度：跟随环境，但受 brightness_gain 控制
     gain = PARAMS["bright_gain"]
@@ -206,7 +206,7 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
 
     scale_l = (p95_bg - p5_bg) / (p95_as - p5_as + 1e-5)
     # 限制对比度缩放，避免过度拉伸
-    scale_l = float(np.clip(scale_l, 0.55, 1.6))
+    scale_l = float(np.clip(scale_l, 0.60, 1.8))
     as_lab[:, :, 0] = (as_lab[:, :, 0] - p5_as) * scale_l + p5_bg + shift
     as_lab[:, :, 0] = np.clip(as_lab[:, :, 0], 0, 255)
 
@@ -231,7 +231,10 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
     bg_s90 = float(np.percentile(bg_hsv[:, :, 1][valid], 90))
     as_s90 = float(np.percentile(cur_hsv[:, :, 1][valid], 90))
     if as_s90 > 1e-3:
-        sat_scale = min(1.0, (bg_s90 * 1.05) / as_s90)
+        _full = min(1.0, (bg_s90 * 1.05) / as_s90)
+        # 压制减半：实测全压让 S_P90 从 154.6 掉到 114（-26%），
+        # 原牌红圈的鲜艳感被磨没了，看着假。只压 40%。
+        sat_scale = 1.0 - (1.0 - _full) * 0.4
         # 与全局 satur_keep 取较小值，保证不会比原来更饱和
         sat_scale = min(sat_scale, 1.0)
         cur_hsv[:, :, 1] = np.clip(cur_hsv[:, :, 1] * sat_scale, 0, 255)
@@ -264,7 +267,7 @@ def degrade_v3(sign_bgr, mask, ref_patch, scene, strength=1.0):
         p = p + np.random.normal(0, noise_std, p.shape).astype(np.float32)
 
     ok, buf = cv2.imencode(".jpg", np.clip(p, 0, 255).astype(np.uint8),
-                           [cv2.IMWRITE_JPEG_QUALITY, 58])
+                           [cv2.IMWRITE_JPEG_QUALITY, 70])
     if ok:
         p = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
 
