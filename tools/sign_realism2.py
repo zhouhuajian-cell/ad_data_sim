@@ -381,6 +381,20 @@ def paste_v2(image, sign_bgr, sign_alpha, bbox, strength=1.0, edge_glow=True,
     full_mask[y1:y2, x1:x2] = soft.astype(np.uint8)
     out = apply_jpeg_artifact(out, full_mask, jq)
 
+    # ④ 压缩后饱和度补偿
+    # 实测：JPEG 压缩本身会掉饱和度（P90 比原牌低 29），
+    # 在压缩之后按原牌的高饱和区水平补回来一部分，避免标牌发灰。
+    ref_hsv = cv2.cvtColor(ref.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    ref_s90 = float(np.percentile(ref_hsv[:, :, 1], 90))
+    roi_now = out[y1:y2, x1:x2]
+    cur_hsv = cv2.cvtColor(roi_now, cv2.COLOR_BGR2HSV).astype(np.float32)
+    cur_s90 = float(np.percentile(cur_hsv[:, :, 1], 90))
+    if cur_s90 > 1e-3 and ref_s90 > cur_s90:
+        boost = min(1.45, ref_s90 / cur_s90)          # 最多补到 1.45 倍
+        cur_hsv[:, :, 1] = np.clip(cur_hsv[:, :, 1] * boost, 0, 255)
+        out[y1:y2, x1:x2] = cv2.cvtColor(cur_hsv.astype(np.uint8),
+                                         cv2.COLOR_HSV2BGR)
+
     return out, {
         "ok": True, "scene": {k: round(v, 1) for k, v in scene.items()},
         "jpeg_quality": jq,
