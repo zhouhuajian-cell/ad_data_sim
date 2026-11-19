@@ -69,8 +69,14 @@ def main():
                          "1.0 按检测框原尺寸，实测会露出原牌边缘）")
     ap.add_argument("--tune", action="store_true",
                     help="逐帧自动寻优 grow/brightness（QC 不通过时尝试其他参数组合）")
+    # SD 精修实测结论（三轮参数搜索）：
+    #   SDXL + ControlNet（strength 0.28~0.58、canny 0.75~1.0）会把红圈重绘成
+    #   粗黑边卡通样式、字体改成 AI 风格，连中性 prompt 也救不回来。
+    #   SD 1.5 低强度（0.20~0.24）不篡改字形，但融合幅度极小。
+    # 数据生产要的是「结构 100% 准确 + 画质自然退化」，
+    # 引入不可控生成模型的风险大于收益，所以默认关闭，只留作实验开关。
     ap.add_argument("--sd", action="store_true",
-                    help="用 Stable Diffusion 局部重绘精修（光影融合），需要 /data/models/sd15-inpaint")
+                    help="[实验性，不推荐] SD 局部重绘精修；实测会篡改标牌设计风格")
     ap.add_argument("--sd-strength", type=float, default=None,
                     help="SD 重绘幅度；不给就按标牌尺寸自动选 0.20~0.28")
     ap.add_argument("--sd-model", default="/data/models/sd15-inpaint")
