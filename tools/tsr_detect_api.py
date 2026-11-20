@@ -52,6 +52,9 @@ def main():
             })
         out["ok"] = True
         out["count"] = len(dets)
+        # 返回原图尺寸：bbox 就是在该坐标系下的，前端画框要用它换算
+        out["width"] = int(im.shape[1])
+        out["height"] = int(im.shape[0])
     except Exception as e:
         out["error"] = str(e)[:300]
 

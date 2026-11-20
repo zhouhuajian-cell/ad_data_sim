@@ -52,6 +52,9 @@ def main():
         from batch_replace import (detect_shape, shape_matches, fit_bbox,
                                    list_signs, pick_neutral_asset)
         _br.STRICT_SHAPE = bool(a.strict_shape)
+        import sign_realism2 as _srdbg
+        import sys as _sysdbg
+        _sysdbg.stderr.write('[DEBUG_PARAMS] %r\n' % (_srdbg.PARAMS,))
 
         im = cv2.imread(a.image)
         if im is None:

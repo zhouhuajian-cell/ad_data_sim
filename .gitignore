@@ -1,17 +1,19 @@
 # Python
 __pycache__/
 *.py[cod]
+*.so
 
-# 本仓库运行/自检产物（不入库）
+# 运行产物
 _dryrun/
 dashboard/jobs/
+dashboard/logs/
 dashboard/config.json
 *.log
 
 # Office 临时锁文件
 ~$*
 
-# UE 工程中间产物（本目录是脚本仓，防误提交工程缓存）
+# UE 工程中间产物
 Intermediate/
 Saved/
 Binaries/
@@ -22,19 +24,33 @@ DerivedDataCache/
 _ui*.png
 _*.png
 _*.jpg
+browser-screenshots/
 
-# 模型文件（不纳入版本控制，太大）
+# 大模型文件（不纳入版本控制）
 sdxl_files/
 sd_files/
 *.safetensors
 *.ckpt
 *.pth
 *.pt
+*.onnx
 
-# 报告 html（几十 MB，图片内嵌）
-TSR_*张_*.html
-TSR仿真_*.html
+# 大报告 HTML（内嵌图片）
+TSR_*样张*.html
 
-# 临时
-_*.jpg
-_*.png
+# 备份与清理暂存
+*.bak
+*.bak.*
+*.bak_*
+*.broken*
+_trash*/
+_trash_local/
+_sync/
+*.tgz
+*.zip
+
+# 交接包（本地临时）
+handoff/
+
+# 大文档
+*.docx

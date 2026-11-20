@@ -4,7 +4,7 @@
 # 怎么跑：python queue_gen.py --scenes scenes.json --lights lights.json --targets targets.json \
 #              --cameras cameras.json -o /data/queue/tasks.jsonl --seed 20261113
 # 成功判据：输出行数 = 四个输入的组合数；幂等（同参数重跑内容一致）；输入缺字段直接报错不写文件。
-# 字段契约见仓库根目录 config字段说明.md；类别表与 batch_capture.SEMANTIC_STENCIL、pack_dataset.CLASSES 同源，
+# 字段契约见 config/README.md；类别表与 batch_capture.SEMANTIC_STENCIL、pack_dataset.CLASSES 同源，
 # 改一处必须同步另外两处（三处都在各自文件头注明）。
 import argparse
 import itertools

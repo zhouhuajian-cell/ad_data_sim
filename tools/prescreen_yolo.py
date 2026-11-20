@@ -40,6 +40,11 @@ def main():
     ap.add_argument("--min-px", type=int, default=24)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--copy-to", default="", help="把命中的图片复制到该目录")
+    ap.add_argument("--progress", default="", help="进度文件路径（前端轮询用）")
+    ap.add_argument("--recursive", action="store_true",
+                    help="递归子目录（网盘数据是 images/<序列>/<帧>.jpg）")
+    ap.add_argument("--thumb-dir", default="", help="缩略图输出目录")
+    ap.add_argument("--pin-class", default="", help="只保留这一类")
     a = ap.parse_args()
 
     if not os.path.isdir(a.dir):
@@ -47,9 +52,49 @@ def main():
                          ensure_ascii=False))
         return 2
 
-    files = sorted(f for f in os.listdir(a.dir) if f.lower().endswith(EXTS))
+    if a.recursive:
+        # 用带进度回调的遍历，边扫边报，避免前端一直 0/0
+        try:
+            from batch_walk import walk_images
+        except Exception:
+            walk_images = None
+        if walk_images is not None:
+            def _on_scan(nfile, ndir, cur):
+                if a.progress:
+                    try:
+                        json.dump({"done": 0, "total": 0, "usable": 0, "hits": 0,
+                                   "finished": False, "phase": "scan",
+                                   "scanned": nfile, "dirs": ndir},
+                                  open(a.progress, "w", encoding="utf-8"))
+                    except Exception:
+                        pass
+                if nfile and nfile % 2000 == 0:
+                    print("扫描中：%d 目录 / %d 图" % (ndir, nfile),
+                          file=sys.stderr, flush=True)
+            files = walk_images(a.dir, 2000000, _on_scan, every=100)
+        else:
+            files = []
+            for rt, dns, fns in os.walk(a.dir):
+                dns[:] = [d for d in dns if not d.startswith(".")]
+                for fn in fns:
+                    if fn.lower().endswith(EXTS):
+                        files.append(os.path.join(rt, fn))
+            files.sort()
+    else:
+        files = sorted(os.path.join(a.dir, f) for f in os.listdir(a.dir)
+                       if f.lower().endswith(EXTS))
     if a.limit > 0:
         files = files[:a.limit]
+    print("共 %d 张图" % len(files), file=sys.stderr, flush=True)
+    # 扫描完成，立刻告诉前端总量（否则前端一直显示 3%）
+    if a.progress:
+        try:
+            json.dump({"done": 0, "total": len(files), "usable": 0, "hits": 0,
+                       "finished": False, "phase": "running",
+                       "scanned": len(files)},
+                      open(a.progress, "w", encoding="utf-8"))
+        except Exception:
+            pass
 
     result = {"ok": True, "dir": a.dir, "total": len(files), "hits": 0,
               "usable_hits": 0, "results": []}
@@ -65,24 +110,68 @@ def main():
     if a.copy_to:
         os.makedirs(a.copy_to, exist_ok=True)
 
-    for i, fn in enumerate(files):
-        p = os.path.join(a.dir, fn)
-        rec = {"file": fn, "n": 0, "usable": 0, "dets": []}
+    def write_progress(done, total, usable, hits):
+        if not a.progress:
+            return
+        try:
+            with open(a.progress, "w", encoding="utf-8") as pf:
+                json.dump({"done": done, "total": total, "usable": usable,
+                           "hits": hits, "finished": False}, pf)
+        except Exception:
+            pass
+
+    if a.thumb_dir:
+        os.makedirs(a.thumb_dir, exist_ok=True)
+
+    for i, p in enumerate(files):
+        fn = os.path.basename(p)
+        seq = os.path.basename(os.path.dirname(p))
+        stem = "%s__%s" % (seq, os.path.splitext(fn)[0])
+        rec = {"file": fn, "stem": stem, "path": p, "seq": seq,
+               "n": 0, "usable": 0, "dets": []}
         try:
             dets = detect_signs(p, a.conf)
             rec["n"] = len(dets)
             if dets:
                 im = cv2.imread(p)
                 for d in dets:
+                    cls = d.get("class") or d.get("cls") or ""
+                    # 指定标牌：类族过滤
+                    if a.pin_class:
+                        parts = a.pin_class.split("_")
+                        fam = ["_".join(parts[:k]) for k in range(min(3, len(parts)), 0, -1)]
+                        if not any(cls.startswith(f) for f in fam):
+                            continue
                     shape = detect_shape(im, d["bbox"]) if im is not None else "unknown"
                     ok = d["w"] >= a.min_px and shape != "unknown"
-                    rec["dets"].append({"class": d["class"], "conf": d["conf"],
+                    rec["dets"].append({"class": cls, "conf": d["conf"],
                                         "w": d["w"], "h": d["h"], "shape": shape,
-                                        "usable": ok})
+                                        "bbox": d["bbox"], "usable": ok})
                     if ok:
                         rec["usable"] += 1
         except Exception as e:
             rec["error"] = str(e)[:120]
+        # 生成缩略图（整图 + 标牌特写）
+        if a.thumb_dir and rec["usable"] > 0:
+            try:
+                im2 = cv2.imread(p)
+                if im2 is not None:
+                    h, w = im2.shape[:2]
+                    sc = 320.0 / max(w, 1)
+                    small = cv2.resize(im2, (int(w * sc), int(h * sc)))
+                    cv2.imwrite(os.path.join(a.thumb_dir, stem + ".jpg"), small,
+                                [cv2.IMWRITE_JPEG_QUALITY, 72])
+                    best = max([x for x in rec["dets"] if x["usable"]],
+                               key=lambda x: x["w"] * x["h"])
+                    x1, y1, x2, y2 = [int(v) for v in best["bbox"]]
+                    crop = im2[max(0, y1):y2, max(0, x1):x2]
+                    if crop.size > 0:
+                        cv2.imwrite(os.path.join(a.thumb_dir, stem + "_sign.jpg"),
+                                    cv2.resize(crop, (72, 72)),
+                                    [cv2.IMWRITE_JPEG_QUALITY, 82])
+            except Exception:
+                pass
+
         if rec["n"] > 0:
             result["hits"] += 1
         if rec["usable"] > 0:
@@ -95,14 +184,23 @@ def main():
                     pass
         result["results"].append(rec)
 
-        if (i + 1) % 20 == 0:
-            print("  [%d/%d] 已有标牌 %d 张" % (i + 1, len(files), result["usable_hits"]),
+        if (i + 1) % 10 == 0 or (i + 1) == len(files):
+            write_progress(i + 1, len(files), result["usable_hits"], result["hits"])
+            print("  [%d/%d] 有标牌 %d 张" % (i + 1, len(files), result["usable_hits"]),
                   file=sys.stderr, flush=True)
 
     out = a.out or os.path.join("/tmp", "prescreen_%d.json" % os.getpid())
     with open(out, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=1, ensure_ascii=False)
     result["out"] = out
+    if a.progress:
+        try:
+            with open(a.progress, "w", encoding="utf-8") as pf:
+                json.dump({"done": len(files), "total": len(files),
+                           "usable": result["usable_hits"], "hits": result["hits"],
+                           "finished": True, "out": out}, pf)
+        except Exception:
+            pass
     print(json.dumps({k: result[k] for k in
                       ("ok", "total", "hits", "usable_hits", "out")}, ensure_ascii=False))
     return 0

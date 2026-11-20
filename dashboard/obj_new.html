@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OBJ 前景工厂 · 施工占道</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d1017;color:#e3e8f0;
+       font:14px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC",sans-serif}
+  a{color:#6ea8ff;text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{display:flex;align-items:center;gap:18px;padding:12px 22px;
+         background:#131821;border-bottom:1px solid #212836;
+         position:sticky;top:0;z-index:20}
+  header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px}
+  header .tag{font-size:11px;padding:2px 7px;border-radius:4px;
+              background:#1c2a3d;color:#6ea8ff}
+  header .sp{flex:1}
+  header nav a{font-size:13px;margin-left:16px;color:#8492a8}
+  header nav a.on{color:#6ea8ff;font-weight:600}
+
+  .layout{display:grid;grid-template-columns:330px 1fr;gap:0;min-height:calc(100vh - 57px)}
+  aside{background:#10151d;border-right:1px solid #1c222e;padding:18px 16px;
+        overflow-y:auto;max-height:calc(100vh - 57px)}
+  main{padding:18px 22px 60px;overflow-y:auto;max-height:calc(100vh - 57px)}
+
+  .sec{margin-bottom:22px}
+  .sec>h2{font-size:12px;margin:0 0 10px;color:#6f7d94;font-weight:600;
+          text-transform:uppercase;letter-spacing:.6px}
+  label.f{display:block;margin-bottom:12px;font-size:12px;color:#8895aa}
+  label.f>span{display:block;margin-bottom:4px}
+  input,select{width:100%;background:#0b0f16;border:1px solid #232b39;
+               color:#e3e8f0;border-radius:6px;padding:7px 10px;font-size:13px}
+  input:focus,select:focus{outline:none;border-color:#2f5fb3}
+
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+  .chip{padding:5px 10px;border-radius:14px;background:#171d28;
+        border:1px solid #232b39;font-size:12px;cursor:pointer;color:#9aa8be}
+  .chip.on{background:#1a3050;border-color:#2f5fb3;color:#8fb8ff}
+  .chip:hover{background:#1d2532}
+
+  button{background:#2563eb;color:#fff;border:0;border-radius:6px;
+         padding:9px 16px;cursor:pointer;font-size:13px;font-weight:500}
+  button:hover{background:#1d4ed8}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:#1a2130;color:#b9c6da;border:1px solid #263042}
+  button.ghost:hover{background:#222c3d}
+  button.wide{width:100%;margin-bottom:8px}
+  .step{display:flex;align-items:center;gap:8px;font-size:11px;
+        color:#6f7d94;margin-bottom:6px}
+  .step .num{width:18px;height:18px;border-radius:9px;background:#1c2433;
+             display:grid;place-items:center;font-size:10px;color:#7f8ea8}
+  .step.on .num{background:#2f5fb3;color:#fff}
+
+  .msg{font-size:12px;min-height:18px;margin-top:6px;color:#6f7d94}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:8px 10px;color:#6f7d94;font-weight:500;
+     font-size:11px;text-transform:uppercase;letter-spacing:.5px;
+     border-bottom:1px solid #1c222e;position:sticky;top:0;background:#0d1017}
+  td{padding:9px 10px;border-bottom:1px solid #161c26}
+  tr:hover td{background:#141a24;cursor:pointer}
+  tr.sel td{background:#16202f}
+
+  .st{display:inline-block;padding:2px 8px;border-radius:10px;
+      font-size:11px;font-weight:600}
+  .SUCCEEDED,.PASSED{background:#0f2f1e;color:#4ade80}
+  .PARTIAL{background:#2f2712;color:#fbbf24}
+  .FAILED{background:#331414;color:#f87171}
+  .RUNNING,.RENDERED{background:#12243a;color:#60a5fa}
+
+  .bar{display:flex;height:6px;border-radius:3px;overflow:hidden;
+       background:#1a2130;margin-top:5px}
+  .bar span{height:100%}
+
+  .kpis{display:flex;gap:22px;flex-wrap:wrap;margin:14px 0 18px}
+  .kpi .n{font-size:24px;font-weight:600;line-height:1.1}
+  .kpi .l{font-size:11px;color:#6f7d94;margin-top:2px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px}
+  .card{background:#111620;border:1px solid #1c222e;border-radius:8px;overflow:hidden}
+  .card img{width:100%;display:block;aspect-ratio:16/9;object-fit:cover;background:#000}
+  .card .im{position:relative}
+  .card .badge{position:absolute;top:8px;left:8px;font-size:10px;
+               padding:2px 7px;border-radius:4px;background:#000a;color:#cfe0ff}
+  .card .meta{padding:9px 11px;font-size:12px;color:#8b99af}
+  .card .meta b{color:#d8e2f0;font-weight:600}
+  .card .meta .oc{color:#fbbf24}
+
+  .empty{padding:40px;text-align:center;color:#5c6a80;font-size:13px}
+  .det{display:none}
+  .det.on{display:block}
+  .hint{font-size:11px;color:#5c6a80;margin-top:4px}
+  .downloads{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 18px}
+  .downloads a{font-size:12px;padding:6px 12px;border-radius:6px;
+               background:#1a2130;border:1px solid #263042;color:#b9c6da}
+  .downloads a:hover{background:#222c3d;text-decoration:none}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>OBJ 前景工厂</h1>
+  <span class="tag">3D-to-Real · 施工占道</span>
+  <span class="sp"></span>
+  <nav>
+    <a href="/">主控台</a>
+    <a href="/obj" class="on">OBJ</a>
+    <a href="/gnd">GND</a>
+    <a href="/gallery">TSR 画廊</a>
+    <a href="/tsr">TSR</a>
+  </nav>
+</header>
+
+<div class="layout">
+
+  <aside>
+    <div class="sec">
+      <h2>① 场景配置</h2>
+
+      <label class="f"><span>布局模式</span></label>
+      <div class="chips" id="layouts">
+        <span class="chip on" data-v="auto">自动轮换</span>
+        <span class="chip" data-v="cone_line">锥桶导流</span>
+        <span class="chip" data-v="truck_block">卡车封道</span>
+        <span class="chip" data-v="ped_cross">行人穿行</span>
+        <span class="chip" data-v="dense">密集锥阵</span>
+      </div>
+      <div class="hint">自动轮换 = 每帧依次切换 4 种布局</div>
+
+      <label class="f"><span>帧数</span>
+        <input id="fFrames" type="number" value="20" min="1" max="5000">
+      </label>
+
+      <label class="f"><span>底图</span>
+        <select id="fBg">
+          <option value="/data/render_hybrid/bgs/cand_03.jpg">cand_03 · 施工场地</option>
+          <option value="/data/render_hybrid/bgs/cand_09.jpg">cand_09 · 高速公路</option>
+          <option value="/data/render_hybrid/bgs/cand_06.jpg">cand_06 · 桥洞</option>
+          <option value="/data/render_hybrid/bgs/cand_10.jpg">cand_10 · 城市快速路</option>
+        </select>
+      </label>
+
+      <label class="f"><span>任务名（留空自动）</span>
+        <input id="fName" placeholder="batch_YYYYmmdd_HHMMSS">
+      </label>
+    </div>
+
+    <div class="sec">
+      <h2>② 提交</h2>
+      <div class="step" id="step1"><span class="num">1</span>预览 3 帧核对</div>
+      <button class="ghost wide" id="btnPreview">预览 3 帧</button>
+      <div class="step" id="step2"><span class="num">2</span>批量生产</div>
+      <button class="wide" id="btnSubmit">提交批量任务</button>
+      <div class="msg" id="msg"></div>
+    </div>
+
+    <div class="sec">
+      <h2>③ 说明</h2>
+      <div class="hint" style="line-height:1.8">
+        · 每帧输出：前景 RGB / 逐物体掩码 / 阴影 matte / 合成图 / COCO<br>
+        · 遮挡率为像素级真实值（1 - 可见/完整）<br>
+        · 任务状态写入 SQLite，可断点续跑<br>
+        · 单帧约 8~12 秒（1920×1080，含逐物体渲染）
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="sec">
+      <h2>任务列表</h2>
+      <table>
+        <thead><tr>
+          <th style="width:220px">任务 ID</th><th style="width:110px">状态</th>
+          <th style="width:70px">总帧</th><th style="width:70px">通过</th>
+          <th style="width:70px">失败</th><th style="width:180px">进度</th>
+          <th>更新时间</th>
+        </tr></thead>
+        <tbody id="jobRows">
+          <tr><td colspan="7" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="det" id="detail">
+      <div class="sec">
+        <h2>任务详情 · <span id="dId" style="color:#8fb8ff"></span></h2>
+        <div class="kpis" id="dKpi"></div>
+        <div class="downloads" id="dDownloads"></div>
+        <div class="row" style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+          <select id="fStatus" style="width:150px">
+            <option value="">全部状态</option>
+            <option value="PASSED">PASSED</option>
+            <option value="RENDERED">RENDERED</option>
+            <option value="FAILED">FAILED</option>
+          </select>
+          <span class="hint" id="dCount"></span>
+        </div>
+        <div class="grid" id="frameGrid"></div>
+      </div>
+    </div>
+
+    <div class="det" id="previewBox">
+      <div class="sec">
+        <h2>预览结果</h2>
+        <div class="grid" id="previewGrid"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let CUR = null;
+let LAYOUT = "auto";
+const BG_ROOT = "/data/render_hybrid/";
+
+/* ---------------- 布局选择 ---------------- */
+$("#layouts").addEventListener("click", e => {
+  const c = e.target.closest(".chip");
+  if (!c) return;
+  document.querySelectorAll("#layouts .chip").forEach(x => x.classList.remove("on"));
+  c.classList.add("on");
+  LAYOUT = c.dataset.v;
+});
+
+/* ---------------- 工具 ---------------- */
+function ts(t){
+  if(!t) return "-";
+  return new Date(t*1000).toLocaleString("zh-CN",{hour12:false});
+}
+function msg(s, ok){
+  const el = $("#msg");
+  el.textContent = s;
+  el.style.color = ok === false ? "#f87171" : (ok === true ? "#4ade80" : "#6f7d94");
+  if (s) setTimeout(()=>{ if(el.textContent===s) el.textContent=""; }, 8000);
+}
+async function jget(url){
+  const r = await fetch(url, {cache:"no-store"});
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.error || ("HTTP "+r.status));
+  return d;
+}
+function imgUrl(p){
+  return "/api/hybrid/artifact?path=" + encodeURIComponent(p);
+}
+
+/* ---------------- 任务列表 ---------------- */
+async function loadJobs(){
+  try{
+    const d = await jget("/api/hybrid/jobs?limit=100");
+    const tb = $("#jobRows");
+    if(!d.exists){ tb.innerHTML = '<tr><td colspan="7" class="empty">数据库不存在（首次提交后自动创建）</td></tr>'; return; }
+    if(!d.jobs.length){ tb.innerHTML = '<tr><td colspan="7" class="empty">还没有任务，先提交一个吧</td></tr>'; return; }
+    tb.innerHTML = d.jobs.map(j=>{
+      const t = j.total_frames||1;
+      const p = j.passed_frames||0, f = j.failed_frames||0;
+      return `<tr data-id="${j.job_id}" class="${j.job_id===CUR?'sel':''}">
+        <td><code style="color:#8fb8ff">${j.job_id}</code></td>
+        <td><span class="st ${j.status}">${j.status}</span></td>
+        <td>${j.total_frames}</td>
+        <td style="color:#4ade80">${p}</td>
+        <td style="color:#f87171">${f}</td>
+        <td><div class="bar">
+          <span style="width:${100*p/t}%;background:#4ade80"></span>
+          <span style="width:${100*f/t}%;background:#f87171"></span>
+        </div></td>
+        <td class="hint">${ts(j.updated_at)}</td>
+      </tr>`;
+    }).join("");
+  }catch(e){
+    $("#jobRows").innerHTML = `<tr><td colspan="7" class="empty">加载失败：${e.message}</td></tr>`;
+  }
+}
+$("#jobRows").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) showDetail(tr.dataset.id);
+});
+
+/* ---------------- 任务详情 ---------------- */
+async function showDetail(jobId){
+  CUR = jobId;
+  document.querySelectorAll("#jobRows tr").forEach(r=>{
+    r.classList.toggle("sel", r.dataset.id===jobId);
+  });
+  $("#previewBox").classList.remove("on");
+  $("#detail").classList.add("on");
+  $("#dId").textContent = jobId;
+
+  const d = await jget("/api/hybrid/job?job_id=" + encodeURIComponent(jobId));
+  const fs = d.frame_status || {};
+  const total = d.total_frames || 1;
+  const p = fs.PASSED||0, f = fs.FAILED||0, rd = fs.RENDERED||0;
+  const out = d.output_dir || "";
+
+  $("#dKpi").innerHTML = `
+    <div class="kpi"><div class="n">${d.total_frames}</div><div class="l">总帧数</div></div>
+    <div class="kpi"><div class="n" style="color:#4ade80">${p}</div><div class="l">已通过</div></div>
+    <div class="kpi"><div class="n" style="color:#f87171">${f}</div><div class="l">失败</div></div>
+    <div class="kpi"><div class="n" style="color:#60a5fa">${rd}</div><div class="l">仅渲染</div></div>
+    <div class="kpi" style="flex:1;min-width:220px">
+      <div class="hint">输出目录</div>
+      <div style="font-size:12px;color:#b9c6da;word-break:break-all">${out||"-"}</div>
+      <div class="bar" style="margin-top:8px">
+        <span style="width:${100*p/total}%;background:#4ade80"></span>
+        <span style="width:${100*f/total}%;background:#f87171"></span>
+        <span style="width:${100*rd/total}%;background:#60a5fa"></span>
+      </div>
+    </div>`;
+
+  $("#dDownloads").innerHTML = `
+    <a href="${imgUrl(out+'/coco.json')}" target="_blank">COCO 标注</a>
+    <a href="${imgUrl(out+'/contact_sheet.jpg')}" target="_blank">对比图 contact_sheet</a>`;
+
+  await loadFrames();
+  $("#detail").scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+async function loadFrames(){
+  if(!CUR) return;
+  const st = $("#fStatus").value;
+  const d = await jget(`/api/hybrid/frames?job_id=${encodeURIComponent(CUR)}&status=${st}&limit=300`);
+  $("#dCount").textContent = `共 ${d.total} 帧`;
+  const g = $("#frameGrid");
+  if(!d.frames.length){ g.innerHTML = '<div class="empty">没有帧</div>'; return; }
+  g.innerHTML = d.frames.map(fr=>{
+    const cp = fr.composed_path || "";
+    const img = cp
+      ? `<img src="${imgUrl(cp)}" loading="lazy" alt="${fr.frame_id}">`
+      : `<div style="aspect-ratio:16/9;background:#080b10"></div>`;
+    return `<div class="card">
+      <div class="im">${img}<span class="badge">${fr.layout||"-"}</span></div>
+      <div class="meta">
+        <b>${fr.frame_id}</b>
+        <span class="st ${fr.status}" style="float:right">${fr.status}</span><br>
+        ${fr.n_objects} 物体 · 最大遮挡 <span class="oc">${(fr.max_occl||0).toFixed(3)}</span>
+        ${fr.error_code?`<br><span style="color:#f87171">${fr.error_code}</span>`:""}
+      </div>
+    </div>`;
+  }).join("");
+}
+$("#fStatus").onchange = loadFrames;
+
+/* ---------------- 提交 ---------------- */
+async function submit(frames, isPreview){
+  const bg = $("#fBg").value;
+  const name = $("#fName").value.trim();
+  const btns = [$("#btnSubmit"), $("#btnPreview")];
+  btns.forEach(b=>b.disabled = true);
+  msg(isPreview ? "正在提交预览…" : "正在提交批量任务…");
+  try{
+    const r = await fetch("/api/hybrid/submit", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({frames, bg, name,
+                            layout: LAYOUT === "auto" ? "" : LAYOUT})
+    });
+    const d = await r.json();
+    if(!r.ok || d.error){ msg("提交失败：" + (d.error||r.status), false); }
+    else {
+      msg(`已提交 ${d.job}（${d.frames} 帧）`, true);
+      if(isPreview){
+        $("#step1").classList.add("on");
+        setTimeout(()=>watchPreview(d.job), 3000);
+      } else {
+        $("#step2").classList.add("on");
+        setTimeout(()=>{ loadJobs(); showDetail(d.job); }, 2000);
+      }
+    }
+  }catch(e){ msg("提交异常：" + e.message, false); }
+  btns.forEach(b=>b.disabled = false);
+}
+
+function watchPreview(jobId){
+  $("#previewBox").classList.add("on");
+  $("#previewGrid").innerHTML = '<div class="empty">渲染中，约 30~60 秒…</div>';
+  const tick = async () => {
+    try{
+      const d = await jget(`/api/hybrid/frames?job_id=${encodeURIComponent(jobId)}&limit=10`);
+      if(d.frames.length){
+        $("#previewGrid").innerHTML = d.frames.map(fr=>{
+          const cp = fr.composed_path||"";
+          return `<div class="card">
+            <img src="${cp?imgUrl(cp):''}" alt="${fr.frame_id}">
+            <div class="meta"><b>${fr.frame_id}</b> · ${fr.layout||"-"} ·
+              ${fr.n_objects} 物体 · 遮挡 ${(fr.max_occl||0).toFixed(3)}</div>
+          </div>`;
+        }).join("");
+        if(d.frames.every(x=>x.status==="PASSED")) { msg("预览完成，可提交批量", true); loadJobs(); return; }
+      }
+    }catch(e){}
+    setTimeout(tick, 4000);
+  };
+  tick();
+}
+
+$("#btnPreview").onclick = ()=> submit(3, true);
+$("#btnSubmit").onclick = ()=>{
+  const n = parseInt($("#fFrames").value,10);
+  if(!(n>0)){ msg("帧数需大于 0", false); return; }
+  if(n > 200){
+    if(!confirm(`将生产 ${n} 帧，预计 ${Math.round(n*10/60)} 分钟，确认提交？`)) return;
+  }
+  submit(n, false);
+};
+
+/* ---------------- 初始化 ---------------- */
+loadJobs();
+setInterval(()=>{ if(!CUR) loadJobs(); }, 12000);
+</script>
+</body>
+</html>

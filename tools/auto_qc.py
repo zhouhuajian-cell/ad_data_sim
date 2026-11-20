@@ -172,7 +172,13 @@ def _get_model(weights="/opt/ad_mining/tsr_sign.pt"):
     if weights not in _yolo_cache:
         try:
             from ultralytics import YOLO
-            _yolo_cache[weights] = YOLO(weights)
+            _m = YOLO(weights)
+            try:
+                import torch
+                _m.to("cuda:0" if torch.cuda.is_available() else "cpu")
+            except Exception:
+                pass
+            _yolo_cache[weights] = _m
         except Exception:
             _yolo_cache[weights] = None
     return _yolo_cache[weights]

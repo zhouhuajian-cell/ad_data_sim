@@ -29,16 +29,45 @@ import cv2
 import numpy as np
 
 
-def detect_signs(image_path, conf=0.3, weights="/opt/ad_mining/tsr_sign.pt"):
-    """跑 YOLO 检测标牌；失败返回空列表而不是抛异常（调用方决定要不要报错）。"""
+# GPU 设备选择：TSR_YOLO_DEVICE 环境变量优先，默认自动（有 CUDA 就用 GPU）
+_YOLO_DEVICE = None
+
+
+def _pick_device():
+    """选 YOLO 推理设备：cuda:0 优先，没有就 cpu。"""
+    global _YOLO_DEVICE
+    if _YOLO_DEVICE is not None:
+        return _YOLO_DEVICE
+    env = os.environ.get("TSR_YOLO_DEVICE", "").strip()
+    if env:
+        _YOLO_DEVICE = env
+        return env
     try:
-        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+        import torch
+        _YOLO_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        _YOLO_DEVICE = "cpu"
+    return _YOLO_DEVICE
+
+
+def detect_signs(image_path, conf=0.3, weights="/opt/ad_mining/tsr_sign.pt"):
+    """跑 YOLO 检测标牌；失败返回空列表而不是抛异常（调用方决定要不要报错）。
+
+    GPU 加速：torch 有 CUDA 就自动用 cuda:0（实测比 CPU 快 5~15 倍）。
+    想强制 CPU：export TSR_YOLO_DEVICE=cpu
+    """
+    try:
         from ultralytics import YOLO
     except Exception as e:
         print("WARN: 无法导入 ultralytics（%s），退回纯图像方案" % e)
         return []
     model = YOLO(weights)
-    res = model(image_path, conf=conf, verbose=False)[0]
+    dev = _pick_device()
+    try:
+        model.to(dev)
+    except Exception:
+        dev = "cpu"
+    res = model(image_path, conf=conf, device=dev, verbose=False, half=(dev != "cpu"))[0]
     out = []
     for b in res.boxes:
         x1, y1, x2, y2 = [float(v) for v in b.xyxy[0].tolist()]
@@ -144,12 +173,9 @@ def fill_original(image, bbox, pad=6, mode="inpaint"):
         return out
 
 
-def composite(image, sign, bbox, shape="auto", scale=1.08, feather=0.15, keep_ratio=True,
-              erase=False):
+def composite(image, sign, bbox, shape="auto", scale=1.0, feather=0.15, keep_ratio=True,
+              erase=True):
     """把 sign 贴到 image 的 bbox 区域，返回 (合成图, 掩码, 实际使用的 bbox)。"""
-    # 默认「不 inpaint」：实测 inpaint 会在标牌周围留下模糊光晕（周围是树叶/天空），
-    # 比不擦更难看。正确做法是让新图案比原标牌略大（scale 默认 1.08）把它盖住。
-    # 需要彻底擦除时再显式传 erase=True。
     if erase:
         image = fill_original(image, bbox)
     H, W = image.shape[:2]
@@ -231,12 +257,11 @@ def main():
     ap.add_argument("--index", type=int, default=0, help="替换第几个检测（按面积从大到小）")
     ap.add_argument("--bbox", default="", help="手动指定 bbox 'x1,y1,x2,y2'，给了就跳过检测选择")
     ap.add_argument("--shape", default="auto", choices=["auto", "circle", "triangle", "rect"])
-    ap.add_argument("--scale", type=float, default=1.08,
-                    help="相对检测框的缩放，>1 可盖住原标牌边缘（默认 1.08）")
+    ap.add_argument("--scale", type=float, default=1.0)
     ap.add_argument("--feather", type=float, default=0.15)
     ap.add_argument("--no-keep-ratio", action="store_true")
-    ap.add_argument("--erase", action="store_true",
-                    help="先 inpaint 擦除原标牌（默认不擦，靠放大覆盖）")
+    ap.add_argument("--no-erase", action="store_true",
+                    help="不擦除原标牌（默认会先 inpaint 擦掉，避免露出旧边）")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -270,7 +295,7 @@ def main():
 
     composed, mask, used = composite(image, sign, bbox, a.shape, a.scale, a.feather,
                                      keep_ratio=not a.no_keep_ratio,
-                                     erase=a.erase)
+                                     erase=not a.no_erase)
     cv2.imwrite(os.path.join(a.out, "composed.jpg"), composed, [cv2.IMWRITE_JPEG_QUALITY, 95])
     if mask is not None:
         cv2.imwrite(os.path.join(a.out, "mask.png"), mask)

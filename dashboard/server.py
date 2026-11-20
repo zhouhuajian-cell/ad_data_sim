@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -86,6 +87,48 @@ def log_auto(msg):
                 f.write("\n".join(keep) + "\n")
     except Exception:
         pass
+
+def normalize_net_path(p):
+    """把 Windows 网盘路径 / UNC 路径 / 各种斜杠统一转换成 Linux 挂载路径。
+
+    支持：
+      \\192.168.20.206\Data_Platform\zhj_datamining\...   （UNC）
+      //192.168.20.206/Data_Platform/zhj_datamining/...
+      Z:\Data_Platform\zhj_datamining\...
+      /mnt/Data_Platform/zhj_datamining/...               （已是 Linux，原样返回）
+
+    服务器上 CIFS 挂载点约定为 /mnt/<共享名>。
+    例如 共享 Data_Platform → /mnt/Data_Platform
+    """
+    if not p:
+        return p
+    raw = str(p).strip().strip('"').strip("'")
+
+    # 已是合法 Linux 路径
+    if raw.startswith("/") and not raw.startswith("//"):
+        return raw.replace("\\", "/")
+
+    # UNC: \\host\share\rest  或  //host/share/rest
+    m = re.match(r"^[\\/]{2}([^\\/]+)[\\/]([^\\/]+)(?:[\\/](.*))?$", raw)
+    if m:
+        share = m.group(2)
+        rest = (m.group(3) or "").replace("\\", "/")
+        base = "/mnt/" + share
+        return os.path.normpath(base + ("/" + rest if rest else ""))
+
+    # 盘符: Z:\share\rest
+    m2 = re.match(r"^([A-Za-z]):[\\/]([^\\/]+)(?:[\\/](.*))?$", raw)
+    if m2:
+        share = m2.group(2)
+        rest = (m2.group(3) or "").replace("\\", "/")
+        base = "/mnt/" + share
+        return os.path.normpath(base + ("/" + rest if rest else ""))
+
+    # 相对路径 → 转成 / 开头
+    if not raw.startswith("/"):
+        raw = "/" + raw.replace("\\", "/").replace(":", "").lstrip("/")
+    return os.path.normpath(raw)
+
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
@@ -181,6 +224,154 @@ def int_param(p, key, default=None):
     except (TypeError, ValueError):
         raise ValueError("%s 必须是整数，收到 %r" % (key, v))
 
+
+# ===========================================================================
+# [HYBRID-SQLITE] HybridPipeline 任务状态（SQLite）
+# ===========================================================================
+HYBRID_DB = "/data/avsynth/state/jobs.db"
+HYBRID_ROOT = "/data/render_hybrid"
+HYBRID_SCRIPT_DIR = "/data/avsynth/HybridPipeline/scripts"
+
+
+def _hybrid_conn():
+    import sqlite3
+    if not os.path.isfile(HYBRID_DB):
+        return None
+    c = sqlite3.connect("file:%s?mode=ro" % HYBRID_DB, uri=True, timeout=10.0)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def hybrid_jobs(limit=50, offset=0):
+    c = _hybrid_conn()
+    if c is None:
+        return {"jobs": [], "total": 0, "db": HYBRID_DB, "exists": False}
+    try:
+        total = c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        rows = c.execute("""
+            SELECT job_id, module, pipeline_ver, status, total_frames,
+                   passed_frames, failed_frames, output_dir,
+                   created_at, updated_at, error_msg
+            FROM jobs ORDER BY updated_at DESC LIMIT ? OFFSET ?
+        """, (int(limit), int(offset))).fetchall()
+        return {"jobs": [dict(r) for r in rows], "total": total,
+                "db": HYBRID_DB, "exists": True}
+    except Exception as e:
+        return {"jobs": [], "total": 0, "error": str(e)[:200], "exists": True}
+    finally:
+        c.close()
+
+
+def hybrid_job(job_id):
+    c = _hybrid_conn()
+    if c is None:
+        return {"error": "数据库不存在", "db": HYBRID_DB}
+    try:
+        r = c.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not r:
+            return {"error": "任务不存在"}
+        d = dict(r)
+        try:
+            d["config"] = __import__("json").loads(d.pop("config_json") or "{}")
+        except Exception:
+            d["config"] = {}
+        cnt = c.execute("""SELECT status, COUNT(*) n FROM frames
+                           WHERE job_id=? GROUP BY status""",
+                        (job_id,)).fetchall()
+        d["frame_status"] = {x["status"]: x["n"] for x in cnt}
+        return d
+    finally:
+        c.close()
+
+
+def hybrid_frames(job_id, status="", limit=100, offset=0):
+    c = _hybrid_conn()
+    if c is None:
+        return {"frames": [], "total": 0}
+    try:
+        if status:
+            total = c.execute("""SELECT COUNT(*) FROM frames
+                                 WHERE job_id=? AND status=?""",
+                              (job_id, status)).fetchone()[0]
+            rows = c.execute("""
+                SELECT frame_id, layout, status, n_objects, max_occl,
+                       composed_path, mask_path, error_code, updated_at
+                FROM frames WHERE job_id=? AND status=?
+                ORDER BY frame_id LIMIT ? OFFSET ?
+            """, (job_id, status, int(limit), int(offset))).fetchall()
+        else:
+            total = c.execute("SELECT COUNT(*) FROM frames WHERE job_id=?",
+                              (job_id,)).fetchone()[0]
+            rows = c.execute("""
+                SELECT frame_id, layout, status, n_objects, max_occl,
+                       composed_path, mask_path, error_code, updated_at
+                FROM frames WHERE job_id=?
+                ORDER BY frame_id LIMIT ? OFFSET ?
+            """, (job_id, int(limit), int(offset))).fetchall()
+        return {"frames": [dict(r) for r in rows], "total": total}
+    finally:
+        c.close()
+
+
+def hybrid_frame(job_id, frame_id):
+    c = _hybrid_conn()
+    if c is None:
+        return {"error": "数据库不存在"}
+    try:
+        r = c.execute("""SELECT * FROM frames WHERE job_id=? AND frame_id=?""",
+                      (job_id, frame_id)).fetchone()
+        if not r:
+            return {"error": "帧不存在"}
+        d = dict(r)
+        try:
+            d["meta"] = __import__("json").loads(d.pop("meta_json") or "{}")
+        except Exception:
+            d["meta"] = {}
+        return d
+    finally:
+        c.close()
+
+
+def hybrid_artifact(path):
+    """安全地读 /data/render_hybrid 下的文件。"""
+    p = os.path.realpath(path)
+    root = os.path.realpath(HYBRID_ROOT)
+    if not p.startswith(root + os.sep):
+        return None, "forbidden"
+    if not os.path.isfile(p):
+        return None, "not found"
+    with open(p, "rb") as f:
+        return f.read(), os.path.splitext(p)[1].lower()
+
+
+def hybrid_submit(frames, bg, out_name="", module="obj", layout=""):
+    """提交一个后台批量任务（nohup 起子进程）。"""
+    import subprocess
+    import time as _t
+    frames = int(frames)
+    if frames <= 0 or frames > 5000:
+        return {"error": "frames 需在 1~5000"}
+    if not os.path.isfile(bg):
+        return {"error": "底图不存在: %s" % bg}
+    job = out_name.strip() or ("batch_%s" % _t.strftime("%Y%m%d_%H%M%S"))
+    out_dir = os.path.join(HYBRID_ROOT, job)
+    os.makedirs(out_dir, exist_ok=True)
+    log = os.path.join(out_dir, "worker.log")
+    lay = " --layout %s" % layout if layout else ""
+    cmd = [
+        "su", "-", "algo", "-c",
+        "cd %s && /usr/bin/python3 obj_batch_worker.py run "
+        "--frames %d --out %s --bg %s%s" % (HYBRID_SCRIPT_DIR, frames,
+                                            out_dir, bg, lay),
+    ]
+    with open(log, "ab") as lf:
+        try:
+            subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+        except Exception as e:
+            return {"error": "启动失败: %s" % e}
+    return {"ok": True, "job": job, "out": out_dir, "frames": frames,
+            "log": log}
 
 SMOKE_SCRIPT = "/data/avsynth/ObjSmokeTools/run_obj_smoke.sh"
 SMOKE_ROOT = "/data/render"
@@ -838,7 +1029,366 @@ class H(BaseHTTPRequestHandler):
             with open(os.path.join(BASE, "gallery.html"), "rb") as f:
                 return self._send(200, f.read(), "text/html; charset=utf-8")
 
-        if u.path in ("/bev", "/obj", "/gnd"):
+        # [PRO-UI] 新版 Pro 界面
+        if u.path in ("/pro", "/pro.html"):
+            fp = os.path.join(BASE, "pro.html")
+            try:
+                with open(fp, "rb") as f:
+                    return self._send(200, f.read(),
+                                      "text/html; charset=utf-8")
+            except OSError:
+                return self._send(404, {"error": "pro.html 缺失"})
+
+
+        # [WALK-JOBS] 列出最近的遍历任务（供刷新后恢复状态）
+
+        # [CALIB] 列出底图（供标定面板选图）
+        if u.path == "/api/tsr/bg_list":
+            try:
+                import glob as _g
+                fs = sorted(_g.glob("/data/render_hybrid/bgs/*.jpg"))
+                return self._send(200, {
+                    "images": [{"idx": i, "name": os.path.basename(f),
+                                "path": f} for i, f in enumerate(fs)]
+                })
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        # [CALIB] 读取某张底图（供标定面板显示）
+        if u.path == "/api/tsr/bg_image":
+            idx = (q.get("id") or ["0"])[0]
+            try:
+                fs = sorted(__import__("glob").glob("/data/render_hybrid/bgs/*.jpg"))
+                i = int(idx)
+                if not (0 <= i < len(fs)):
+                    return self._send(404, {"error": "index out of range"})
+                with open(fs[i], "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        # [DETECT-JOBS] 列出所有检测任务
+        if u.path == "/api/tsr/prescreen_result":
+            tid = (q.get("task") or [""])[0]
+            jf = "/tmp/prescreen_%s.json" % tid
+            if not os.path.isfile(jf):
+                return self._send(200, {"results": [], "total": 0, "hits": 0})
+            with open(jf, "r", encoding="utf-8") as f:
+                return self._send(200, json.load(f))
+
+        if u.path == "/api/tsr/detect_jobs":
+            jobs = []
+            try:
+                import glob as _g
+                for fp in _g.glob("/tmp/prescreen_*.json"):
+                    name = os.path.basename(fp)
+                    if "prog" in name:
+                        continue
+                    jid = name[len("prescreen_"):-len(".json")]
+                    try:
+                        d = json.load(open(fp, encoding="utf-8"))
+                    except Exception:
+                        continue
+                    jobs.append({
+                        "job": jid,
+                        "dir": d.get("dir", ""),
+                        "total": d.get("total", 0),
+                        "hits": d.get("hits", 0),
+                        "usable": d.get("usable_hits", 0),
+                        "mtime": int(os.path.getmtime(fp)),
+                    })
+                jobs.sort(key=lambda x: -x["mtime"])
+                return self._send(200, {"jobs": jobs})
+            except Exception as e:
+                return self._send(200, {"jobs": [], "err": str(e)})
+
+        # [JOB-DETAIL] 单个任务的完整信息
+        if u.path == "/api/tsr/job_detail":
+            job = (q.get("job") or [""])[0]
+            if not job:
+                return self._send(400, {"error": "缺少 job"})
+
+            # 1) 检测任务：读 /tmp/prescreen_<id>.json
+            pj = "/tmp/prescreen_%s.json" % job
+            if os.path.isfile(pj):
+                try:
+                    with open(pj, "r", encoding="utf-8") as f:
+                        pd = json.load(f)
+                    # 进度文件补参数
+                    pf0 = "/tmp/prescreen_prog_%s.json" % job
+                    root0 = ""
+                    if os.path.isfile(pf0):
+                        try:
+                            pg0 = json.load(open(pf0, encoding="utf-8"))
+                        except Exception:
+                            pg0 = {}
+                    else:
+                        pg0 = {}
+                    return self._send(200, {
+                        "job": job,
+                        "type": "detect",
+                        "module": "TSR",
+                        "country": "",
+                        "source_root": pd.get("dir", "") or root0,
+                        "n": pd.get("usable_hits", 0),
+                        "total": pd.get("total", 0),
+                        "hits": pd.get("hits", 0),
+                        "done": pd.get("total", 0),
+                    })
+                except Exception as e:
+                    pass
+
+            # 2) 仿真/批量任务：找目录
+            cands = [
+                os.path.join(TSR_OUT_DIR, "walk_" + job),
+                os.path.join(TSR_OUT_DIR, job),
+                os.path.join("/mnt/Data_Platform/zhj_datasim", job),
+            ]
+            dp = next((c for c in cands if os.path.isdir(c)), "")
+            if not dp:
+                return self._send(404, {"error": "任务不存在: " + job})
+
+            info = {"job": job, "dir": dp}
+            ad = os.path.join(dp, "annotations")
+            if os.path.isdir(ad):
+                info["n"] = len(os.listdir(ad))
+
+            # 从 summary.json 读参数
+            sf = os.path.join(dp, "summary.json")
+            if os.path.isfile(sf):
+                try:
+                    with open(sf, "r", encoding="utf-8") as f:
+                        sd = json.load(f)
+                    for k in ("module", "country", "source_root", "pin_class", "pin_material",
+                              "min_sign", "conf", "limit", "type", "from_detect"):
+                        if k in sd:
+                            info[k] = sd[k]
+                    if "source_root" in sd:
+                        info["root"] = sd["source_root"]
+                except Exception:
+                    pass
+
+            # 从任一标注读 source_path
+            if os.path.isdir(ad):
+                js = [x for x in os.listdir(ad) if x.endswith(".json")]
+                if js:
+                    try:
+                        with open(os.path.join(ad, js[0]), "r", encoding="utf-8") as f:
+                            a = json.load(f)
+                        info["source_path"] = a.get("source_path", "")
+                        if not info.get("country"):
+                            # 从任务名推断
+                            if "_" in job:
+                                info["country"] = job.split("_")[0]
+                        if a.get("objects"):
+                            ob = a["objects"][0]
+                            info.setdefault("pin_class", ob.get("class") or "")
+                            info.setdefault("renderer", ob.get("renderer") or "")
+                    except Exception:
+                        pass
+
+            # 从 progress 读参数
+            pf = os.path.join(dp, "progress.json")
+            if not os.path.isfile(pf):
+                pf = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % job)
+            if os.path.isfile(pf):
+                try:
+                    with open(pf, "r", encoding="utf-8") as f:
+                        pd = json.load(f)
+                    info["total"] = pd.get("total")
+                    info["done"] = pd.get("done")
+                    info["ok"] = pd.get("ok")
+                except Exception:
+                    pass
+
+            return self._send(200, info)
+
+        if u.path == "/api/tsr/job_list":
+            jobs = []
+            try:
+                for name in os.listdir(TSR_OUT_DIR):
+                    dp = os.path.join(TSR_OUT_DIR, name)
+                    ad = os.path.join(dp, "annotations")
+                    if os.path.isdir(ad):
+                        n = len(os.listdir(ad))
+                        if n:
+                            tag = name[5:] if name.startswith("walk_") else name
+                            _mod = ""
+                            _sf = os.path.join(dp, "summary.json")
+                            if os.path.isfile(_sf):
+                                try:
+                                    _mod = json.load(open(_sf, encoding="utf-8")).get("module", "")
+                                except Exception:
+                                    pass
+                            jobs.append({"job": tag, "id": tag, "label": tag,
+                                         "module": _mod or "TSR",
+                                         "n": n, "mtime": int(os.path.getmtime(dp))})
+                # 也扫共享导出目录
+                ed = "/mnt/Data_Platform/zhj_datasim"
+                if os.path.isdir(ed):
+                    for name in os.listdir(ed):
+                        dp = os.path.join(ed, name)
+                        ad = os.path.join(dp, "annotations")
+                        if os.path.isdir(ad):
+                            n = len(os.listdir(ad))
+                            if n:
+                                jobs.append({"job": name, "id": name, "label": name,
+                                             "n": n, "mtime": int(os.path.getmtime(dp)),
+                                             "export": True, "path": dp})
+                jobs.sort(key=lambda x: -x["mtime"])
+                return self._send(200, {"jobs": jobs})
+            except Exception as e:
+                return self._send(200, {"jobs": [], "err": str(e)})
+
+        if u.path == "/api/tsr/latest_job":
+            try:
+                cands = []
+                for name in os.listdir(TSR_OUT_DIR):
+                    if not name.startswith("walk_"):
+                        continue
+                    dp = os.path.join(TSR_OUT_DIR, name)
+                    ad = os.path.join(dp, "annotations")
+                    if os.path.isdir(ad) and os.listdir(ad):
+                        cands.append((os.path.getmtime(dp), name[5:]))
+                cands.sort(reverse=True)
+                if not cands:
+                    return self._send(200, {"job": "", "n": 0})
+                job = cands[0][1]
+                ad = os.path.join(TSR_OUT_DIR, "walk_" + job, "annotations")
+                return self._send(200, {"job": job, "n": len(os.listdir(ad))})
+            except Exception as e:
+                return self._send(200, {"job": "", "n": 0, "err": str(e)})
+
+        if u.path == "/api/tsr/prescreen_thumb":
+            tid = (q.get("task") or [""])[0]
+            name = os.path.basename((q.get("name") or [""])[0])
+            fp = "/tmp/prescreen_thumbs_%s/%s" % (tid, name)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=600")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        if u.path == "/api/tsr/walk_jobs":
+            import glob as _g
+            # 进程存活状态
+            _alive = False
+            try:
+                _r = subprocess.run(["pgrep", "-f", "batch_walk.py"],
+                                    capture_output=True, text=True, timeout=3)
+                _alive = bool((_r.stdout or "").strip())
+            except Exception:
+                _alive = True
+            pat = os.path.join(TSR_OUT_DIR, "walk_*_progress.json")
+            jobs = []
+            for fp in sorted(_g.glob(pat),
+                             key=lambda x: os.path.getmtime(x), reverse=True)[:20]:
+                tag = os.path.basename(fp).replace("walk_", "").replace("_progress.json", "")
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    d = {}
+                d["job"] = tag
+                d["mtime"] = int(os.path.getmtime(fp))
+                d["alive"] = _alive
+                jobs.append(d)
+            return self._send(200, {"jobs": jobs})
+
+        # [LIBRARY-UPLOAD] 素材上传（三类：tsr / obj / gnd）
+        if u.path == "/api/library/upload":
+            import cgi, uuid
+            ctype = self.headers.get("Content-Type", "")
+            if not ctype.startswith("multipart/form-data"):
+                return self._send(400, {"error": "需要 multipart/form-data"})
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers,
+                                    environ={"REQUEST_METHOD": "POST",
+                                             "CONTENT_TYPE": ctype})
+            if "file" not in form:
+                return self._send(400, {"error": "缺少 file 字段"})
+            item = form["file"]
+            fn = os.path.basename(item.filename or "unknown.png")
+            cat = (form.getvalue("category") or "tsr").strip().lower()
+            if cat not in ("tsr", "obj", "gnd"):
+                return self._send(400, {"error": "category 必须是 tsr/obj/gnd"})
+            if not fn.lower().endswith(".png"):
+                return self._send(400, {"error": "只接受 PNG"})
+            blob = item.file.read()
+            if len(blob) > 600 * 1024:
+                return self._send(400, {"error": "文件超过 600KB"})
+            # 校验是否为合法 PNG 且带 alpha
+            if not blob.startswith(b"\x89PNG"):
+                return self._send(400, {"error": "不是合法 PNG"})
+            base = {"tsr": "/data/tsr_library_v2/_uploaded",
+                    "obj": "/data/obj_library",
+                    "gnd": "/data/gnd_library"}[cat]
+            os.makedirs(base, exist_ok=True)
+            safe = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fa5]", "_", fn)
+            dest = os.path.join(base, safe)
+            n = 1
+            while os.path.exists(dest):
+                stem, ext = os.path.splitext(safe)
+                dest = os.path.join(base, "%s_%d%s" % (stem, n, ext))
+                n += 1
+            with open(dest, "wb") as f:
+                f.write(blob)
+            rel = os.path.relpath(dest, base)
+            return self._send(200, {"ok": True, "file": dest,
+                                    "url": "/api/library/file?cat=%s&name=%s"
+                                           % (cat, quote(safe))})
+
+        # [LIBRARY-FILE] 取已上传素材
+        if u.path == "/api/library/file":
+            cat = (q.get("cat") or ["tsr"])[0].lower()
+            name = (q.get("name") or [""])[0]
+            if cat not in ("tsr", "obj", "gnd"):
+                return self._send(400, {"error": "category 错误"})
+            if not name or "/" in name or "\\" in name or ".." in name:
+                return self._send(400, {"error": "文件名错误"})
+            base = {"tsr": "/data/tsr_library_v2/_uploaded",
+                    "obj": "/data/obj_library",
+                    "gnd": "/data/gnd_library"}[cat]
+            fp = os.path.join(base, name)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "文件不存在"})
+            with open(fp, "rb") as f:
+                return self._send(200, f.read(), "image/png")
+
+        # [STATIC] 前端依赖（tailwind / chart.js / tabler-icons）
+        if u.path.startswith("/static/"):
+            import mimetypes
+            name = os.path.basename(u.path[len("/static/"):])
+            if not re.fullmatch(r"[A-Za-z0-9_.\-]+", name):
+                return self._send(403, {"error": "forbidden"})
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "static", name)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found: " + name})
+            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            with open(fp, "rb") as f:
+                blob = f.read()
+            return self._send(200, blob, ctype)
+        if u.path in ("/obj", "/hybrid", "/bev"):
+            fp = os.path.join(BASE, "obj_new.html")
+            try:
+                with open(fp, "rb") as f:
+                    return self._send(200, f.read(), "text/html; charset=utf-8")
+            except OSError:
+                return self._send(404, {"error": "obj_new.html 缺失"})
+        if u.path == "/gnd":
             with open(os.path.join(BASE, "obj.html"), "rb") as f:
                 return self._send(200, f.read(), "text/html; charset=utf-8")
         status = re.fullmatch(r"/api/(obj|gnd)/status", u.path)
@@ -853,7 +1403,22 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), "image/jpeg" if kind == "sheet" else "application/json")
             return self._send(404, {"error": "结果文件不存在"})
         if u.path in ("/", "/index.html"):
-            return self._send(200, HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            # 每次读最新文件 + 禁止缓存，避免改了页面还要手动加 ?v=
+            try:
+                with open(os.path.join(BASE, "index.html"), encoding="utf-8") as _f:
+                    _page = _f.read()
+            except Exception:
+                _page = HTML_PAGE
+            body = _page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # [TSR-API] 提供 tsr.html
         if u.path in ("/tsr", "/tsr.html"):
             fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tsr.html")
@@ -870,10 +1435,145 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(blob)
             return
+        # [HYBRID-SQLITE] 任务状态接口
+        if u.path == "/hybrid":
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "hybrid.html")
+            try:
+                with open(fp, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                return self._send(404, {"error": "hybrid.html 缺失"})
+            return self._send(200, blob, "text/html; charset=utf-8")
+        if u.path == "/api/hybrid/jobs":
+            try:
+                limit = max(1, min(200, int((q.get("limit") or ["50"])[0])))
+                offset = max(0, int((q.get("offset") or ["0"])[0]))
+            except ValueError:
+                return self._send(400, {"error": "invalid pagination"})
+            return self._send(200, hybrid_jobs(limit, offset))
+        if u.path == "/api/hybrid/job":
+            jid = (q.get("job_id") or [""])[0]
+            if not jid:
+                return self._send(400, {"error": "job_id 必填"})
+            return self._send(200, hybrid_job(jid))
+        if u.path == "/api/hybrid/frames":
+            jid = (q.get("job_id") or [""])[0]
+            if not jid:
+                return self._send(400, {"error": "job_id 必填"})
+            st = (q.get("status") or [""])[0]
+            try:
+                limit = max(1, min(500, int((q.get("limit") or ["100"])[0])))
+                offset = max(0, int((q.get("offset") or ["0"])[0]))
+            except ValueError:
+                return self._send(400, {"error": "invalid pagination"})
+            return self._send(200, hybrid_frames(jid, st, limit, offset))
+        if u.path == "/api/hybrid/frame":
+            jid = (q.get("job_id") or [""])[0]
+            fid = (q.get("frame_id") or [""])[0]
+            if not jid or not fid:
+                return self._send(400, {"error": "job_id / frame_id 必填"})
+            return self._send(200, hybrid_frame(jid, fid))
+        if u.path == "/api/hybrid/artifact":
+            p = (q.get("path") or [""])[0]
+            blob, kind = hybrid_artifact(p)
+            if blob is None:
+                return self._send(404, {"error": kind})
+            ct = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                  "png": "image/png", "json": "application/json"}.get(
+                      kind.strip("."), "application/octet-stream")
+            return self._send(200, blob, ct)
+
         if u.path == "/api/status":
             return self._send(200, probe_status())
         if u.path == "/api/config":
             return self._send(200, load_config())
+        # [SYSINFO] 实时 GPU / 内存 / CPU 状态
+        if u.path == "/api/sysinfo":
+            info = {"ok": True}
+            # GPU
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi",
+                     "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5)
+                line = (r.stdout or "").strip().split("\n")[0]
+                if line:
+                    parts = [x.strip() for x in line.split(",")]
+                    info["gpu"] = {
+                        "name": parts[0],
+                        "used_mb": float(parts[1]),
+                        "total_mb": float(parts[2]),
+                        "utilization": float(parts[3]),
+                        "temp": float(parts[4]) if len(parts) > 4 else None,
+                    }
+            except Exception as e:
+                info["gpu"] = None
+                info["gpu_error"] = str(e)
+
+            # 内存
+            try:
+                with open("/proc/meminfo") as f:
+                    mem = {}
+                    for ln in f:
+                        k, v = ln.split(":", 1)
+                        mem[k.strip()] = int(v.strip().split()[0])
+                total = mem.get("MemTotal", 0) / 1024.0
+                avail = mem.get("MemAvailable", 0) / 1024.0
+                info["mem"] = {
+                    "total_mb": total,
+                    "used_mb": max(0.0, total - avail),
+                    "avail_mb": avail,
+                }
+            except Exception as e:
+                info["mem"] = None
+
+            # CPU：型号 + 负载 + 利用率
+            try:
+                info["load"] = [round(x, 2) for x in os.getloadavg()]
+                info["cpu_count"] = os.cpu_count()
+                # CPU 型号
+                cpu_name = ""
+                try:
+                    with open("/proc/cpuinfo") as f:
+                        for ln in f:
+                            if ln.startswith("model name"):
+                                cpu_name = ln.split(":", 1)[1].strip()
+                                break
+                except Exception:
+                    pass
+                info["cpu"] = {
+                    "name": cpu_name,
+                    "count": os.cpu_count(),
+                    "load": info["load"],
+                    "usage": round(min(100.0, info["load"][0] /
+                                       max(1, os.cpu_count()) * 100), 1),
+                }
+            except Exception:
+                info["cpu"] = None
+
+            # 内存条型号（DMdecode）
+            try:
+                r2 = subprocess.run(
+                    ["dmidecode", "-t", "17"], capture_output=True, text=True, timeout=5)
+                names = []
+                for ln in (r2.stdout or "").split("\n"):
+                    ln = ln.strip()
+                    if ln.startswith("Size:") and "MB" in ln or ln.startswith("Size:") and "GB" in ln:
+                        pass
+                # 简化：只取第一条型号
+                for ln in (r2.stdout or "").split("\n"):
+                    if "Part Number:" in ln:
+                        pn = ln.split(":", 1)[1].strip()
+                        if pn and pn != "Unknown" and pn not in names:
+                            names.append(pn)
+                info["mem_parts"] = names[:4]
+            except Exception:
+                info["mem_parts"] = []
+
+            return self._send(200, info)
+
         if u.path == "/api/metrics":
             try:
                 minutes = max(1, min(1440, int((q.get("minutes") or ["10"])[0])))
@@ -964,7 +1664,7 @@ class H(BaseHTTPRequestHandler):
 
         # [TSR-API] 实拍图清单
         if u.path == "/api/tsr/images":
-            d = (q.get("dir") or [""])[0]
+            d = normalize_net_path((q.get("dir") or [""])[0])
             limit = int((q.get("limit") or ["30"])[0])
             offset = int((q.get("offset") or ["0"])[0])
             if not d or not os.path.isdir(d):
@@ -976,6 +1676,14 @@ class H(BaseHTTPRequestHandler):
 
         # [TSR-API] 单张实拍图
         if u.path == "/api/tsr/src":
+            # 直接按绝对路径发原图（检测结果预览用）
+            pabs = (q.get("path") or [""])[0]
+            if pabs:
+                pabs = normalize_net_path(pabs.strip())
+                if not os.path.isfile(pabs):
+                    return self._send(404, {"error": "图片不存在: " + pabs})
+                self._send_image(int((q.get("max") or ["1600"])[0]))(pabs)
+                return
             # 批量产出的原图：按 annotations 里记的 source_path 读取
             d = (q.get("dir") or [""])[0]
             stem = (q.get("stem") or [""])[0]
@@ -985,6 +1693,14 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "标注不存在"})
             with open(ap, "r", encoding="utf-8") as f:
                 a = json.load(f)
+            # bbox=1：只返回标注信息（前端用来定位标牌），不发图片
+            if (q.get("bbox") or [""])[0] == "1":
+                return self._send(200, {
+                    "objects": a.get("objects", []),
+                    "width": a.get("width", 1920),
+                    "height": a.get("height", 1080),
+                    "source_image": a.get("source_image", ""),
+                })
             sp = a.get("source_path", "")
             return self._send_image(max_w=maxw)(sp)
 
@@ -1002,11 +1718,31 @@ class H(BaseHTTPRequestHandler):
         # [PRESCREEN] 查进度 / 取结果
         if u.path == "/api/tsr/walk_progress":
             tag = (q.get("job") or [""])[0]
-            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
-            if not os.path.isfile(prog):
-                return self._send(200, {"phase": "unknown"})
+            # 三种布局：根目录 / 子目录 / 共享导出目录
+            cands = [
+                os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag),
+                os.path.join(TSR_OUT_DIR, "walk_" + tag, "walk_%s_progress.json" % tag),
+            ]
+            if "_" in tag:
+                cc = tag.split("_")[0]
+                for ed in (str((q.get("export") or [""])[0]),
+                           "/mnt/Data_Platform/zhj_datasim"):
+                    if ed:
+                        cands.append(os.path.join(normalize_net_path(ed), tag, "progress.json"))
+            prog = next((c for c in cands if os.path.isfile(c)), "")
+            if not prog:
+                return self._send(200, {"phase": "unknown", "alive": False})
             with open(prog, "r", encoding="utf-8") as f:
                 d = json.load(f)
+            # 判断进程是否还活着
+            alive = False
+            try:
+                r = subprocess.run(["pgrep", "-f", "batch_walk.py|render_selected.py"],
+                                   capture_output=True, text=True, timeout=3)
+                alive = bool((r.stdout or "").strip())
+            except Exception:
+                alive = True
+            d["alive"] = alive
             logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
             if os.path.isfile(logf):
                 try:
@@ -1045,6 +1781,7 @@ class H(BaseHTTPRequestHandler):
             # 批量产出的相册：返回文件名 + 原图 + 合成图 URL
             d = (q.get("dir") or [""])[0]
             limit = int((q.get("limit") or ["400"])[0])
+            offset = max(0, int((q.get("offset") or ["0"])[0]))
             if not d:
                 # 在多个产出根目录下找带 annotations 的目录，按修改时间取最新。
                 # 注意：批量的 --out 可以直接指定 /data/render/xxx，不一定在 TSR_OUT_DIR 下，
@@ -1063,31 +1800,45 @@ class H(BaseHTTPRequestHandler):
             if not d or not os.path.isdir(d):
                 return self._send(404, {"error": "目录不存在", "dir": d})
             ann_dir = os.path.join(d, "annotations")
-            items = []
+            all_files = []
             if os.path.isdir(ann_dir):
-                for fn in sorted(os.listdir(ann_dir))[:limit]:
-                    if not fn.endswith(".json"):
-                        continue
-                    try:
-                        with open(os.path.join(ann_dir, fn), "r", encoding="utf-8") as f:
-                            a = json.load(f)
-                    except Exception:
-                        continue
-                    items.append({
-                        "stem": fn[:-5],
-                        "composed": a.get("image", ""),
-                        "source_name": a.get("source_image", ""),
-                        "country": "",
-                        "objects": a.get("objects", []),
-                    })
-            return self._send(200, {"dir": d, "count": len(items), "items": items})
+                all_files = sorted(f for f in os.listdir(ann_dir) if f.endswith(".json"))
+            total_all = len(all_files)
+            page_files = all_files[offset:offset + limit]
+            items = []
+            for fn in page_files:
+                try:
+                    with open(os.path.join(ann_dir, fn), "r", encoding="utf-8") as f:
+                        a = json.load(f)
+                except Exception:
+                    continue
+                items.append({
+                    "stem": fn[:-5],
+                    "composed": a.get("image", ""),
+                    "source_name": a.get("source_image", ""),
+                    "country": "",
+                    "objects": a.get("objects", []),
+                })
+            return self._send(200, {"dir": d, "count": len(items),
+                                    "total": total_all, "offset": offset,
+                                    "items": items})
 
         if u.path == "/api/tsr/result":
             f = (q.get("file") or [""])[0]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.(?:jpg|png)", f, re.I):
                 return self._send(400, {"error": "invalid"})
-            p = os.path.join(TSR_OUT_DIR, f)
-            if not os.path.isfile(p):
+            selected_dir = (q.get("dir") or [""])[0]
+            if selected_dir:
+                root = os.path.realpath("/data/render")
+                selected = os.path.realpath(selected_dir)
+                if os.path.commonpath([root, selected]) != root:
+                    return self._send(400, {"error": "目录不在渲染目录内"})
+                p = os.path.realpath(os.path.join(selected, f))
+                if os.path.dirname(p) != selected or not os.path.isfile(p):
+                    return self._send(404, {"error": "结果文件不存在"})
+            else:
+                p = os.path.join(TSR_OUT_DIR, f)
+            if not selected_dir and not os.path.isfile(p):
                 # 批量产出可能直接落在 /data/render/<目录>/ 下，也要能取到
                 alt = None
                 rroot = "/data/render"
@@ -1177,6 +1928,168 @@ class H(BaseHTTPRequestHandler):
             if error:
                 return self._send(409, {"error": error})
             return self._send(202, {"id": rec["id"]})
+
+        # [JOB-LIST] 列出所有有产出的任务（工作台下拉用）
+        # [DERIVE-SIM] 从检测任务派生仿真任务（只渲染检测到的帧）
+        # [JOB-DELETE] 删除任务记录（检测 json 或产出目录）
+        # [CALIB] 地面四点点选标定
+        if u.path == "/api/tsr/calib_save":
+            body = self._body()
+            if not isinstance(body, dict):
+                body = {}
+            try:
+                name = str(body.get("image") or "custom").replace("/", "_")
+                calib_dir = "/data/render_hybrid/bgs"
+                os.makedirs(calib_dir, exist_ok=True)
+                out = os.path.join(calib_dir, "_calib_" + os.path.splitext(name)[0] + ".json")
+                with open(out, "w", encoding="utf-8") as f:
+                    json.dump(body, f, ensure_ascii=False, indent=1)
+                return self._send(200, {"ok": True, "path": out})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
+
+
+        if u.path == "/api/tsr/job_delete":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                job = str(body.get("job") or "").strip()
+                if not job:
+                    return self._send(400, {"error": "缺少 job"})
+
+                deleted = []
+                # 1) 检测结果
+                pj = "/tmp/prescreen_%s.json" % job
+                if os.path.isfile(pj):
+                    os.remove(pj)
+                    deleted.append("detect")
+                pj2 = "/tmp/prescreen_prog_%s.json" % job
+                if os.path.isfile(pj2):
+                    os.remove(pj2)
+                    deleted.append("progress")
+                td = "/tmp/prescreen_thumbs_%s" % job
+                if os.path.isdir(td):
+                    import shutil as _sh
+                    _sh.rmtree(td, ignore_errors=True)
+                    deleted.append("thumbs")
+
+                # 2) 产出目录
+                if body.get("delete_files"):
+                    for cand in (os.path.join(TSR_OUT_DIR, "walk_" + job),
+                                 os.path.join("/mnt/Data_Platform/zhj_datasim", job)):
+                        if os.path.isdir(cand):
+                            import shutil as _sh
+                            _sh.rmtree(cand, ignore_errors=True)
+                            deleted.append("dir:" + cand)
+
+                return self._send(200, {"ok": True, "deleted": deleted})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        if u.path == "/api/tsr/derive_sim":
+          try:
+            body = self._body()
+            if not isinstance(body, dict):
+                body = {}
+            det_job = str(body.get("detect_job") or "").strip()
+            country = str(body.get("country") or "BR")
+            pin_class = str(body.get("pin_class") or "")
+            module = str(body.get("module") or "TSR").upper()
+
+            if not det_job:
+                return self._send(400, {"error": "缺少 detect_job"})
+
+            # 读检测结果
+            pj = "/tmp/prescreen_%s.json" % det_job
+            if not os.path.isfile(pj):
+                return self._send(404, {"error": "检测结果不存在: " + det_job})
+            with open(pj, "r", encoding="utf-8") as f:
+                pd = json.load(f)
+
+            usable = [r for r in pd.get("results", []) if r.get("usable", 0) > 0]
+            if not usable:
+                return self._send(400, {"error": "该检测任务没有可用帧"})
+
+            # 构造渲染清单
+            picked = []
+            for r in usable:
+                rp = r.get("path") or ""
+                if rp and os.path.isfile(rp):
+                    picked.append({
+                        "stem": r.get("stem") or os.path.basename(rp),
+                        "path": rp,
+                        "seq": r.get("seq") or ""
+                    })
+            if not picked:
+                return self._send(400, {"error": "检测结果里的路径都不可用"})
+
+            # 任务 ID：检测ID + _sim
+            tag = det_job + "_sim"
+            out_dir = os.path.join(TSR_OUT_DIR, "walk_" + tag)
+            os.makedirs(out_dir, exist_ok=True)
+            lst = "/tmp/render_sel_%s.json" % tag
+            with open(lst, "w", encoding="utf-8") as f:
+                json.dump(picked, f, ensure_ascii=False)
+            prog = os.path.join(out_dir, "walk_%s_progress.json" % tag)
+
+            # 写元信息
+            try:
+                with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as sf:
+                    json.dump({
+                        "module": module,
+                        "country": country,
+                        "pin_class": pin_class,
+                        "type": "render",
+                        "from_detect": det_job,
+                        "source_root": pd.get("dir", ""),
+                        "count": len(picked),
+                        "created": time.strftime("%Y%m%d_%H%M%S"),
+                    }, sf, ensure_ascii=False, indent=1)
+            except Exception:
+                pass
+
+            cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "render_selected.py"),
+                   "--list", lst, "--out", out_dir,
+                   "--country", country,
+                   "--signs-dir", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--jobs-progress", prog]
+            if pin_class:
+                cmd += ["--pin-class", pin_class]
+
+            try:
+                lf = open(os.path.join(out_dir, "render.log"), "w")
+                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+            return self._send(200, {"ok": True, "job": tag,
+                                    "from": det_job, "count": len(picked),
+                                    "out": out_dir})
+          except Exception as _e:
+            import traceback as _tb
+            _tb.print_exc()
+            try:
+                with open("/tmp/derive_err.log", "a") as _lf:
+                    _lf.write(_tb.format_exc() + "\n")
+            except Exception:
+                pass
+            return self._send(500, {"error": str(_e)})
+
+
+        if u.path == "/api/hybrid/submit":
+            payload = self._body()
+            if not isinstance(payload, dict):
+                return self._send(400, {"error": "参数须为 JSON 对象"})
+            try:
+                n = int(payload.get("frames") or 0)
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "frames 需为整数"})
+            bg = payload.get("bg") or "/data/render_hybrid/bgs/cand_03.jpg"
+            name = payload.get("name") or ""
+            lay = payload.get("layout") or ""
+            return self._send(200, hybrid_submit(n, bg, name, layout=lay))
         if u.path == "/api/preview":
             rec, err = start_job("preview", {})
             return self._send(400, {"error": err}) if err else self._send(200, {"id": rec["id"]})
@@ -1201,12 +2114,13 @@ class H(BaseHTTPRequestHandler):
         # [PRESCREEN] YOLO 预筛（异步，带进度）
         if u.path == "/api/tsr/prescreen":
             body = p
-            d = str(body.get("dir") or "")
+            # UNC / Windows 路径统一转成 Linux 挂载路径
+            d = normalize_net_path(str(body.get("dir") or "").strip())
             conf = float(body.get("conf") or 0.30)
             min_px = int(body.get("min_px") or 24)
             limit = int(body.get("limit") or 300)
             if not d or not os.path.isdir(d):
-                return self._send(400, {"error": "目录不存在", "dir": d})
+                return self._send(400, {"error": "目录不存在: " + d, "dir": d})
             import subprocess as _sp
             tid = uuid.uuid4().hex[:10]
             out_json = "/tmp/prescreen_%s.json" % tid
@@ -1219,13 +2133,83 @@ class H(BaseHTTPRequestHandler):
                 pass
             exe = ALGO_PYTHON if os.path.isfile(ALGO_PYTHON) else "python3"
             script_p = os.path.join(TOOLS_DIR, "prescreen_yolo.py")
-            _sp.Popen([exe, script_p, d, "--out", out_json, "--conf", str(conf),
-                       "--min-px", str(min_px), "--limit", str(limit),
-                       "--progress", prog_json],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            pin_class = str(body.get("pin_class") or "")
+            thumb_dir = "/tmp/prescreen_thumbs_%s" % tid
+            cmd = [exe, script_p, d, "--out", out_json, "--conf", str(conf),
+                   "--min-px", str(min_px), "--limit", str(limit),
+                   "--progress", prog_json,
+                   "--recursive", "--thumb-dir", thumb_dir]
+            if pin_class:
+                cmd += ["--pin-class", pin_class]
+            _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                       start_new_session=True)
             self._send(200, {"ok": True, "task": tid, "dir": d})
             return
+
+        # [RENDER-SELECTED] 只渲染勾选的帧
+        if u.path == "/api/tsr/render_selected":
+            body = p
+            tid = str(body.get("task") or "")
+            stems = body.get("stems") or []
+            country = str(body.get("country") or "BR")
+            pin_class = str(body.get("pin_class") or "")
+            if not tid or not stems:
+                return self._send(400, {"error": "缺少 task/stems"})
+
+            jf = "/tmp/prescreen_%s.json" % tid
+            if not os.path.isfile(jf):
+                return self._send(404, {"error": "检测结果不存在"})
+            with open(jf, "r", encoding="utf-8") as f:
+                res = json.load(f)
+
+            want = set(stems)
+            picked = []
+            for r in res.get("results", []):
+                key = r.get("stem") or ""
+                if key in want and r.get("path"):
+                    picked.append({"stem": key, "path": r["path"],
+                                   "seq": r.get("seq") or ""})
+            if not picked:
+                return self._send(400, {"error": "没有匹配的帧"})
+
+            tag = time.strftime("%Y%m%d_%H%M%S")
+            out_dir = os.path.join(TSR_OUT_DIR, "walk_" + tag)
+            os.makedirs(out_dir, exist_ok=True)
+            lst = "/tmp/render_sel_%s.json" % tag
+            with open(lst, "w", encoding="utf-8") as f:
+                json.dump(picked, f, ensure_ascii=False)
+            prog = os.path.join(out_dir, "walk_%s_progress.json" % tag)
+
+            cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "render_selected.py"),
+                   "--list", lst, "--out", out_dir,
+                   "--country", country,
+                   "--signs-dir", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                   "--jobs-progress", prog]
+            if pin_class:
+                cmd += ["--pin-class", pin_class]
+            try:
+                lf = open(os.path.join(out_dir, "render.log"), "w")
+                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+            return self._send(200, {"ok": True, "job": tag, "out": out_dir,
+                                    "count": len(picked)})
+
+
+        # [PRESCREEN] 读取检测结果
+
+        # [PRESCREEN] 进度
+        if u.path == "/api/tsr/prescreen_progress":
+            tid = (q.get("task") or [""])[0]
+            pf = "/tmp/prescreen_prog_%s.json" % tid
+            if not os.path.isfile(pf):
+                return self._send(200, {"done": 0, "total": 0, "usable": 0,
+                                        "hits": 0, "finished": False})
+            with open(pf, "r", encoding="utf-8") as f:
+                return self._send(200, json.load(f))
+
+        # [PRESCREEN] 缩略图
 
         # [TSR-API] 单图检测
         if u.path == "/api/tsr/detect":
@@ -1240,6 +2224,68 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "图片不存在"})
             return self._send(200, _run_algo(
                 [os.path.join(TOOLS_DIR, "tsr_detect_api.py"), fp, str(cf)], timeout=180))
+
+# [PARAM-PREVIEW] 按前端参数重渲染单帧
+        if u.path == "/api/tsr/param_preview":
+            body = p
+            stem = str(body.get("stem") or "").strip()
+            d = normalize_net_path(str(body.get("dir") or "").strip())
+            country = str(body.get("country") or "BR")
+            cls = str(body.get("target_class") or "")
+            bbox = body.get("bbox") or []
+            params = body.get("params") or {}
+
+            if not stem or not d:
+                return self._send(400, {"error": "缺少 stem/dir"})
+
+            # 从标注里拿原图路径
+            ap = os.path.join(d, "annotations", stem + ".json")
+            if not os.path.isfile(ap):
+                return self._send(404, {"error": "标注不存在: " + ap})
+            with open(ap, "r", encoding="utf-8") as f:
+                ann = json.load(f)
+            src = ann.get("source_path", "")
+            if not src or not os.path.isfile(src):
+                return self._send(404, {"error": "原图不存在: " + src})
+
+            os.makedirs(TSR_OUT_DIR, exist_ok=True)
+            # 文件名带参数哈希：参数一变就是新文件，浏览器不会命中旧缓存
+            import hashlib as _hl
+            _ph = _hl.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+            out = os.path.join(TSR_OUT_DIR,
+                               "param_%s_%s.jpg" % (_ph, stem[-24:]))
+
+            args = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "tsr_param_preview.py"),
+                    src, out,
+                    "--library", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                    "--country", country]
+            if cls:
+                args += ["--target-class", cls]
+            # 标注里记了素材文件名，直接传，避免猜错
+            mat0 = str(body.get("material") or "")
+            if not mat0:
+                objs = ann.get("objects") or []
+                if objs:
+                    mat0 = str(objs[0].get("material") or "")
+                    if not cls:
+                        cls = str(objs[0].get("class") or "")
+                        args += ["--target-class", cls]
+            if mat0:
+                args += ["--material", mat0]
+            if bbox and len(bbox) == 4:
+                args += ["--bbox", ",".join(str(round(float(v), 1)) for v in bbox)]
+            args += ["--params", json.dumps(params, ensure_ascii=False)]
+
+            try:
+                r = subprocess.run(args, capture_output=True, text=True, timeout=120)
+                last = (r.stdout or "").strip().split("\n")[-1]
+                info = json.loads(last) if last.startswith("{") else {"ok": False, "error": last}
+                if info.get("ok"):
+                    info["url"] = ("/api/tsr/result?dir=" + quote(TSR_OUT_DIR) +
+                                   "&file=" + quote(os.path.basename(out)))
+                return self._send(200 if info.get("ok") else 500, info)
+            except Exception as e:
+                return self._send(500, {"error": "渲染异常: " + str(e)})
 
         # [TSR-API] 单图替换预览
         if u.path == "/api/tsr/replace":
@@ -1283,16 +2329,50 @@ class H(BaseHTTPRequestHandler):
         # [TSR-API] 批量替换
         if u.path == "/api/tsr/walk":
             # 遍历式批量：递归扫描目录树，自动挑有标牌的帧
-            root = str(body.get("root") or "").strip()
+            body = p
+            root = normalize_net_path(str(body.get("root") or "").strip())
             if not root or not os.path.isdir(root):
-                return self._send(400, {"error": "目录不存在：" + root})
+                hint = ""
+                mnt = os.path.dirname(root)
+                while mnt and mnt != "/" and not os.path.isdir(mnt):
+                    mnt = os.path.dirname(mnt)
+                if mnt and os.path.isdir(mnt):
+                    hint = "。可用的上级目录：" + mnt
+                return self._send(400, {"error": "目录不存在：" + root + hint,
+                                        "raw": str(body.get("root") or "")})
             country = str(body.get("country") or "BR")
             limit = int(body.get("limit") or 1000)
+            pin_class = str(body.get("pin_class") or "")
+            pin_material = str(body.get("pin_material") or "")
             min_sign = int(body.get("min_sign") or 40)
             conf = float(body.get("conf") or 0.30)
-            tag = time.strftime("%m%d_%H%M%S")
-            out_dir = os.path.join(TSR_OUT_DIR, "walk_" + tag)
-            prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % tag)
+            export_dir = str(body.get("export_dir") or "").strip()
+            tag = time.strftime("%Y%m%d_%H%M%S")
+            sub = country + "_" + tag
+            # 提前记下任务参数（供任务中心展示）
+            _summary_meta = {
+                "module": str(body.get("module") or "TSR").upper(),
+                "country": country,
+                "source_root": root,
+                "pin_class": pin_class,
+                "pin_material": pin_material,
+                "min_sign": min_sign,
+                "conf": conf,
+                "limit": limit,
+                "type": "batch" if export_dir else "render",
+                "created": tag,
+            }
+            if export_dir:
+                # 交付导出：写到网盘共享目录
+                base = normalize_net_path(export_dir)
+                out_dir = os.path.join(base, sub)
+                os.makedirs(out_dir, exist_ok=True)
+                prog = os.path.join(out_dir, "progress.json")
+                # 进度文件也放共享目录，便于轮询
+                TSR_OUT_DIR_IS_SHARED = True
+            else:
+                out_dir = os.path.join(TSR_OUT_DIR, "walk_" + sub)
+                prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % sub)
             cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "batch_walk.py"),
                    "--images", root, "--country", country,
                    "--out", out_dir, "--limit", str(limit),
@@ -1301,6 +2381,16 @@ class H(BaseHTTPRequestHandler):
                    "--jobs-progress", prog]
             if body.get("vary_class", True):
                 cmd.append("--vary-class")
+            # 指定标牌：只仿这一张
+            if pin_class:
+                cmd += ["--pin-class", pin_class]
+            if pin_material:
+                cmd += ["--pin-material", pin_material]
+            if body.get("grow") is not None:
+                try:
+                    cmd += ["--grow", str(float(body["grow"]))]
+                except (TypeError, ValueError):
+                    pass
             for k in ("bright_gain", "haze_gain", "contrast_gain",
                       "satur_keep", "feather_ratio"):
                 v = body.get(k)
@@ -1358,7 +2448,18 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"error": err})
             return self._send(200, {"id": rec["id"]})
         if u.path == "/api/kill":
-            return self._send(200, {"killed": kill_job(p.get("id", ""))})
+            body = p or {}
+            # 按进程名杀（前端「停止遍历」用）
+            pat = str(body.get("pattern") or "").strip()
+            if pat:
+                try:
+                    r = subprocess.run(["pkill", "-f", pat],
+                                       capture_output=True, text=True, timeout=5)
+                    return self._send(200, {"killed_by_pattern": pat,
+                                            "rc": r.returncode})
+                except Exception as e:
+                    return self._send(500, {"error": str(e)})
+            return self._send(200, {"killed": kill_job(body.get("id", ""))})
         if u.path == "/api/config":
             return self._send(200, save_config(p))
         return self._send(404, {"error": "not found"})

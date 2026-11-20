@@ -990,15 +990,7 @@ def _create_render_target(name, width, height, format_name):
     key = (str(name), int(width), int(height), str(format_name))
     cached = _RT_CACHE.get(key)
     if cached is not None:
-        # ⚠️ 缓存的 RT 可能已被引擎回收：分辨率切换 / 关卡重载时 UObject 会失效，
-        #   此时再拿去 export 会报 "TextureRenderTarget2D: Internal Error - ObjectInstance is null!"。
-        #   这里先探活，失效就丢掉重建（实测连续两帧换分辨率时必现）。
-        try:
-            _ = cached.get_name()
-            return cached
-        except Exception:
-            _RT_CACHE.pop(key, None)
-            _log("⚠️ 渲染目标 %s 已失效，重建" % (name,))
+        return cached
     lib = _render_lib()
     creator = getattr(lib, "create_render_target2d", None) if lib is not None else None
     if creator is None:
@@ -1182,77 +1174,17 @@ def capture_channels(frame_id, cam_actor, cam_state):
     #   本函数目前只切捕获源，材质参数（DepthFarMeters=200、EncodeMax=65535）待接。
     depth_rt = _create_render_target("depth", w, h, "RTF_RGBA16F")
     _log_once("depth_ref", "深度编码参照 米→0~65535: %s" % depth_encode_reference())
-    _apply_post_material(comp, DEPTH_MATERIAL_PATH, "depth")
     _, depth_p = _capture_and_save(comp, depth_rt, "depth", cam_state, depth_p)
 
-    # 3) 语义：把每个物体的材质临时替换成「类别灰度 Unlit 材质」，捕获后还原。
-    # ⚠️ 不能用后处理材质：实测 SceneCapture.post_process_settings 与 PostProcessVolume
-    #   两条路径在无头 -ExecutePythonScript 下都完全不生效（采样值与基线逐位相同）。
-    #   材质替换实测有效（road 区域灰度精确等于 stencil/255）。实现见 semantic_capture.py。
-    # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8。
+    # 3) 语义：CustomDepth 模板值经后处理材质写成灰度图
+    # TODO(阶段三): 语义通道目前只切到最终颜色 + R8 目标，真正取 stencil 需要
+    #   (a) 后处理材质采样 SceneTexture:CustomStencil 并直接输出（不做颜色变换）；
+    #   (b) 确认 SceneCapture2D 的 post_process_settings 能挂该材质；
+    #   (c) 天空 255 的取法（sky actor/天空材质单独给 stencil）。
+    # ⚠️ 同深度通道：RTF_R8 落盘 0 字节，改用 RTF_RGBA8，模板值走 R 通道。
     sem_rt = _create_render_target("sem", w, h, "RTF_RGBA8")
-    try:
-        # 脚本目录要在 sys.path 里（-ExecutePythonScript 不保证当前目录是本脚本所在目录）
-        _here = os.path.dirname(os.path.abspath(__file__))
-        if _here not in sys.path:
-            sys.path.insert(0, _here)
-        import semantic_capture as _sem
-        sem_p = _sem.capture_semantic(comp, sem_rt, _save_render_target, sem_p)
-    except Exception as e:
-        import traceback as _tb
-        _log("⚠️ 语义通道材质替换失败(%s)，退回普通捕获（内容将是颜色图）" % e)
-        _log("   详情: " + _tb.format_exc()[:400].replace(chr(10), " | "))
-        _, sem_p = _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
+    _, sem_p = _capture_and_save(comp, sem_rt, "sem", cam_state, sem_p)
     return (rgb_p, depth_p, sem_p)
-
-
-# 后处理材质路径（setup_assets.py 生成在 /Game/Validation/ 下）。
-# 找不到时只告警不中断 —— 老环境没有这两个材质也能跑出 RGB。
-DEPTH_MATERIAL_PATH = "/Game/Validation/M_LinearDepth"
-SEMANTIC_MATERIAL_PATH = "/Game/Validation/M_SemanticMask"
-
-
-def _apply_post_material(comp, material_path, channel):
-    """把后处理材质挂到/摘离 SceneCapture 的 post_process_settings。
-
-    为什么必须挂：深度通道拿到的是非线性 NDC 深度、语义通道拿到的是渲染颜色，
-    都靠后处理材质在 GPU 端换算成 0~1 的可用值；不挂的话输出是原始值，
-    转 8bit 后通常全白或全红（实测现象）。
-    """
-    try:
-        if material_path is None:
-            settings = comp.get_editor_property("post_process_settings")
-            try:
-                settings.set_editor_property("weighted_blendables", unreal.WeightedBlendables())
-                comp.set_editor_property("post_process_settings", settings)
-            except Exception:
-                pass
-            return True
-
-        mat = unreal.load_asset(material_path)
-        if mat is None:
-            _log_once("mat_" + channel,
-                      "⚠️ 后处理材质缺失 %s，%s 通道将输出原始值（转 8bit 后可能过曝）"
-                      % (material_path, channel))
-            return False
-
-        settings = comp.get_editor_property("post_process_settings")
-        # ⚠️ 实测：直接构造 WeightedBlendables 并 set 进去不生效（读回 len=0）；
-        #   必须取出 array → append → 回写，最后整体 set 回组件。
-        blend = settings.get_editor_property("weighted_blendables")
-        arr = blend.get_editor_property("array")
-        entry = unreal.WeightedBlendable()
-        _try_set_editor_property(entry, "weight", 1.0, "post")
-        _try_set_editor_property(entry, "object", mat, "post")
-        arr.append(entry)
-        blend.set_editor_property("array", arr)
-        settings.set_editor_property("weighted_blendables", blend)
-        comp.set_editor_property("post_process_settings", settings)
-        _log_once("mat_" + channel, "%s 通道已挂后处理材质 %s" % (channel, material_path))
-        return True
-    except Exception as e:
-        _log_once("mat_err_" + channel, "⚠️ 后处理材质挂载失败(%s): %s" % (channel, e))
-        return False
 
 
 _LOG_ONCE = set()

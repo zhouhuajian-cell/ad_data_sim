@@ -140,7 +140,7 @@ function render(reset){
     const o = (it.objects || [])[0] || {};
     const stem = it.stem;
     const srcUrl = '/api/tsr/src?dir=' + encodeURIComponent(DIR) + '&stem=' + encodeURIComponent(stem) + '&max=700';
-    const compUrl = '/api/tsr/result?file=' + encodeURIComponent(it.composed);
+    const compUrl = '/api/tsr/result?dir=' + encodeURIComponent(DIR) + '&file=' + encodeURIComponent(it.composed);
     const sz = o.bbox ? Math.round(Math.min(o.bbox[2]-o.bbox[0], o.bbox[3]-o.bbox[1])) : 0;
     return `<div class="card">
       <div class="pair">
@@ -152,7 +152,8 @@ function render(reset){
       <div class="body">
         <span class="cls" title="${esc(o.class||'')}">${esc(o.class||'-')}</span>
         <span class="stem">${sz}px</span>
-        <button class="zoom" data-stem="${esc(stem)}">放大</button>
+        <button class="zoom" data-stem="${esc(stem)}" data-act="zoom">放大</button>
+        <button class="zoom" data-stem="${esc(stem)}" data-act="locate">定位标牌</button>
       </div>
     </div>`;
   }).join(''));
@@ -170,12 +171,60 @@ $('#grid').addEventListener('click', e => {
   if (e.target.tagName === 'IMG') {
     openLb(e.target.dataset.full || e.target.src);
   } else if (e.target.classList.contains('zoom')) {
-    // 左右并排放大
     const card = e.target.closest('.card');
     const imgs = [...card.querySelectorAll('img')].map(i => i.dataset.full || i.src);
+    const act = e.target.dataset.act || 'zoom';
     openPair(imgs[0], imgs[1]);
+    // locateSign：直接缩放到标牌位置
+    if (act === 'locate') setTimeout(() => locateSign(e.target.dataset.stem), 400);
   }
 });
+
+/* 把大图缩放到标牌位置。
+   transform-origin 是 center center，变换公式：
+     屏幕坐标 = 视口中心 + (图片归一化坐标 - 0.5) × 显示尺寸 × 缩放 + 平移
+   要让标牌中心落到视口中心，需要
+     平移 = -(标牌归一化坐标 - 0.5) × 显示尺寸 × 缩放
+   显示尺寸是图片在 lightbox 里未被缩放时的实际渲染尺寸（不是视口尺寸）。 */
+async function locateSign(stem){
+  try {
+    const url = '/api/tsr/src?dir=' + encodeURIComponent(DIR)
+              + '&stem=' + encodeURIComponent(stem) + '&bbox=1';
+    const j = await fetch(url).then(x => x.json());
+    const o = (j.objects || [])[0];
+    if (!o || !o.bbox) return;
+    const [x1, y1, x2, y2] = o.bbox;
+    const W = j.width || 1920, H = j.height || 1080;
+
+    const pair = document.querySelector('#lbPair');
+    const img = pair ? pair.querySelector('img') : null;
+    if (!img) return;
+
+    // 复位到 1:1，量出图片在页面上的实际渲染矩形
+    lbTx = 0; lbTy = 0; lbK = 1; applyLb();
+    await new Promise(r => setTimeout(r, 80));
+
+    const ir = img.getBoundingClientRect();
+    const iw = ir.width, ih = ir.height;     // 未缩放时的显示尺寸
+    const icx = ir.left + iw / 2;            // 图片中心（视口坐标）
+    const icy = ir.top + ih / 2;
+
+    // 标牌中心在「图片归一化坐标」里的位置
+    const nx = ((x1 + x2) / 2) / W;
+    const ny = ((y1 + y2) / 2) / H;
+
+    // 目标缩放：标牌占视口宽度约 50%
+    const signW = Math.max((x2 - x1) / W, 0.002);
+    lbK = Math.min(12, Math.max(2, 0.5 / signW));
+
+    // transform-origin 是 center center：缩放围绕元素中心进行。
+    // 要让「图片上归一化点 (nx,ny)」落到视口中心，需要
+    //   translate = 视口中心 - 图片中心 - (nx-0.5)*iw*k , 同理 y
+    lbTx = innerWidth / 2 - icx - (nx - 0.5) * iw * lbK;
+    lbTy = innerHeight / 2 - icy - (ny - 0.5) * ih * lbK;
+    applyLb();
+  } catch (err) { console.warn('locateSign', err); }
+}
 
 let lbTx = 0, lbTy = 0, lbK = 1, lbDrag = null;
 function applyLb(){
