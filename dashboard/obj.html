@@ -14,6 +14,29 @@
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
 </style>
 <main>
+<!-- GND-REAL: 真实底图 2.5D 标线投影 -->
+<div id="gndReal" style="margin:18px 0;padding:18px;background:#1e293b;border-radius:8px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+    <span style="color:#e2e8f0;font-size:16px;font-weight:600">GND 真实底图投影</span>
+    <span style="color:#94a3b8;font-size:12px">磨损纹理 + 人工标定，直接投到实拍路面</span>
+  </div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    <label style="color:#94a3b8;font-size:13px">底图
+      <select id="grBg" style="background:#0b1120;border:1px solid #334155;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:13px;margin-left:6px">
+        <option>加载中…</option>
+      </select>
+    </label>
+    <label style="color:#94a3b8;font-size:13px">车道数
+      <input id="grLanes" value="3" style="width:50px;background:#0b1120;border:1px solid #334155;color:#e2e8f0;border-radius:5px;padding:5px 6px;font-size:13px;margin-left:6px">
+    </label>
+    <label style="color:#94a3b8;font-size:13px"><input type="checkbox" id="grDash" checked> 中间虚线</label>
+    <label style="color:#94a3b8;font-size:13px"><input type="checkbox" id="grStop"> 加停止线</label>
+    <button id="grRun">生成标线</button>
+  </div>
+  <div id="grMsg" style="color:#94a3b8;font-size:13px;min-height:18px"></div>
+  <div id="grOut" style="margin-top:14px"></div>
+</div>
+
   <section id="local-entry" hidden>
     <p>正在打开服务器上的 OBJ 工作台。</p>
     <a href="http://10.2.248.34:8010/obj">打开 OBJ 工作台</a>
@@ -136,5 +159,86 @@ if (location.protocol === 'file:') {
 } else {
   poll();
 }
+</script>
+
+<script>
+(function(){
+  'use strict';
+  var BG_LIST = [];
+  function $(id){ return document.getElementById(id); }
+
+  async function loadBg(){
+    try {
+      var r = await fetch('/api/tsr/bg_list', {cache:'no-store'});
+      var d = await r.json();
+      BG_LIST = d.images || [];
+      var sel = $('grBg');
+      if (!sel) return;
+      sel.innerHTML = BG_LIST.map(function(it){
+        return '<option value="' + it.name + '">' + it.name + '</option>';
+      }).join('');
+      if (BG_LIST.some(function(x){ return x.name==='cand_04.jpg'; })) {
+        sel.value = 'cand_04.jpg';
+      }
+    } catch(e) {}
+  }
+
+  function buildLines(){
+    var n = parseInt($('grLanes').value, 10) || 3;
+    var dash = $('grDash').checked;
+    var stop = $('grStop').checked;
+    var parts = [];
+    var laneW = 3.5, half = n * laneW / 2;
+    for (var i = 0; i <= n; i++) {
+      var y = -half + i * laneW;
+      var edge = (i === 0 || i === n);
+      var cls = edge ? 'road_edge_white' : (dash ? 'lane_dashed_white' : 'lane_solid_white');
+      parts.push(cls + ',' + y.toFixed(2) + ',6,14');
+    }
+    if (stop) parts.push('stop_line,0,20,0.4');
+    return parts.join(';');
+  }
+
+  async function run(){
+    var btn = $('grRun');
+    btn.disabled = true; btn.textContent = '生成中…';
+    $('grMsg').textContent = '正在投影…';
+    $('grOut').innerHTML = '';
+    try {
+      var r = await fetch('/api/gnd/project', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ bg: $('grBg').value, lines: buildLines() })
+      });
+      var d = await r.json();
+      if (!d.ok) {
+        $('grMsg').innerHTML = '<span style="color:#f87171">失败：' +
+          String(d.error||'unknown').replace(/</g,'&lt;').slice(0,400) + '</span>';
+        return;
+      }
+      $('grMsg').innerHTML = '<span style="color:#4ade80">完成 · ' +
+        (d.lines||[]).length + ' 条标线 · training_eligible=' + d.training_eligible + '</span>';
+      if (d.image_url) {
+        // image_url 已含 ? 参数，用 & 追加时间戳避免缓存
+        var u = d.image_url + (d.image_url.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now();
+        $('grOut').innerHTML =
+          '<img src="' + u + '" style="border-radius:8px">' +
+          '<pre style="margin-top:10px;color:#94a3b8;font-size:12px">' +
+          (d.lines||[]).map(function(l){
+            return l.class + '  width=' + l.width_m + 'm  alpha=' + (l.alpha_mean||0).toFixed(4);
+          }).join('\n') + '</pre>';
+      }
+    } catch(e) {
+      $('grMsg').innerHTML = '<span style="color:#f87171">请求失败：' + e.message + '</span>';
+    } finally {
+      btn.disabled = false; btn.textContent = '生成标线';
+    }
+  }
+
+  setTimeout(function(){
+    loadBg();
+    var b = $('grRun');
+    if (b) b.onclick = run;
+  }, 300);
+})();
 </script>
 </html>

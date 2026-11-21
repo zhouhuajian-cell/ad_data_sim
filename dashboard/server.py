@@ -1042,6 +1042,111 @@ class H(BaseHTTPRequestHandler):
 
         # [WALK-JOBS] 列出最近的遍历任务（供刷新后恢复状态）
 
+        # [GND-PROJECT] 读取产出图
+        if u.path == "/api/gnd/result":
+            d = (q.get("dir") or [""])[0]
+            n = (q.get("name") or [""])[0]
+            if not d or not n or "/" in d or ".." in d or "/" in n or ".." in n:
+                return self._send(400, {"error": "bad param"})
+            p = os.path.join("/data/render_hybrid", d, n)
+            if not os.path.isfile(p):
+                return self._send(404, {"error": "not found"})
+            with open(p, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+
+        # [JOB-IMAGES] 列出某任务目录下的产出图
+        if u.path == "/api/job/images":
+            job = (q.get("job") or [""])[0]
+            if not job:
+                return self._send(400, {"error": "缺少 job"})
+            cands = [
+                os.path.join(TSR_OUT_DIR, "walk_" + job),
+                os.path.join(TSR_OUT_DIR, job),
+                os.path.join("/mnt/Data_Platform/zhj_datasim", job),
+                os.path.join("/data/render_hybrid", job),
+            ]
+            dp = next((c for c in cands if os.path.isdir(c)), "")
+            if not dp:
+                return self._send(404, {"error": "目录不存在"})
+            try:
+                imgs = sorted([
+                    f for f in os.listdir(dp)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png"))
+                    and not f.startswith("contact")
+                    and "_mask" not in f and "_fg" not in f and "_shadow" not in f
+                ])
+                return self._send(200, {"job": job, "dir": dp, "images": imgs})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+
+        # [JOB-ANNOTATION] 读取任务目录下某帧的标注
+        if u.path == "/api/job/annotation":
+            job = (q.get("job") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            if not job or "/" in job or ".." in job:
+                return self._send(400, {"error": "参数错误"})
+            cands = [
+                os.path.join(TSR_OUT_DIR, "walk_" + job),
+                os.path.join(TSR_OUT_DIR, job),
+                os.path.join("/mnt/Data_Platform/zhj_datasim", job),
+                os.path.join("/data/render_hybrid", job),
+            ]
+            dp = next((c for c in cands if os.path.isdir(c)), "")
+            if not dp:
+                return self._send(404, {"error": "目录不存在"})
+            ad = os.path.join(dp, "annotations")
+            fp = ""
+            if stem and os.path.isfile(os.path.join(ad, stem + ".json")):
+                fp = os.path.join(ad, stem + ".json")
+            elif os.path.isdir(ad):
+                js = sorted([f for f in os.listdir(ad) if f.endswith(".json")])
+                if js:
+                    fp = os.path.join(ad, js[0])
+            if not fp:
+                return self._send(404, {"error": "标注不存在"})
+            with open(fp, "r", encoding="utf-8") as f:
+                return self._send(200, json.load(f))
+
+        # [JOB-IMAGE] 读取单张产出图
+        if u.path == "/api/job/image":
+            job = (q.get("job") or [""])[0]
+            name = (q.get("name") or [""])[0]
+            if not job or not name or "/" in name or ".." in name:
+                return self._send(400, {"error": "参数错误"})
+            cands = [
+                os.path.join(TSR_OUT_DIR, "walk_" + job),
+                os.path.join(TSR_OUT_DIR, job),
+                os.path.join("/mnt/Data_Platform/zhj_datasim", job),
+                os.path.join("/data/render_hybrid", job),
+            ]
+            dp = next((c for c in cands if os.path.isdir(c)), "")
+            if not dp:
+                return self._send(404, {"error": "目录不存在"})
+            fp = os.path.join(dp, name)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "文件不存在"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            ext = os.path.splitext(name)[1].lower()
+            ct = {".png": "image/png", ".jpg": "image/jpeg",
+                  ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         # [CALIB] 列出底图（供标定面板选图）
         if u.path == "/api/tsr/bg_list":
             try:
@@ -1145,11 +1250,12 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     pass
 
-            # 2) 仿真/批量任务：找目录
+            # 2) 仿真/批量任务：找目录（含 OBJ/GND）
             cands = [
                 os.path.join(TSR_OUT_DIR, "walk_" + job),
                 os.path.join(TSR_OUT_DIR, job),
                 os.path.join("/mnt/Data_Platform/zhj_datasim", job),
+                os.path.join("/data/render_hybrid", job),   # OBJ / GND
             ]
             dp = next((c for c in cands if os.path.isdir(c)), "")
             if not dp:
@@ -1158,7 +1264,28 @@ class H(BaseHTTPRequestHandler):
             info = {"job": job, "dir": dp}
             ad = os.path.join(dp, "annotations")
             if os.path.isdir(ad):
-                info["n"] = len(os.listdir(ad))
+                info["n"] = len([f for f in os.listdir(ad) if f.endswith(".json")])
+
+            # OBJ/GND: 从 summary.json 读模块与源信息
+            sf0 = os.path.join(dp, "summary.json")
+            if os.path.isfile(sf0):
+                try:
+                    with open(sf0, "r", encoding="utf-8") as _f:
+                        _sm = json.load(_f)
+                    for k in ("module", "type", "bg", "layout", "lines",
+                              "frames", "source_root", "country"):
+                        if k in _sm:
+                            info[k] = _sm[k]
+                    if _sm.get("source_root"):
+                        info["root"] = _sm["source_root"]
+                except Exception:
+                    pass
+
+            # 统计产出图
+            if not info.get("n"):
+                _jpgs = [f for f in os.listdir(dp) if f.endswith(".jpg")
+                         and not f.startswith("contact")]
+                info["n"] = len(_jpgs)
 
             # 从 summary.json 读参数
             sf = os.path.join(dp, "summary.json")
@@ -1932,6 +2059,268 @@ class H(BaseHTTPRequestHandler):
         # [JOB-LIST] 列出所有有产出的任务（工作台下拉用）
         # [DERIVE-SIM] 从检测任务派生仿真任务（只渲染检测到的帧）
         # [JOB-DELETE] 删除任务记录（检测 json 或产出目录）
+        # [DISPATCH] OBJ 派发（后台跑 UE，写统一任务注册表）
+        if u.path == "/api/obj/dispatch":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                layout = str(body.get("layout") or "cone_line")
+                bg = str(body.get("bg") or "cand_03.jpg")
+                frames = int(body.get("frames") or 4)
+                frames = max(1, min(frames, 200))
+
+                job = "obj_" + time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render_hybrid/" + job
+                os.makedirs(out_dir, exist_ok=True)
+                os.chmod(out_dir, 0o777)
+
+                # 写任务元信息（供任务记录展示）
+                with open(os.path.join(out_dir, "summary.json"), "w",
+                          encoding="utf-8") as sf:
+                    json.dump({
+                        "module": "OBJ",
+                        "type": "render",
+                        "layout": layout,
+                        "bg": bg,
+                        "frames": frames,
+                        "source_root": "/data/render_hybrid/bgs/" + bg,
+                        "created": time.strftime("%Y%m%d_%H%M%S"),
+                    }, sf, ensure_ascii=False, indent=1)
+
+                cmd = ["su", "algo", "-c",
+                       "cd /data/avsynth/HybridPipeline/scripts && "
+                       "DEMO_BG_NAME=%s "
+                       "python3 obj_batch_worker.py run "
+                       "--frames %d --out %s --chunk %d --seed %d "
+                       "--layout %s --bg /data/render_hybrid/bgs/%s"
+                       % (bg, frames, out_dir, min(frames, 4),
+                          int(time.time()) % 100000, layout, bg)]
+
+                lf = open(os.path.join(out_dir, "run.log"), "w")
+                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+
+                return self._send(200, {
+                    "ok": True, "job": job, "out": out_dir, "frames": frames,
+                })
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
+
+        # [PLACE] OBJ 按点选位置派发（像素 → 世界坐标 → UE）
+        if u.path == "/api/obj/place":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                bg = str(body.get("bg") or "cand_04.jpg")
+                picks = body.get("picks") or []
+                frames = int(body.get("frames") or 1)
+                if not picks:
+                    return self._send(400, {"ok": False, "error": "没有点选位置"})
+
+                # 像素 → UE 世界坐标
+                import sys as _sys
+                if TOOLS_DIR not in _sys.path:
+                    _sys.path.insert(0, TOOLS_DIR)
+                from pixel2world import load_cam, pixel_to_ue_cm
+
+                cam = load_cam(bg)
+                if cam is None:
+                    return self._send(400, {"ok": False,
+                                            "error": "该底图无相机参数，请先做地面标定"})
+
+                placed = []
+                for pt in picks[:20]:
+                    u = float(pt.get("u") or 0)
+                    v = float(pt.get("v") or 0)
+                    cls = str(pt.get("cls") or "cone")
+                    w = pixel_to_ue_cm(cam, u, v)
+                    if w is None:
+                        continue
+                    placed.append({"cls": cls, "x_cm": w["x_cm"],
+                                   "y_cm": w["y_cm"]})
+                if not placed:
+                    return self._send(400, {"ok": False,
+                                            "error": "所有点都无法反投影到地面（可能在天空或太近）"})
+
+                job = "obj_" + time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render_hybrid/" + job
+                os.makedirs(out_dir, exist_ok=True)
+                os.chmod(out_dir, 0o777)
+
+                with open(os.path.join(out_dir, "summary.json"), "w",
+                          encoding="utf-8") as sf:
+                    json.dump({
+                        "module": "OBJ", "type": "place",
+                        "bg": bg, "frames": frames,
+                        "placed": placed,
+                        "source_root": "/data/render_hybrid/bgs/" + bg,
+                        "created": time.strftime("%Y%m%d_%H%M%S"),
+                    }, sf, ensure_ascii=False, indent=1)
+
+                _placed_json = json.dumps(placed, ensure_ascii=False)
+                # shell 安全：转义单引号
+                _placed_json = _placed_json.replace("'", "'\\''")
+
+                cmd = ["su", "algo", "-c",
+                       "cd /data/avsynth/HybridPipeline/scripts && "
+                       "DEMO_BG_NAME=%s DEMO_PLACED='%s' "
+                       "DEMO_LAYOUT=placed "
+                       "python3 obj_batch_worker.py run "
+                       "--frames %d --out %s --chunk %d --seed %d "
+                       "--layout placed --bg /data/render_hybrid/bgs/%s"
+                       % (bg, _placed_json, frames, out_dir,
+                          min(frames, 4), int(time.time()) % 100000, bg)]
+
+                lf = open(os.path.join(out_dir, "run.log"), "w")
+                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+
+                return self._send(200, {"ok": True, "job": job,
+                                        "out": out_dir,
+                                        "placed": placed,
+                                        "count": len(placed)})
+            except Exception as e:
+                import traceback
+                return self._send(500, {"ok": False,
+                                        "error": str(e),
+                                        "trace": traceback.format_exc()[-800:]})
+
+        # [DISPATCH] GND 派发（直接投影，秒级完成）
+        if u.path == "/api/gnd/dispatch":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                bg = str(body.get("bg") or "cand_04.jpg")
+                lines = str(body.get("lines") or "")
+                picks = body.get("picks") or []
+
+                # 点选模式：像素 → 世界坐标 → 生成标线参数
+                if picks and not lines:
+                    import sys as _sys
+                    if TOOLS_DIR not in _sys.path:
+                        _sys.path.insert(0, TOOLS_DIR)
+                    from pixel2world import load_cam, pixel_to_ue_cm
+                    cam = load_cam(bg)
+                    if cam is None:
+                        return self._send(400, {
+                            "ok": False,
+                            "error": "该底图无相机参数，请先做地面标定"})
+                    parts = []
+                    for pt in picks[:10]:
+                        u = float(pt.get("u") or 0)
+                        v = float(pt.get("v") or 0)
+                        cls = str(pt.get("cls") or "lane_solid_white")
+                        w = pixel_to_ue_cm(cam, u, v)
+                        if w is None:
+                            continue
+                        x_m = w["x_cm"] / 100.0
+                        y_m = w["y_cm"] / 100.0
+                        parts.append("%s,%.2f,%.2f,10" % (cls, y_m, x_m))
+                    if not parts:
+                        return self._send(400, {
+                            "ok": False,
+                            "error": "所有点都无法反投影（可能点在天空或太近）"})
+                    lines = ";".join(parts)
+
+                job = "gnd_" + time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render_hybrid/" + job
+                os.makedirs(out_dir, exist_ok=True)
+
+                with open(os.path.join(out_dir, "summary.json"), "w",
+                          encoding="utf-8") as sf:
+                    json.dump({
+                        "module": "GND",
+                        "type": "project",
+                        "bg": bg,
+                        "lines": lines,
+                        "source_root": "/data/render_hybrid/bgs/" + bg,
+                        "created": time.strftime("%Y%m%d_%H%M%S"),
+                    }, sf, ensure_ascii=False, indent=1)
+
+                cmd = [ALGO_PYTHON,
+                       os.path.join(TOOLS_DIR, "gnd_project.py"),
+                       "--bg", bg, "--out", out_dir]
+                if lines:
+                    cmd += ["--lines", lines]
+
+                env = dict(os.environ)
+                env["PYTHONPATH"] = TOOLS_DIR
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=180, env=env)
+                if r.returncode != 0:
+                    return self._send(500, {
+                        "ok": False,
+                        "error": (r.stderr or r.stdout or "")[-1200:],
+                    })
+
+                stem = os.path.splitext(os.path.basename(bg))[0]
+                img = os.path.join(out_dir, stem + "_gnd_composed.jpg")
+                return self._send(200, {
+                    "ok": True,
+                    "job": job,
+                    "out": out_dir,
+                    "image": os.path.basename(img) if os.path.isfile(img) else "",
+                })
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
+
+        # [GND-PROJECT] 真实底图 + 磨损纹理 + 人工标定的 2.5D 标线投影
+        if u.path == "/api/gnd/project":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                bg = str(body.get("bg") or "cand_04.jpg")
+                lines = str(body.get("lines") or "")
+                tag = time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render_hybrid/gnd_out_" + tag
+                os.makedirs(out_dir, exist_ok=True)
+
+                cmd = [ALGO_PYTHON,
+                       os.path.join(TOOLS_DIR, "gnd_project.py"),
+                       "--bg", bg,
+                       "--out", out_dir]
+                if lines:
+                    cmd += ["--lines", lines]
+
+                env = dict(os.environ)
+                env["PYTHONPATH"] = TOOLS_DIR
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=180, env=env)
+                if r.returncode != 0:
+                    return self._send(500, {
+                        "ok": False,
+                        "error": (r.stderr or r.stdout or "")[-1500:],
+                    })
+
+                # 找产出
+                ann_dir = os.path.join(out_dir, "annotations")
+                stem = os.path.splitext(os.path.basename(bg))[0]
+                img_p = os.path.join(out_dir, stem + "_gnd_composed.jpg")
+                ann_p = os.path.join(ann_dir, stem + ".json")
+                ann = {}
+                if os.path.isfile(ann_p):
+                    with open(ann_p, encoding="utf-8") as f:
+                        ann = json.load(f)
+
+                return self._send(200, {
+                    "ok": True,
+                    "out_dir": out_dir,
+                    "image": os.path.basename(img_p) if os.path.isfile(img_p) else "",
+                    "image_url": "/api/gnd/result?dir=" + os.path.basename(out_dir) +
+                                 "&name=" + os.path.basename(img_p),
+                    "lines": ann.get("lines", []),
+                    "quality": ann.get("quality", {}),
+                    "training_eligible": ann.get("training_eligible", False),
+                    "log": r.stdout[-2000:],
+                })
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
+
+
         # [CALIB] 地面四点点选标定
         if u.path == "/api/tsr/calib_save":
             body = self._body()
