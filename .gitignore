@@ -58,3 +58,16 @@ _sync3/
 # ============ 大文档 ============
 *.docx
 TSR_*样张*.html
+
+# ============ 运行产物 / 中间文件 ============
+tools/runs/
+tools/weights/
+tools/__pycache__/
+dashboard/static/tmp/
+*.tmp
+*.bak
+*.bak_*
+*.bak.*
+*_u8.py
+rs.sh
+44.py
