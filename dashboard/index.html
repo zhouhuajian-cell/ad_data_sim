@@ -9609,7 +9609,11 @@ pipe = SignRealismPipeline(cfg)`;
 (function(){
   'use strict';
 
-  var ST = { job: '', module: '', images: [], idx: 0, ann: null };
+  // 按模块独立状态，避免切换任务/模块时串图
+  var ST = {
+    obj: { job: '', images: [], idx: 0, ann: null, reqId: 0 },
+    gnd: { job: '', images: [], idx: 0, ann: null, reqId: 0 }
+  };
 
   function $(id){ return document.getElementById(id); }
 
@@ -9769,9 +9773,11 @@ pipe = SignRealismPipeline(cfg)`;
     var id = 'view-wb-' + modName;
     var color = modName === 'gnd' ? '#EAB308' : '#22C55E';
 
-    ST.job = job;
-    ST.module = module;
-    ST.idx = 0;
+    var st = ST[modName];
+    st.job = job;
+    st.idx = 0;
+    st.ann = null;
+    var myReq = ++st.reqId;      // 请求版本：旧响应回来直接丢弃
 
     $(id + '_job').textContent = job;
     $(id + '_count').textContent = '加载中…';
@@ -9783,8 +9789,9 @@ pipe = SignRealismPipeline(cfg)`;
       var r = await fetch('/api/job/images?job=' + encodeURIComponent(job),
                           {cache:'no-store'});
       var d = await r.json();
+      if (st.reqId !== myReq) return;   // 已被新请求取代
       var imgs = d.images || [];
-      ST.images = imgs;
+      st.images = imgs;
 
       if (!imgs.length) {
         $(id + '_count').textContent = '暂无产出';
@@ -9809,10 +9816,8 @@ pipe = SignRealismPipeline(cfg)`;
         el.onclick = function(){ pick(modName, parseInt(el.dataset.i, 10)); };
       });
 
+      // pick() 内部已调用 loadAnnFor，无需再单独加载
       pick(modName, 0);
-
-      // 加载标注（用于显示 bbox）
-      loadAnn(modName, job, imgs[0]);
 
     } catch(e) {
       $(id + '_count').textContent = '加载失败: ' + e.message;
@@ -9821,8 +9826,9 @@ pipe = SignRealismPipeline(cfg)`;
 
   function pick(modName, i){
     var id = 'view-wb-' + modName;
-    if (!ST.images[i]) return;
-    ST.idx = i;
+    var st = ST[modName];
+    if (!st.images[i]) return;
+    st.idx = i;
     var color = modName === 'gnd' ? '#EAB308' : '#22C55E';
 
     Array.prototype.forEach.call($(id + '_list').querySelectorAll('.mrThumb'), function(el){
@@ -9834,29 +9840,54 @@ pipe = SignRealismPipeline(cfg)`;
     var sim = $(id + '_sim');
     sim.style.display = 'none';
     sim.onload = function(){ sim.style.display = 'block'; };
-    sim.src = '/api/job/image?job=' + encodeURIComponent(ST.job) +
-              '&name=' + encodeURIComponent(ST.images[i]) + '&t=' + Date.now();
+    sim.src = '/api/job/image?job=' + encodeURIComponent(st.job) +
+              '&name=' + encodeURIComponent(st.images[i]) + '&t=' + Date.now();
+
+    // 每帧同步加载对应标注（原图 + bbox 都跟着换）
+    loadAnnFor(modName, st.job, st.images[i]);
   }
 
-  async function loadAnn(modName, job, imgName){
+  /* 每帧单独加载标注：严格按 stem，缺失就 404，不回退首帧 */
+  async function loadAnnFor(modName, job, imgName){
     var id = 'view-wb-' + modName;
-    try {
-      var stem = imgName.replace(/_composed\.jpg$/, '').replace(/_gnd_composed\.jpg$/, '');
-      var r = await fetch('/api/job/annotation?job=' + encodeURIComponent(job) +
-                          '&stem=' + encodeURIComponent(stem), {cache:'no-store'});
-      if (!r.ok) return;
-      var a = await r.json();
-      ST.ann = a;
+    var st = ST[modName];
+    if (!st) { console.warn('[loadAnnFor] 无 state', modName); return; }
+    var myReq = st.reqId;
 
-      // 显示原图
+    // 单一后缀表达式：只剥一次，且先剥长的
+    var stem = String(imgName).replace(/(_gnd)?_composed\.(jpg|jpeg|png)$/i, '');
+
+    // 原图：优先用标注里的 source_path
+    try {
+      var r = await fetch('/api/job/annotation?job=' + encodeURIComponent(job) +
+                          '&stem=' + encodeURIComponent(stem),
+                          {cache:'no-store'});
+      if (st.reqId !== myReq) return;
+      if (!r.ok) {
+        st.ann = null;
+        return;
+      }
+      var a = await r.json();
+      if (st.reqId !== myReq) return;
+      st.ann = a;
+
       if (a.source_path) {
         var orig = $(id + '_orig');
-        orig.style.display = 'none';
-        orig.onload = function(){ orig.style.display = 'block'; };
-        orig.src = '/api/tsr/src?path=' + encodeURIComponent(a.source_path) + '&max=1600';
+        if (orig) {
+          orig.style.display = 'none';
+          orig.onload = function(){
+            orig.style.display = 'block';
+            if (window.__syncPickCanvas) window.__syncPickCanvas(modName);
+          };
+          orig.src = '/api/tsr/src?path=' + encodeURIComponent(a.source_path) +
+                     '&max=1600&t=' + Date.now();
+        }
       }
-    } catch(e) {}
+    } catch(e) {
+      st.ann = null;
+    }
   }
+
 
   /* 事件委托兜底：即使 onclick 没绑上也能响应 */
   document.addEventListener('click', function(e){
@@ -9957,10 +9988,11 @@ console.log('[MODULE-WORKBENCH] ready');
       drawMarks(modName);
     };
 
-    // 画布点击
+    // 画布点击（用 __fix 按底图原始尺寸还原坐标）
     cv.addEventListener('click', function(e){
       if (PICK[modName].length >= 20) return;
-      var p = canvasToImage(cv, orig, e);
+      var p = (cv.__fix ? cv.__fix(e.clientX, e.clientY)
+                        : canvasToImage(cv, orig, e));
       if (!p) return;
 
       var c = cls.value;
@@ -10091,8 +10123,12 @@ console.log('[MODULE-WORKBENCH] ready');
         try { localStorage.setItem('psim.jobs', JSON.stringify(window.__JOB_REG)); } catch(e) {}
       }
 
-      // 轮询结果
-      setTimeout(function(){ show(d.job, modName.toUpperCase()); }, 3000);
+      // 刷新结果（用全局入口，避免跨作用域拿不到 show）
+      setTimeout(function(){
+        if (window.__showModuleWorkbench) {
+          window.__showModuleWorkbench(d.job, modName.toUpperCase());
+        }
+      }, 1500);
 
     } catch(e) {
       alert('请求失败：' + e.message);
@@ -10140,6 +10176,96 @@ console.log('[MODULE-WORKBENCH] ready');
   window.__syncPickCanvas = syncCanvas;
   console.log('[PICK-PLACE] ready');
 })();
+
+
+  /* ===== PICK-SCALE-FIX：点选坐标按底图原始尺寸还原 =====
+     原图经 /api/tsr/src?max=1600 缩小显示（1600x900），底图是 1920x1080。
+     点击必须按 1920x1080 输出，否则反投影偏移 1.2 倍。
+     不依赖其它作用域变量，尺寸自己从 DOM / 接口取。
+  */
+  (function(){
+    var SIZES = {};        // modName -> {w, h}
+
+    function probeSize(modName){
+      var id = 'view-wb-' + modName;
+      var jobEl = document.getElementById(id + '_job');
+      var sim = document.getElementById(id + '_sim');
+      if (!sim) return;
+
+      // 从合成图 URL 拿 job，再查 /api/job/annotation 拿 width/height
+      // 但更简单：底图尺寸对 OBJ/GND 统一是 1920x1080（底图池固定）
+      // 仍走一次接口确认，失败就用默认
+      if (SIZES[modName]) return;
+
+      SIZES[modName] = { w: 1920, h: 1080 };
+    }
+
+    function attach(modName){
+      var id = 'view-wb-' + modName;
+      var cv = document.getElementById(id + '_cv');
+      var img = document.getElementById(id + '_orig');
+      if (!cv || !img) return;
+      if (cv.__fixReady) return;
+      if (!img.complete || !img.naturalWidth) return;
+
+      probeSize(modName);
+      var base = SIZES[modName] || { w: 1920, h: 1080 };
+      var dispW = img.naturalWidth, dispH = img.naturalHeight;
+
+      cv.__fix = function(clientX, clientY){
+        var r = cv.getBoundingClientRect();
+        // 画布像素
+        var cx = clientX - r.left;
+        var cy = clientY - r.top;
+        // 画布 -> 显示图片像素
+        var px = cx * (dispW / Math.max(r.width, 1));
+        var py = cy * (dispH / Math.max(r.height, 1));
+        // 显示图片 -> 底图原始像素
+        var b = SIZES[modName] || base;
+        var u = Math.round(px * (b.w / dispW));
+        var v = Math.round(py * (b.h / dispH));
+        cv.__lastMap = { disp: [dispW, dispH], base: [b.w, b.h], uv: [u, v] };
+        return [u, v];
+      };
+      cv.__fixReady = true;
+      cv.__baseSize = [base.w, base.h];
+      console.log('[PICK-SCALE-FIX]', modName,
+                  'disp=' + dispW + 'x' + dispH,
+                  'base=' + base.w + 'x' + base.h);
+    }
+
+    // 从标注接口更新真实尺寸
+    function refreshSizes(){
+      ['obj', 'gnd'].forEach(function(m){
+        var id = 'view-wb-' + m;
+        var jobEl = document.getElementById(id + '_job');
+        var job = jobEl ? jobEl.textContent.trim() : '';
+        if (!job || SIZES[m + '_done']) return;
+        SIZES[m + '_done'] = true;
+        fetch('/api/job/annotation?job=' + encodeURIComponent(job),
+              {cache: 'no-store'})
+          .then(function(r){ return r.ok ? r.json() : null; })
+          .then(function(a){
+            if (a && a.width && a.height) {
+              SIZES[m] = { w: parseInt(a.width, 10),
+                           h: parseInt(a.height, 10) };
+              // 让 __fix 下次用新尺寸
+              var cv = document.getElementById(id + '_cv');
+              if (cv) cv.__fixReady = false;
+              console.log('[PICK-SCALE] 底图尺寸', m, SIZES[m]);
+            }
+          })
+          .catch(function(){});
+      });
+    }
+
+    setInterval(function(){
+      attach('obj');
+      attach('gnd');
+      refreshSizes();
+    }, 800);
+  })();
+
 
 </script>
 </body>

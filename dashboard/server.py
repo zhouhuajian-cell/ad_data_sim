@@ -1105,14 +1105,14 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "目录不存在"})
             ad = os.path.join(dp, "annotations")
             fp = ""
-            if stem and os.path.isfile(os.path.join(ad, stem + ".json")):
-                fp = os.path.join(ad, stem + ".json")
-            elif os.path.isdir(ad):
-                js = sorted([f for f in os.listdir(ad) if f.endswith(".json")])
-                if js:
-                    fp = os.path.join(ad, js[0])
+            # 严格按 stem 找；找不到就 404，绝不回退到别的帧（否则静默错配）
+            if stem and "/" not in stem and ".." not in stem:
+                cand = os.path.join(ad, stem + ".json")
+                if os.path.isfile(cand):
+                    fp = cand
             if not fp:
-                return self._send(404, {"error": "标注不存在"})
+                return self._send(404, {"error": "该帧标注不存在",
+                                        "stem": stem})
             with open(fp, "r", encoding="utf-8") as f:
                 return self._send(200, json.load(f))
 
@@ -2107,7 +2107,8 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"ok": False, "error": str(e)})
 
-        # [PLACE] OBJ 按点选位置派发（像素 → 世界坐标 → UE）
+        # [PLACE] OBJ 按点选位置合成（像素 → 世界坐标 → 同一 H 投影回像素）
+        # 不再走 UE 实时相机：UE 的 fov+pitch 复现不了人工标定 H，会系统性偏移。
         if u.path == "/api/obj/place":
             try:
                 body = self._body()
@@ -2115,11 +2116,9 @@ class H(BaseHTTPRequestHandler):
                     body = {}
                 bg = str(body.get("bg") or "cand_04.jpg")
                 picks = body.get("picks") or []
-                frames = int(body.get("frames") or 1)
                 if not picks:
                     return self._send(400, {"ok": False, "error": "没有点选位置"})
 
-                # 像素 → UE 世界坐标
                 import sys as _sys
                 if TOOLS_DIR not in _sys.path:
                     _sys.path.insert(0, TOOLS_DIR)
@@ -2132,60 +2131,55 @@ class H(BaseHTTPRequestHandler):
 
                 placed = []
                 for pt in picks[:20]:
-                    u = float(pt.get("u") or 0)
-                    v = float(pt.get("v") or 0)
+                    uu = float(pt.get("u") or 0)
+                    vv = float(pt.get("v") or 0)
                     cls = str(pt.get("cls") or "cone")
-                    w = pixel_to_ue_cm(cam, u, v)
+                    w = pixel_to_ue_cm(cam, uu, vv)
                     if w is None:
                         continue
-                    placed.append({"cls": cls, "x_cm": w["x_cm"],
-                                   "y_cm": w["y_cm"]})
+                    placed.append({"cls": cls,
+                                   "Y": round(w["y_cm"] / 100.0, 4),
+                                   "Z": round(w["x_cm"] / 100.0, 4)})
                 if not placed:
-                    return self._send(400, {"ok": False,
-                                            "error": "所有点都无法反投影到地面（可能在天空或太近）"})
+                    return self._send(400, {
+                        "ok": False,
+                        "error": "所有点都落在地平线附近或太远，请点在画面下方的路面"})
 
                 job = "obj_" + time.strftime("%Y%m%d_%H%M%S")
                 out_dir = "/data/render_hybrid/" + job
                 os.makedirs(out_dir, exist_ok=True)
-                os.chmod(out_dir, 0o777)
+                stem = os.path.splitext(os.path.basename(bg))[0]
+                out_img = os.path.join(out_dir, stem + "_obj_composed.jpg")
+
+                cmd = [ALGO_PYTHON,
+                       os.path.join(TOOLS_DIR, "obj_sprite.py"),
+                       "--bg", bg, "--out", out_img,
+                       "--place", json.dumps(placed, ensure_ascii=False)]
+                env = dict(os.environ)
+                env["PYTHONPATH"] = TOOLS_DIR
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=180, env=env)
+                if r.returncode != 0:
+                    return self._send(500, {"ok": False,
+                                            "error": (r.stderr or r.stdout or "")[-1200:]})
 
                 with open(os.path.join(out_dir, "summary.json"), "w",
                           encoding="utf-8") as sf:
-                    json.dump({
-                        "module": "OBJ", "type": "place",
-                        "bg": bg, "frames": frames,
-                        "placed": placed,
-                        "source_root": "/data/render_hybrid/bgs/" + bg,
-                        "created": time.strftime("%Y%m%d_%H%M%S"),
-                    }, sf, ensure_ascii=False, indent=1)
+                    json.dump({"module": "OBJ", "type": "place",
+                               "bg": bg, "placed": placed,
+                               "source_root": "/data/render_hybrid/bgs/" + bg,
+                               "created": time.strftime("%Y%m%d_%H%M%S")},
+                              sf, ensure_ascii=False, indent=1)
 
-                _placed_json = json.dumps(placed, ensure_ascii=False)
-                # shell 安全：转义单引号
-                _placed_json = _placed_json.replace("'", "'\\''")
-
-                cmd = ["su", "algo", "-c",
-                       "cd /data/avsynth/HybridPipeline/scripts && "
-                       "DEMO_BG_NAME=%s DEMO_PLACED='%s' "
-                       "DEMO_LAYOUT=placed "
-                       "python3 obj_batch_worker.py run "
-                       "--frames %d --out %s --chunk %d --seed %d "
-                       "--layout placed --bg /data/render_hybrid/bgs/%s"
-                       % (bg, _placed_json, frames, out_dir,
-                          min(frames, 4), int(time.time()) % 100000, bg)]
-
-                lf = open(os.path.join(out_dir, "run.log"), "w")
-                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                                 start_new_session=True)
-
-                return self._send(200, {"ok": True, "job": job,
-                                        "out": out_dir,
-                                        "placed": placed,
-                                        "count": len(placed)})
+                return self._send(200, {
+                    "ok": True, "job": job, "out": out_dir,
+                    "image": os.path.basename(out_img),
+                    "placed": placed, "count": len(placed),
+                })
             except Exception as e:
                 import traceback
-                return self._send(500, {"ok": False,
-                                        "error": str(e),
-                                        "trace": traceback.format_exc()[-800:]})
+                return self._send(500, {"ok": False, "error": str(e),
+                                        "trace": traceback.format_exc()[-600:]})
 
         # [DISPATCH] GND 派发（直接投影，秒级完成）
         if u.path == "/api/gnd/dispatch":

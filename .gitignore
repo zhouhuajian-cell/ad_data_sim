@@ -1,32 +1,32 @@
-# Python
+# ============ Python ============
 __pycache__/
 *.py[cod]
 *.so
 
-# 运行产物
+# ============ 运行产物 ============
 _dryrun/
 dashboard/jobs/
 dashboard/logs/
 dashboard/config.json
 *.log
 
-# Office 临时锁文件
+# ============ Office 临时锁 ============
 ~$*
 
-# UE 工程中间产物
+# ============ UE 中间产物 ============
 Intermediate/
 Saved/
 Binaries/
 DerivedDataCache/
 .vs/
 
-# 临时截图
+# ============ 临时截图 ============
 _ui*.png
 _*.png
 _*.jpg
 browser-screenshots/
 
-# 大模型文件（不纳入版本控制）
+# ============ 大模型（不入库，保留在本地）============
 sdxl_files/
 sd_files/
 *.safetensors
@@ -35,10 +35,14 @@ sd_files/
 *.pt
 *.onnx
 
-# 大报告 HTML（内嵌图片）
-TSR_*样张*.html
+# ============ 交接包 / 归档 ============
+handoff/
+_archive/
+_organize.py
+_srv_organize.py
+*_u8.py
 
-# 备份与清理暂存
+# ============ 备份与暂存 ============
 *.bak
 *.bak.*
 *.bak_*
@@ -46,11 +50,11 @@ TSR_*样张*.html
 _trash*/
 _trash_local/
 _sync/
+_sync2/
+_sync3/
 *.tgz
 *.zip
 
-# 交接包（本地临时）
-handoff/
-
-# 大文档
+# ============ 大文档 ============
 *.docx
+TSR_*样张*.html

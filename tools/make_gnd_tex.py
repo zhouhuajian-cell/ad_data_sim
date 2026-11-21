@@ -37,7 +37,8 @@ def paint_texture(length_m, width_m, ppm=200, seed=0, wear=0.15,
     density = 0.92 * field + 0.08 * surface
     # 白漆默认满覆盖；只有密度最低的零星区域剥落。
     # wear=0 → 几乎不掉漆；wear=1 → 掉漆面积约 40%
-    thr = 0.30 + 0.55 * (1.0 - wear)      # 阈值低 → 只有极低密度处才掉
+    # wear 单调：wear 越大阈值越高 → 越容易掉漆（修正原来的反向）
+    thr = 0.10 + 0.75 * wear
     alpha = np.ones((h, w), np.float32)
     holes = density < thr
     alpha[holes] = np.clip(density[holes] / max(thr, 1e-3), 0.0, 1.0)

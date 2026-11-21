@@ -16,6 +16,20 @@ import os
 import cv2
 import numpy as np
 
+try:
+    from ground_masks import (road_mask, foreground_mask, hood_mask,
+                              compose_ground, lane_band_mask)
+    HAS_MASKS = True
+except ImportError:
+    HAS_MASKS = False
+
+try:
+    from export_gate import (build_checks_from_artifacts, export_decision,
+                             REQUIRED_CHECKS, POLICY_VERSION)
+    HAS_GATE = True
+except ImportError:
+    HAS_GATE = False
+
 PATTERN_DIR = "/data/render_hybrid/gnd_patterns"
 CALIB_DIR = "/data/render_hybrid/bgs"
 CAM_EST = "/data/render_hybrid/bgs/_camera_est.json"
@@ -189,6 +203,7 @@ def render_lines(bg, H, lines, out_dir, H_ORDER="xy"):
         # 合成（sRGB 直接混合，简化处理）
         fg = (straight * 255.0)
         canvas = canvas * (1 - a_w[..., None]) + fg * a_w[..., None]
+        _last_alpha = a_w
 
         overlays.append({
             "line_id": idx,
@@ -255,6 +270,53 @@ def main():
     H_ORDER = "yz" if cam["mode"] == "homography" else "xy"
     out_im, overlays = render_lines(bg, H, lines, a.out, H_ORDER)
 
+    # ---------- 遮罩后处理：只在可见路面 / 非前景 / 非车头 上漆 ----------
+    mask_info = {}
+    if HAS_MASKS and overlays:
+        try:
+            # world_quad 元素顺序是 [Y横向, Z纵向]
+            lat = []
+            for l in overlays:
+                for q in l["world_quad"]:
+                    lat.append(float(q[0]))
+            y_lo, y_hi = min(lat), max(lat)
+            band = lane_band_mask((h, w), H, y_lo, y_hi, 6.0, 22.0)
+
+            road = road_mask(bg, ground_band=band)
+            fg = foreground_mask(bg, road)
+            hood = hood_mask(bg)
+
+            # 上漆覆盖率：用标线 alpha 累加图（render_lines 已算过），
+            # 这里从「上漆前后差异」反推会因压缩而不稳，改用几何覆盖率
+            diff = np.abs(out_im.astype(np.float32) - bg.astype(np.float32)).max(axis=2)
+            # 只要有一点变化就算画了漆（阈值 3 足够区分压缩噪声）
+            alpha_all = np.clip(diff / 3.0, 0, 1)
+            keep = road * (1.0 - fg) * (1.0 - hood) * alpha_all
+
+            out_im = (bg.astype(np.float32) * (1 - keep[..., None])
+                      + out_im.astype(np.float32) * keep[..., None])
+            out_im = np.clip(out_im, 0, 255).astype(np.uint8)
+
+            mask_info = {
+                "road_mean": round(float(road.mean()), 4),
+                "foreground_mean": round(float(fg.mean()), 4),
+                "hood_mean": round(float(hood.mean()), 4),
+                "paint_kept_mean": round(float(keep.mean()), 6),
+                "blocked_ratio": round(float(
+                    (alpha_all.sum() - keep.sum()) / max(alpha_all.sum(), 1e-6)), 4),
+            }
+            print("遮罩: road=%.3f fg=%.3f hood=%.3f 被挡掉=%.1f%%"
+                  % (road.mean(), fg.mean(), hood.mean(),
+                     mask_info["blocked_ratio"] * 100))
+        except Exception as e:
+            mask_info = {"error": str(e)[:200]}
+            print("遮罩失败（降级为无遮罩）: %s" % e)
+    else:
+        mask_info = {"skipped": True, "reason": "no masks module or no lines"}
+
+    for o in overlays:
+        o["masked"] = bool(mask_info.get("paint_kept_mean"))
+
     os.makedirs(a.out, exist_ok=True)
     stem = os.path.splitext(bg_name)[0]
     out_p = os.path.join(a.out, stem + "_gnd_composed.jpg")
@@ -262,6 +324,24 @@ def main():
     print("产出: %s" % out_p)
 
     # 标注
+    # ---------- 导出门禁：9 项检查 ----------
+    _checks_probe = {
+        "camera": cam["source"],
+        "lines": overlays,
+        "masks": mask_info,
+    }
+    if HAS_GATE:
+        _checks = build_checks_from_artifacts(
+            {"camera": cam["source"], "lines": overlays, "masks": mask_info},
+            bg_path=bg_p)
+        _gate = export_decision(_checks)
+    else:
+        _checks = {}
+        _gate = {"policy": "gate_unavailable",
+                 "training_eligible": False,
+                 "training_blockers": list(globals().get("REQUIRED_CHECKS", [])),
+                 "details": {}}
+
     ann = {
         "image": os.path.basename(out_p),
         "source_image": bg_name,
@@ -269,6 +349,7 @@ def main():
         "width": w, "height": h,
         "module": "GND",
         "camera": cam["source"],
+        "masks": mask_info,
         "lines": overlays,
         "quality": {
             "policy": "gnd_projection_v1",
@@ -277,13 +358,10 @@ def main():
             "semantic_status": "not_checked",
             "note": "投影几何已产出；像素融合与语义正确性未验证",
         },
-        "training_eligible": False,
-        "training_blockers": [
-            "no_projection_verification",
-            "no_topology_linkage",
-            "no_bev_raster",
-            "no_multi_camera_temporal",
-        ],
+        "gate": _gate,
+        "checks": _checks,
+        "training_eligible": _gate["training_eligible"],
+        "training_blockers": _gate["training_blockers"],
     }
     ann_p = os.path.join(a.out, "annotations")
     os.makedirs(ann_p, exist_ok=True)
@@ -294,6 +372,12 @@ def main():
     for o in overlays:
         print("  [%d] %-22s w=%.2fm alpha=%.3f" %
               (o["line_id"], o["class"], o["width_m"], o["alpha_mean"]))
+
+    print("门禁: training_eligible=%s  passed=%d/%d"
+          % (_gate["training_eligible"],
+             _gate.get("passed", 0), _gate.get("checked", 0)))
+    if _gate["training_blockers"]:
+        print("阻塞项: %s" % ", ".join(_gate["training_blockers"][:6]))
 
 
 if __name__ == "__main__":

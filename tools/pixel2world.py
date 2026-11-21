@@ -67,11 +67,45 @@ def pixel_to_world(cam, u, v, cam_h_m=1.35, img_w=1920, img_h=1080):
     return {"x_fwd_m": float(X), "y_left_m": float(Y)}
 
 
-def pixel_to_ue_cm(cam, u, v, **kw):
-    """像素 → UE 世界厘米坐标（X 前, Y 左, Z=0）。"""
+def horizon_v(cam, img_w=1920, img_h=1080):
+    """返回地平线像素纵坐标（相机模式用 cy，单应模式解 Y 无穷远的极限）。"""
+    if cam is None:
+        return None
+    if cam["mode"] == "camera":
+        return float(cam.get("cy") or img_h * 0.55)
+
+    # 单应模式：地平线 = H * [0, inf, 1] 的极限
+    H = cam["H"]
+    # 世界点 (Y=0, Z->inf) 投影：u=(h00*0+h01*Z+h02)/(h20*0+h21*Z+h22)
+    # Z->inf 时 u -> h01/h21, v -> h11/h21
+    try:
+        v_inf = H[1, 1] / H[2, 1]
+        return float(v_inf) if abs(H[2, 1]) > 1e-12 else None
+    except Exception:
+        return None
+
+
+def pixel_to_ue_cm(cam, u, v, guard_px=25.0, max_dist_m=60.0, **kw):
+    """像素 → UE 世界厘米坐标（X 前, Y 左, Z=0）。
+
+    地平线附近的点数学上不稳定（射线几乎平行地面），
+    这里主动拒绝：距离地平线 < guard_px 或反投影 distance > max_dist_m 都返回 None。
+    这说明「某条射线平行地面」不等于「整个单应退化」——
+    画面下方绝大多数像素都是良态可解的。
+    """
+    # 地平线守卫
+    vh = horizon_v(cam)
+    if vh is not None and v < (vh + guard_px):
+        return None
+
     w = pixel_to_world(cam, u, v, **kw)
     if w is None:
         return None
+
+    # 远距离不稳定：超过 max_dist_m 的点投影误差会被放大
+    if abs(w["x_fwd_m"]) > max_dist_m:
+        return None
+
     return {
         "x_cm": round(w["x_fwd_m"] * 100.0, 1),
         "y_cm": round(w["y_left_m"] * 100.0, 1),
