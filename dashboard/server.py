@@ -975,6 +975,123 @@ try:
 except Exception:
     HTML_PAGE = "<h1>index.html 缺失</h1>"
 
+# RENDER-JOBS: 参数重绘任务队列（串行，避免 GPU OOM）
+import queue as _q
+import threading as _th
+import uuid as _uuid
+
+_RJ = {}
+_RJ_Q = _q.Queue()
+_RJ_LOCK = _th.Lock()
+
+
+def _render_worker():
+    while True:
+        try:
+            jid, kind, batch, clip, params = _RJ_Q.get()
+        except Exception:
+            break
+        rec = _RJ.get(jid)
+        if rec is None:
+            continue
+        out_dir = ("/data/render/gnd_params" if kind == "gnd"
+                   else "/data/render/obj_params")
+        try:
+            with _RJ_LOCK:
+                rec["state"] = "running"
+            os.makedirs(out_dir, exist_ok=True)
+            payload = os.path.join(out_dir, "_p_%s.json" % jid)
+            with open(payload, "w", encoding="utf-8") as f:
+                json.dump({"batch": batch, "clip": clip, "params": params,
+                           "out": out_dir}, f, ensure_ascii=False)
+            script = os.path.join(
+                TOOLS_DIR,
+                "gnd_render_one.py" if kind == "gnd" else "render_obj_params.py")
+            env = dict(os.environ)
+            env["PYTHONPATH"] = TOOLS_DIR
+            env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+            r = subprocess.run([ALGO_PYTHON, script, "--config", payload],
+                               capture_output=True, text=True,
+                               timeout=1800, env=env)
+            fd = os.path.join(out_dir, "frames")
+            n = 0
+            if os.path.isdir(fd):
+                n = len([f for f in os.listdir(fd)
+                         if f.endswith(("_sim.jpg", "_gnd.jpg", "_obj.jpg"))])
+            with _RJ_LOCK:
+                rec["state"] = "done" if r.returncode == 0 else "failed"
+                rec["n"] = n
+                if r.returncode != 0:
+                    rec["err"] = ((r.stderr or r.stdout or "")[-600:])
+                rec["t1"] = time.time()
+        except subprocess.TimeoutExpired:
+            with _RJ_LOCK:
+                rec["state"] = "failed"
+                rec["err"] = "timeout"
+        except Exception as e:
+            with _RJ_LOCK:
+                rec["state"] = "failed"
+                rec["err"] = str(e)[:400]
+        finally:
+            try:
+                os.remove(os.path.join(out_dir, "_p_%s.json" % jid))
+            except Exception:
+                pass
+
+
+_th.Thread(target=_render_worker, daemon=True).start()
+
+
+def _map_spec_params(params):
+    """SPEC-PARAM-MAP: 前端字段 → cfg 字段。"""
+    if not isinstance(params, dict):
+        return params
+    p = dict(params)
+    # 指定素材
+    if p.get("spec_on") and p.get("sprite_path"):
+        p["sprite_path"] = p["sprite_path"]
+    else:
+        p.pop("sprite_path", None)
+    # 指定位置
+    if p.get("pos_on"):
+        try:
+            _x = float(p.get("pos_x", 20))
+            _y = float(p.get("pos_y", 0))
+            p["manual_pos"] = [[_x, _y]]
+        except Exception:
+            pass
+    else:
+        p.pop("manual_pos", None)
+    # 清理前端专用字段
+    for k in ("spec_on", "pos_on", "pos_x", "pos_y"):
+        p.pop(k, None)
+    return p
+
+
+def _start_render_job(kind, batch, clip, params):
+    params = _map_spec_params(params)
+
+    jid = "%s_%d_%s" % (kind, int(time.time()), _uuid.uuid4().hex[:6])
+    with _RJ_LOCK:
+        _RJ[jid] = {"state": "queued", "kind": kind, "batch": batch,
+                    "clip": clip, "n": 0, "t0": time.time()}
+        if len(_RJ) > 40:
+            for o in sorted(_RJ, key=lambda k: _RJ[k]["t0"])[:10]:
+                if _RJ[o]["state"] in ("done", "failed"):
+                    _RJ.pop(o, None)
+    _RJ_Q.put((jid, kind, batch, clip, params))
+    return jid
+
+
+def _render_job_status(jid):
+    with _RJ_LOCK:
+        rec = dict(_RJ.get(jid) or {})
+    if not rec:
+        return None
+    rec["id"] = jid
+    return rec
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1141,6 +1258,560 @@ class H(BaseHTTPRequestHandler):
                   ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
             self.send_response(200)
             self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # ============ [REAL] 真实数据集接口（只读 /data/test_data） ============
+        REAL_ROOT = "/data/test_data/real_clips"
+
+        def _real_clips():
+            # EXCLUDE-TRUCK: 排除大车占道场景（不适合 OBJ 仿真）
+            _EXCL = ("extremely_closetruck", "extremely_closecar")
+            # CLIPS-MULTI-ROOT: 扫描 real_clips + real_clips_extra
+            out = []
+            seen = set()
+            for root in (REAL_ROOT, "/data/test_data/real_clips_extra"):
+                if not os.path.isdir(root):
+                    continue
+                for n in sorted(os.listdir(root)):
+                    if n in seen:
+                        continue
+                    p = os.path.join(root, n)
+                    if not os.path.isdir(p):
+                        continue
+                    try:
+                        clips = [d for d in os.listdir(p)
+                                 if os.path.isdir(os.path.join(p, d, "cam_st_x2f_front"))]
+                    except OSError:
+                        continue
+                    if not clips:
+                        continue
+                    njpg = 0
+                    for c in clips:
+                        cd = os.path.join(p, c, "cam_st_x2f_front")
+                        try:
+                            njpg += len([f for f in os.listdir(cd)
+                                         if f.lower().endswith(".jpg")])
+                        except OSError:
+                            pass
+                    if any(x in n for x in _EXCL):
+                        continue
+                    # ONLY-WITH-OUTPUT: 只保留 obj_good 里有该批次的
+                    import glob as _g
+                    _pref = 0
+                    _anns = _g.glob(
+                        "/data/render/obj_good/annotations/*.json")
+                    for _af in _anns[:400]:
+                        try:
+                            with open(_af, encoding="utf-8") as _fh:
+                                _ad = json.load(_fh)
+                            if _ad.get("batch") == n:
+                                _pref = 1
+                                break
+                        except Exception:
+                            pass
+                    if _pref == 0:
+                        continue   # 无产出批次直接不显示
+                    out.append({"name": n, "clips": len(clips),
+                                "frames": njpg, "preferred": _pref})
+                    seen.add(n)
+            return out
+
+        def _real_clip_frames(clip_name, batch):
+            bp = os.path.join(REAL_ROOT, batch)
+            if not os.path.isdir(bp):
+                return []
+            cp = os.path.join(bp, clip_name)
+            cd = os.path.join(cp, "cam_st_x2f_front")
+            if not os.path.isdir(cd):
+                return []
+            fs = sorted(f for f in os.listdir(cd) if f.lower().endswith(".jpg"))
+            return [{"stem": os.path.splitext(f)[0], "file": f} for f in fs]
+
+        # 列出数据包
+        if u.path == "/api/real/clips":
+            try:
+                return self._send(200, {"root": REAL_ROOT,
+                                        "clips": _real_clips()})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+        # 列出某包下的 clip
+        # SPEC-ASSET-POS: 素材库列表（供人工指定）
+        if u.path == "/api/obj/assets":
+            import glob as _ga
+            _roots = ["/data/obj_assets_real", "/data/obj_assets_pc",
+                      "/data/obj_assets"]
+            _out = {}
+            for _r in _roots:
+                if not os.path.isdir(_r):
+                    continue
+                for _cls in sorted(os.listdir(_r)):
+                    _cd = os.path.join(_r, _cls)
+                    if not os.path.isdir(_cd):
+                        continue
+                    _fs = sorted(_ga.glob(os.path.join(_cd, "*.png")))
+                    if not _fs:
+                        continue
+                    _lst = _out.setdefault(_cls, [])
+                    for _f in _fs:
+                        _thumb = "/api/obj/asset_thumb?" + \
+                                 "path=" + quote(_f)
+                        _lst.append({"name": os.path.basename(_f),
+                                     "path": _f, "thumb": _thumb,
+                                     "w": 0})
+            for _c in _out:
+                _out[_c] = _out[_c][:200]
+            return self._send(200, {"classes": _out,
+                                    "total": sum(len(v) for v in
+                                                 _out.values())})
+
+        # 素材缩略图
+        if u.path == "/api/obj/asset_thumb":
+            import glob as _gt
+            _p = (q.get("path") or [""])[0]
+            if (not _p or ".." in _p or
+                    not any(_p.startswith(_r) for _r in
+                            ("/data/obj_assets_real", "/data/obj_assets_pc",
+                             "/data/obj_assets"))):
+                return self._send(400, {"error": "bad path"})
+            if not os.path.isfile(_p):
+                return self._send(404, {"error": "not found"})
+            # THUMB-PIL: 用 PIL 生成缩略图（服务端无 cv2）
+            try:
+                from PIL import Image as _PILImage
+                import io as _io
+                _im = _PILImage.open(_p).convert("RGBA")
+                _im.thumbnail((120, 96), _PILImage.LANCZOS)
+                _bg = _PILImage.new("RGBA", _im.size, (40, 40, 40, 255))
+                _bg.alpha_composite(_im)
+                _buf2 = _io.BytesIO()
+                _bg.convert("RGB").save(_buf2, format="PNG")
+                _data = _buf2.getvalue()
+            except Exception as _te:
+                return self._send(500, {"error": "thumb: " + str(_te)[:50]})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(_data)))
+            self.send_header("Cache-Control", "max-age=600")
+            self.end_headers()
+            self.wfile.write(_data)
+            return
+
+        # GND 素材列表
+        if u.path == "/api/gnd/assets":
+            _gr = "/data/gnd_assets"
+            _out = []
+            if os.path.isdir(_gr):
+                for _n in sorted(os.listdir(_gr)):
+                    _d = os.path.join(_gr, _n)
+                    if not os.path.isdir(_d):
+                        continue
+                    _meta = {}
+                    _mp = os.path.join(_d, "meta.json")
+                    if os.path.isfile(_mp):
+                        try:
+                            with open(_mp, encoding="utf-8") as _mf:
+                                _meta = json.load(_mf)
+                        except Exception:
+                            _meta = {}
+                    _meta["key"] = _n
+                    _meta["thumb"] = ("/api/gnd/asset_thumb?key=" +
+                                      quote(_n) + "&wear=" +
+                                      str(int(_meta.get("_w", 0))))
+                    _out.append(_meta)
+            return self._send(200, {"assets": _out})
+
+        # GND 素材缩略图
+        if u.path == "/api/gnd/asset_thumb":
+            _gkey = (q.get("key") or [""])[0]
+            _wear = int((q.get("wear") or ["0"])[0] or 0)
+            if not _gkey or "/" in _gkey or ".." in _gkey:
+                return self._send(400, {"error": "bad key"})
+            _fn = "tex.png"
+            if _wear >= 45:
+                _fn = "tex_wear55.png"
+            elif _wear >= 15:
+                _fn = "tex_wear25.png"
+            _p = os.path.join("/data/gnd_assets", _gkey, _fn)
+            if not os.path.isfile(_p):
+                _p = os.path.join("/data/gnd_assets", _gkey, "tex.png")
+            if not os.path.isfile(_p):
+                return self._send(404, {"error": "not found"})
+            try:
+                from PIL import Image as _PI
+                import io as _io2
+                _im = _PI.open(_p).convert("RGBA")
+                _w0, _h0 = _im.size
+                _sc2 = 64.0 / max(_w0, _h0)
+                _im = _im.resize((max(int(_w0 * _sc2), 4),
+                                  max(int(_h0 * _sc2), 4)),
+                                 _PI.LANCZOS)
+                _bg2 = _PI.new("RGBA", _im.size, (24, 27, 36, 255))
+                _bg2.alpha_composite(_im)
+                _b2 = _io2.BytesIO()
+                _bg2.convert("RGB").save(_b2, format="PNG")
+                _data2 = _b2.getvalue()
+            except Exception as _e2:
+                return self._send(500, {"error": str(_e2)[:60]})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(_data2)))
+            self.send_header("Cache-Control", "max-age=600")
+            self.end_headers()
+            self.wfile.write(_data2)
+            return
+
+        if u.path == "/api/real/batch":
+            batch = (q.get("batch") or [""])[0]
+            if not batch or "/" in batch or ".." in batch:
+                return self._send(400, {"error": "bad batch"})
+            # BATCH-MULTI-ROOT: 同时支持 real_clips 和 extra
+            bp = None
+            for _r in (REAL_ROOT, "/data/test_data/real_clips_extra"):
+                _p = os.path.join(_r, batch)
+                if os.path.isdir(_p):
+                    bp = _p
+                    break
+            if bp is None:
+                return self._send(404, {"error": "not found"})
+            # BATCH-FILTER-OUT: 只返回有 obj_good 产出的 clip
+            import glob as _g3
+            _prod_stems = set()
+            for _f3 in _g3.glob("/data/render/obj_good/annotations/*.json"):
+                try:
+                    with open(_f3, encoding="utf-8") as _fh3:
+                        _d3 = json.load(_fh3)
+                    if _d3.get("batch") == batch:
+                        _prod_stems.add(_d3.get("frame"))
+                except Exception:
+                    pass
+            items = []
+            for d in sorted(os.listdir(bp)):
+                cd = os.path.join(bp, d, "cam_st_x2f_front")
+                if not os.path.isdir(cd):
+                    continue
+                _stems = [os.path.splitext(f)[0]
+                          for f in os.listdir(cd)
+                          if f.lower().endswith(".jpg")]
+                if _prod_stems:
+                    _stems = [x for x in _stems if x in _prod_stems]
+                if not _stems:
+                    continue
+                items.append({"clip": d, "frames": len(_stems)})
+            return self._send(200, {"batch": batch, "clips": items})
+
+        # 列出某 clip 的帧
+        if u.path == "/api/real/frames":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            if not batch or not clip or "/" in clip or ".." in clip:
+                return self._send(400, {"error": "bad param"})
+            return self._send(200, {"batch": batch, "clip": clip,
+                                    "frames": _real_clip_frames(clip, batch)})
+
+        # 取真实原图
+        if u.path == "/api/real/image":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            if (not batch or not clip or not stem or "/" in clip or
+                    ".." in clip or "/" in stem or ".." in stem):
+                return self._send(400, {"error": "bad param"})
+            # BATCH-MULTI-ROOT: 原图也可能在 extra
+            fp = None
+            for _r in (REAL_ROOT, "/data/test_data/real_clips_extra"):
+                _c = os.path.join(_r, batch, clip, "cam_st_x2f_front",
+                                  stem + ".jpg")
+                if os.path.isfile(_c):
+                    fp = _c
+                    break
+            if fp is None:
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # 取真实 3D 标注（含投影到 2D 的框）
+        if u.path == "/api/real/labels":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            if not batch or not clip or not stem:
+                return self._send(400, {"error": "bad param"})
+            cp = os.path.join(REAL_ROOT, batch, clip)
+            try:
+                import sys as _sys
+                if TOOLS_DIR not in _sys.path:
+                    _sys.path.insert(0, TOOLS_DIR)
+                from label_gate import load_frame_labels
+
+                lab = load_frame_labels(cp, xml_path=stem + ".xml")
+                if lab is None:
+                    return self._send(404, {"error": "无标注"})
+
+                objs = []
+                for o in lab.get("objects") or []:
+                    if o.get("delete"):
+                        continue
+                    objs.append({
+                        "kind": o.get("kind"),
+                        "tracking_id": o.get("tracking_id"),
+                        "bbox2d": o.get("bbox2d"),
+                        "in_front": bool(o.get("in_front")),
+                        "depth_m": o.get("depth_m"),
+                        "world": {"x": o.get("Wx"), "y": o.get("Wy"),
+                                  "z": o.get("Wz")},
+                        "size": {"L": o.get("L"), "W": o.get("W"),
+                                 "H": o.get("H")},
+                        "pts": o.get("pts"),
+                    })
+                cam = lab.get("camera") or {}
+                return self._send(200, {
+                    "clip": clip, "stem": stem,
+                    "width": 1920, "height": 1080,
+                    "camera": {k: cam.get(k) for k in
+                               ("name", "fx", "fy", "cx", "cy")},
+                    "objects": objs,
+                    "n_total": len(objs),
+                    "n_front": len([o for o in objs if o["in_front"]]),
+                })
+            except Exception as e:
+                import traceback
+                return self._send(500, {"error": str(e),
+                                        "trace": traceback.format_exc()[-500:]})
+
+        # 批量验证结果（已跑过的产出）
+        if u.path == "/api/real/verify":
+            vd = "/data/render/verify_batch"
+            sp = os.path.join(vd, "summary.json")
+            if not os.path.isfile(sp):
+                return self._send(404, {"error": "还没跑过验证"})
+            with open(sp, encoding="utf-8") as f:
+                data = json.load(f)
+            # 附上产出图列表
+            imgs = []
+            for dp, _, fs in os.walk(vd):
+                for f in fs:
+                    if f.endswith("_composed.jpg"):
+                        rel = os.path.relpath(os.path.join(dp, f), vd)
+                        imgs.append(rel)
+            return self._send(200, {"summary": data, "images": sorted(imgs)[:80]})
+
+        # 读取验证产出图
+        if u.path == "/api/real/verify_image":
+            rel = (q.get("path") or [""])[0]
+            if not rel or ".." in rel:
+                return self._send(400, {"error": "bad path"})
+            fp = os.path.join("/data/render/verify_batch", rel)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # [REAL-PLACE] 读取点选放置产出图
+        if u.path == "/api/real/place_image":
+            job = (q.get("job") or [""])[0]
+            name = (q.get("name") or [""])[0]
+            if (not job or not name or "/" in job or ".." in job or
+                    "/" in name or ".." in name):
+                return self._send(400, {"error": "bad param"})
+            sub = (q.get("sub") or [""])[0]
+            if sub and ("/" in sub or ".." in sub):
+                return self._send(400, {"error": "bad sub"})
+            base = os.path.join("/data/render", job)
+            fp = os.path.join(base, sub, name) if sub else os.path.join(base, name)
+            # 兼容：没带 sub 时自动找 frames/
+            if not os.path.isfile(fp):
+                cand = os.path.join(base, "frames", name)
+                if os.path.isfile(cand):
+                    fp = cand
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # [CLIP-PLAY] 列出某 clip 的可播放帧（原图 + 仿真图成对）
+        if u.path == "/api/real/clip_play":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            module = (q.get("module") or ["obj"])[0]
+            if not batch or "/" in batch or ".." in batch:
+                return self._send(400, {"error": "bad batch"})
+            REAL_ROOT = "/data/test_data/real_clips"
+            VD = "/data/render/verify_batch"
+
+            # CLIPPLAY-MULTI-ROOT: 支持 real_clips + extra
+            _ROOTS = (REAL_ROOT, "/data/test_data/real_clips_extra")
+            _bp = None
+            for _r in _ROOTS:
+                _p = os.path.join(_r, batch)
+                if os.path.isdir(_p):
+                    _bp = _p
+                    break
+            if _bp is None:
+                return self._send(404, {"error": "batch 不存在"})
+
+            # 原图帧
+            if clip:
+                cd = os.path.join(_bp, clip, "cam_st_x2f_front")
+                if not os.path.isdir(cd):
+                    return self._send(404, {"error": "clip 不存在"})
+            else:
+                subs = [d for d in os.listdir(_bp)
+                        if os.path.isdir(os.path.join(_bp, d,
+                                                      "cam_st_x2f_front"))]
+                if not subs:
+                    return self._send(404, {"error": "无 clip"})
+                clip = sorted(subs)[0]
+                cd = os.path.join(_bp, clip, "cam_st_x2f_front")
+
+            stems = sorted(os.path.splitext(f)[0]
+                           for f in os.listdir(cd) if f.lower().endswith(".jpg"))
+
+            # CLIP-PAIR-STRICT: 只保留有 obj_good 产出的帧
+            _prod_frames = set()
+            try:
+                import glob as _g2
+                for _f2 in _g2.glob("/data/render/obj_good/frames/*_sim.jpg"):
+                    _prod_frames.add(os.path.basename(_f2)[:-8])  # 去掉 _sim.jpg
+            except Exception:
+                pass
+            if _prod_frames:
+                stems = [x for x in stems if x in _prod_frames]
+                if not stems:
+                    return self._send(404, {
+                        "error": "该 clip 无仿真产出",
+                        "batch": batch, "clip": clip})
+
+            # OBJ-NEW-SOURCE: 多源查找（新流水线优先，回退旧数据）
+            # OBJ-GOOD-SRC: 只读优质场景产出
+            NEW_DIRS = ["/data/render/obj_good/frames",
+                        "/data/render/pipe_pc/frames",
+                        "/data/render/pipe3d/frames",
+                        "/data/render/pipe_obj/frames",
+                        "/data/render/gnd_model/frames"]
+            ANN_DIRS = ["/data/render/obj_good/annotations",
+                        "/data/render/pipe_pc/annotations",
+                        "/data/render/pipe3d/annotations",
+                        "/data/render/gnd_model/annotations"]
+
+            frames = []
+            for st in stems:
+                sim_p = None
+                src_dir = None
+                # 1) 新流水线
+                for d in NEW_DIRS:
+                    for suf in ("_sim.jpg", "_composed.jpg", "_gnd.jpg"):
+                        cand = os.path.join(d, st + suf)
+                        if os.path.isfile(cand):
+                            sim_p = cand
+                            src_dir = d
+                            break
+                    if sim_p:
+                        break
+                # 2) 回退旧 verify_batch
+                if sim_p is None:
+                    for suf in ("_composed.jpg", "_gnd.jpg", "_sim.jpg"):
+                        cand = os.path.join(VD, batch, st + suf)
+                        if os.path.isfile(cand):
+                            sim_p = cand
+                            break
+                # SIM-FALLBACK: 无仿真产出时用原图（避免黑屏）
+                if sim_p is None:
+                    sim_url = "/api/real/image?batch=" + batch + \
+                              "&clip=" + clip + "&stem=" + st
+                    frames.append({
+                        "stem": st,
+                        "orig": sim_url,
+                        "sim": sim_url,
+                        "objects": [],
+                        "n3d": 0,
+                        "src": "orig_only",
+                    })
+                    continue
+
+                # 3D 标注
+                ann = None
+                for ad in ANN_DIRS:
+                    ap = os.path.join(ad, st + ".json")
+                    if os.path.isfile(ap):
+                        try:
+                            with open(ap, encoding="utf-8") as f:
+                                ann = json.load(f)
+                        except Exception:
+                            ann = None
+                        break
+
+                if src_dir and "render" in src_dir:
+                    job = os.path.basename(os.path.dirname(src_dir))
+                    sim_url = ("/api/render_job_image?job=" + job +
+                               "&name=" + os.path.basename(sim_p))
+                else:
+                    sim_url = ("/api/real/verify_image?path=" +
+                               batch + "/" + os.path.basename(sim_p))
+
+                objs = (ann or {}).get("objects", [])
+                frames.append({
+                    "stem": st,
+                    "orig": "/api/real/image?batch=" + batch +
+                            "&clip=" + clip + "&stem=" + st,
+                    "sim": sim_url,
+                    "objects": objs,
+                    "n3d": len(objs),
+                    "src": "new" if src_dir else "old",
+                })
+
+            return self._send(200, {"batch": batch, "clip": clip,
+                                    "module": module,
+                                    "frames": frames,
+                                    "n": len(frames)})
+
+        # [PARAMS] 读取参数化产出图
+        if u.path == "/api/render_job_image":
+            job = (q.get("job") or [""])[0]
+            name = (q.get("name") or [""])[0]
+            if (not job or not name or "/" in job or ".." in job or
+                    "/" in name or ".." in name):
+                return self._send(400, {"error": "bad param"})
+            sub = (q.get("sub") or [""])[0]
+            if sub and ("/" in sub or ".." in sub):
+                return self._send(400, {"error": "bad sub"})
+            base = os.path.join("/data/render", job)
+            fp = os.path.join(base, sub, name) if sub else os.path.join(base, name)
+            if not os.path.isfile(fp):
+                _c = os.path.join(base, "frames", name)
+                if os.path.isfile(_c):
+                    fp = _c
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -2041,8 +2712,316 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"error": "读取失败: %s" % e})
             return self._send(200, blob, "image/jpeg")
+        # -------- GND DATA API --------
+        if u.path == "/api/gnd/clips":
+            root = "/data/test_data/gnd_train"
+            out = []
+            if os.path.isdir(root):
+                for vd in sorted(os.listdir(root)):
+                    vp = os.path.join(root, vd)
+                    if not os.path.isdir(vp):
+                        continue
+                    for cl in sorted(os.listdir(vp)):
+                        cp = os.path.join(vp, cl)
+                        imgd = os.path.join(cp, "img_ori")
+                        if not os.path.isdir(imgd):
+                            continue
+                        nf = len([f for f in os.listdir(imgd)
+                                  if f.endswith(".jpg")])
+                        out.append({"batch": vd, "clip": cl,
+                                    "n_frames": nf})
+            return self._send(200, {"ok": True, "clips": out,
+                                    "count": len(out)})
+
+        if u.path == "/api/gnd/frames":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            if not (batch and clip):
+                return self._send(400, {"ok": False, "error": "missing"})
+            imgd = os.path.join("/data/test_data/gnd_train", batch, clip,
+                                "img_ori")
+            if not os.path.isdir(imgd):
+                return self._send(404, {"ok": False, "error": "no clip"})
+            # GND-FUSION-SRC: 优先新光影继承产出
+            prod = "/data/render/gnd_fusion/frames"
+            if not os.path.isdir(prod):
+                prod = "/data/render/gnd_model/frames"
+            job_name = "gnd_fusion" if "gnd_fusion" in prod else "gnd_model"
+            frames = []
+            for f in sorted(os.listdir(imgd)):
+                if not f.endswith(".jpg"):
+                    continue
+                stem = os.path.splitext(f)[0]
+                sp = os.path.join(prod, stem + "_sim.jpg")
+                gp = os.path.join(prod, stem + "_seg.png")
+                # GND-GT-FIELD: 真值掩码
+                gtp = os.path.join(prod, stem + "_gt.png")
+                frames.append({
+                    "stem": stem,
+                    "orig": "/api/gnd/image?batch=%s&clip=%s&name=%s"
+                            % (batch, clip, f),
+                    "sim": ("/api/render_job_image?job=%s&name=%s_sim.jpg"
+                            % (job_name, stem)) if os.path.isfile(sp) else None,
+                    "seg": ("/api/render_job_image?job=%s&name=%s_seg.png"
+                            % (job_name, stem)) if os.path.isfile(gp) else None,
+                    "gt": ("/api/render_job_image?job=%s&name=%s_gt.png"
+                           % (job_name, stem)) if os.path.isfile(gtp) else None,
+                })
+            return self._send(200, {"ok": True, "batch": batch,
+                                    "clip": clip, "frames": frames,
+                                    "n": len(frames)})
+
+        if u.path == "/api/gnd/image":
+            batch = (q.get("batch") or [""])[0]
+            clip = (q.get("clip") or [""])[0]
+            name = (q.get("name") or [""])[0]
+            if (not batch or not clip or not name or "/" in name
+                    or ".." in name or "/" in clip or ".." in clip):
+                return self._send(400, {"error": "bad param"})
+            fp = os.path.join("/data/test_data/gnd_train", batch, clip,
+                              "img_ori", name)
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # -------- ASSETS LIB --------
+        if u.path == "/api/assets/list":
+            module = (q.get("module") or ["all"])[0]
+            out = {"obj": [], "gnd": [], "tsr": []}
+
+            def scan_obj():
+                items = []
+                for root, tag in (("/data/obj_assets_pc", "pc"),
+                                  ("/data/obj_assets_real", "real"),
+                                  ("/data/obj_assets", "proc")):
+                    if not os.path.isdir(root):
+                        continue
+                    for cls in sorted(os.listdir(root)):
+                        d = os.path.join(root, cls)
+                        if not os.path.isdir(d):
+                            continue
+                        fs = [f for f in sorted(os.listdir(d))
+                              if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+                        if not fs:
+                            continue
+                        items.append({
+                            "key": cls, "kind": tag,
+                            "root": "real" if tag == "real" else "proc",
+                            "n": len(fs),
+                            "files": fs[:24],
+                        })
+                return items
+
+            def scan_gnd():
+                root = "/data/gnd_assets"
+                items = []
+                if not os.path.isdir(root):
+                    return items
+                for key in sorted(os.listdir(root)):
+                    d = os.path.join(root, key)
+                    if not os.path.isdir(d):
+                        continue
+                    fs = [f for f in sorted(os.listdir(d))
+                          if f.lower().endswith(".png")]
+                    if not fs:
+                        continue
+                    meta = {}
+                    mp = os.path.join(d, "meta.json")
+                    if os.path.isfile(mp):
+                        try:
+                            with open(mp, encoding="utf-8") as f:
+                                meta = json.load(f)
+                        except Exception:
+                            pass
+                    items.append({"key": key,
+                                  "label": meta.get("label", key),
+                                  "n": len(fs), "files": fs,
+                                  "size": meta.get("size")})
+                return items
+
+            if module in ("all", "obj"):
+                out["obj"] = scan_obj()
+            if module in ("all", "gnd"):
+                out["gnd"] = scan_gnd()
+            if module == "all":
+                tr = "/data/tsr_library_v2"
+                if os.path.isdir(tr):
+                    n = sum(len([f for f in os.listdir(os.path.join(tr, c))
+                                 if f.lower().endswith(".png")])
+                            for c in os.listdir(tr)
+                            if os.path.isdir(os.path.join(tr, c)))
+                    out["tsr"] = [{"key": "tsr_library", "n": n}]
+            return self._send(200, {"ok": True, "module": module,
+                                    "assets": out})
+
+        if u.path == "/api/assets/image":
+            module = (q.get("module") or ["gnd"])[0]
+            key = (q.get("key") or [""])[0]
+            fn = (q.get("file") or ["tex.png"])[0]
+            kind = (q.get("kind") or ["real"])[0]
+            if (not key or "/" in key or ".." in key or "/" in fn
+                    or ".." in fn):
+                return self._send(400, {"error": "bad param"})
+            if module == "gnd":
+                fp = os.path.join("/data/gnd_assets", key, fn)
+            elif module == "obj":
+                if kind == "pc":
+                    root = "/data/obj_assets_pc"
+                elif kind == "real":
+                    root = "/data/obj_assets_real"
+                else:
+                    root = "/data/obj_assets"
+                fp = os.path.join(root, key, fn)
+            else:
+                return self._send(400, {"error": "bad module"})
+            if not os.path.isfile(fp):
+                return self._send(404, {"error": "not found"})
+            with open(fp, "rb") as f:
+                data = f.read()
+            ext = os.path.splitext(fp)[1].lower()
+            ctype = ("image/png" if ext == ".png"
+                     else "image/jpeg" if ext in (".jpg", ".jpeg")
+                     else "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # RENDER-ASYNC: 轮询重绘任务
+        if u.path == "/api/render/job":
+            jid = (q.get("id") or [""])[0]
+            _r = _render_job_status(jid)
+            if _r is None:
+                return self._send(404, {"ok": False, "error": "no job"})
+            return self._send(200, _r)
+
         return self._send(404, {"error": "not found"})
     def do_POST(self):
+        # POST-U-DEF: 解析 URL（do_POST 里必须重新定义）
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+
+        # -------- ASSET UPLOAD --------
+        if u.path in ("/api/assets/upload", "/api/assets/delete"):
+            try:
+                ctype = self.headers.get("Content-Type") or ""
+                if u.path == "/api/assets/delete":
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+                    module = body.get("module") or "gnd"
+                    key = body.get("key") or ""
+                    fn = body.get("file") or ""
+                    kind = body.get("kind") or "real"
+                    if not (key and fn):
+                        return self._send(400, {"ok": False, "error": "bad"})
+                    if "/" in key or ".." in key or "/" in fn or ".." in fn:
+                        return self._send(400, {"ok": False, "error": "bad path"})
+                    if module == "gnd":
+                        fp = os.path.join("/data/gnd_assets", key, fn)
+                    else:
+                        root = ("/data/obj_assets_real" if kind == "real"
+                                else "/data/obj_assets")
+                        fp = os.path.join(root, key, fn)
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                        return self._send(200, {"ok": True, "deleted": fp})
+                    return self._send(404, {"ok": False, "error": "not found"})
+
+                # multipart 上传
+                if "multipart/form-data" not in ctype:
+                    return self._send(400, {"ok": False, "error": "need multipart"})
+                import cgi
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n)
+                from email.parser import BytesParser
+                from email.policy import default as epolicy
+                hdr = ("Content-Type: " + ctype + "\r\n\r\n").encode()
+                msg = BytesParser(policy=epolicy).parsebytes(hdr + raw)
+                fields = {}
+                files = []
+                for part in msg.iter_parts():
+                    name = part.get_param("name", header="content-disposition")
+                    fn = part.get_filename()
+                    data = part.get_payload(decode=True) or b""
+                    if fn:
+                        files.append((name, fn, data))
+                    else:
+                        fields[name] = data.decode("utf-8", "replace")
+
+                module = fields.get("module") or "gnd"
+                key = fields.get("key") or ""
+                kind = fields.get("kind") or "real"
+                if not key or "/" in key or ".." in key:
+                    return self._send(400, {"ok": False, "error": "bad key"})
+
+                if module == "gnd":
+                    d = os.path.join("/data/gnd_assets", key)
+                else:
+                    if kind == "pc":
+                        root = "/data/obj_assets_pc"
+                    elif kind == "real":
+                        root = "/data/obj_assets_real"
+                    else:
+                        root = "/data/obj_assets"
+                    d = os.path.join(root, key)
+                os.makedirs(d, exist_ok=True)
+
+                saved = []
+                for name, fn, data in files:
+                    if not data:
+                        continue
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                        continue
+                    safe = "upload_" + str(int(time.time() * 1000)) + "_" + \
+                        "".join(c for c in os.path.splitext(fn)[0][:20]
+                                if c.isalnum() or c in "-_") + ext
+                    fp = os.path.join(d, safe)
+                    with open(fp, "wb") as f:
+                        f.write(data)
+                    saved.append({"file": safe, "size": len(data)})
+                return self._send(200, {"ok": True, "saved": saved,
+                                        "dir": d})
+            except Exception as e:
+                import traceback
+                return self._send(500, {"ok": False, "error": str(e),
+                                        "trace": traceback.format_exc()[-600:]})
+
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+
+        # RENDER-ASYNC: GND 参数重绘（异步）
+        if u.path == "/api/gnd/render":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                batch = str(body.get("batch") or "")
+                clip = str(body.get("clip") or "")
+                params = body.get("params") or {}
+                if not (batch and clip):
+                    return self._send(400, {"ok": False, "error": "missing"})
+                cp = os.path.join("/data/test_data/gnd_train", batch, clip)
+                if not os.path.isdir(cp):
+                    return self._send(404, {"ok": False,
+                                            "error": "clip not found"})
+                jid = _start_render_job("gnd", batch, clip, params)
+                return self._send(202, {"ok": True, "job": jid})
+            except Exception as e:
+                return self._send(500, {"ok": False,
+                                        "error": str(e)[:300]})
+
         u = urlparse(self.path)
 
         smoke = re.fullmatch(r"/api/(obj|gnd)/run", u.path)
@@ -2181,7 +3160,262 @@ class H(BaseHTTPRequestHandler):
                 return self._send(500, {"ok": False, "error": str(e),
                                         "trace": traceback.format_exc()[-600:]})
 
-        # [DISPATCH] GND 派发（直接投影，秒级完成）
+        # [REAL-PLACE] 真实数据点选放置（用 XML 真实标定）
+        if u.path == "/api/real/place":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                batch = str(body.get("batch") or "")
+                clip = str(body.get("clip") or "")
+                stem = str(body.get("stem") or "")
+                picks = body.get("picks") or []
+                if not (batch and clip and stem and picks):
+                    return self._send(400, {"ok": False,
+                                            "error": "缺少 batch/clip/stem/picks"})
+
+                import sys as _sys
+                if TOOLS_DIR not in _sys.path:
+                    _sys.path.insert(0, TOOLS_DIR)
+                from real_calib import (body_to_pixel_real, load_cam_real,
+                                        pixel_to_ue_cm_real)
+
+                cam = load_cam_real(batch, clip, xml_name=stem + ".xml")
+                if cam is None:
+                    return self._send(400, {"ok": False,
+                                            "error": "该帧无标定"})
+
+                placed = []
+                rejected = []
+                for pt in picks[:20]:
+                    uu = float(pt.get("u") or 0)
+                    vv = float(pt.get("v") or 0)
+                    cls = str(pt.get("cls") or "cone")
+                    r = pixel_to_ue_cm_real(cam, uu, vv)
+                    if r is None:
+                        rejected.append({"u": uu, "v": vv,
+                                         "why": "地平线附近或太远"})
+                        continue
+                    placed.append({"cls": cls,
+                                   "x_m": round(r["x_fwd_m"], 3),
+                                   "y_m": round(r["y_left_m"], 3),
+                                   "px": [uu, vv]})
+                if not placed:
+                    return self._send(400, {"ok": False,
+                                            "error": "所有点都无法反投影",
+                                            "rejected": rejected})
+
+                job = "robj_" + time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render/" + job
+                os.makedirs(out_dir, exist_ok=True)
+
+                # 渲染：读原图 → 画锥桶 → 存
+                import cv2
+                import numpy as _np
+                REAL_ROOT = "/data/test_data/real_clips"
+                img_p = os.path.join(REAL_ROOT, batch, clip,
+                                     "cam_st_x2f_front", stem + ".jpg")
+                bg = cv2.imread(img_p)
+                if bg is None:
+                    return self._send(404, {"ok": False,
+                                            "error": "原图不存在"})
+                h, w = bg.shape[:2]
+                out = bg.copy()
+
+                # 前置遮挡掩码（可选）
+                try:
+                    from ground_masks import (foreground_mask, hood_mask,
+                                              road_mask)
+                    _road = road_mask(bg)
+                    _fg = foreground_mask(bg, _road)
+                    _hood = hood_mask(bg, frac=0.18)
+                    protect = _np.clip(_np.maximum(_fg, _hood), 0, 1)
+                except ImportError:
+                    protect = _np.zeros((h, w), _np.float32)
+
+                SIZE = {"cone": (0.28, 0.70), "car": (1.80, 1.50),
+                        "suv": (1.90, 1.75), "truck": (2.50, 3.20),
+                        "pedestrian": (0.55, 1.70)}
+
+                def _sprite(kind, sh=256):
+                    sw = max(int(sh * 0.62), 8)
+                    im = _np.zeros((sh, sw, 4), _np.uint8)
+                    if kind == "cone":
+                        pts = _np.array([[sw // 2, 8], [sw - 6, sh - 6],
+                                         [6, sh - 6]], _np.int32)
+                        cv2.fillPoly(im, [pts], (30, 130, 240, 255))
+                        cv2.rectangle(im, (3, sh - 12), (sw - 3, sh - 3),
+                                      (25, 25, 25, 255), -1)
+                    else:
+                        cv2.rectangle(im, (4, int(sh * 0.32)),
+                                      (sw - 4, sh - 6), (150, 150, 150, 255), -1)
+                    return im
+
+                objs = []
+                for p in sorted(placed, key=lambda q: -q["x_m"]):
+                    kind = p["cls"]
+                    w_m, h_m = SIZE.get(kind, (0.5, 0.8))
+                    # 四角
+                    quad = []
+                    for yy in (p["y_m"] + w_m / 2, p["y_m"] - w_m / 2):
+                        uv, z, ok = body_to_pixel_real(
+                            cam, [[p["x_m"], yy, 0.0]])
+                        if not ok[0] or not _np.isfinite(uv[0]).all():
+                            quad = None
+                            break
+                        quad.append(uv[0])
+                    if not quad:
+                        continue
+                    uv_l, _, _ = body_to_pixel_real(
+                        cam, [[p["x_m"], p["y_m"] + 0.5, 0.0]])
+                    uv_r, _, _ = body_to_pixel_real(
+                        cam, [[p["x_m"], p["y_m"] - 0.5, 0.0]])
+                    px_per_m = abs(uv_l[0][0] - uv_r[0][0])
+                    top_dy = h_m * px_per_m
+
+                    left, right = quad[0], quad[1]
+                    q4 = _np.array([(left[0], left[1] - top_dy),
+                                    (right[0], right[1] - top_dy),
+                                    right, left], _np.float32)
+
+                    sp = _sprite(kind)
+                    sh, sw = sp.shape[:2]
+                    src = _np.array([[0, 0], [sw - 1, 0], [sw - 1, sh - 1],
+                                     [0, sh - 1]], _np.float32)
+                    Pm = cv2.getPerspectiveTransform(src, q4)
+
+                    a = sp[..., 3].astype(_np.float32) / 255.0
+                    rgb = sp[..., :3].astype(_np.float32)
+                    prem = rgb * a[..., None]
+                    a_w = cv2.warpPerspective(a, Pm, (w, h),
+                                              flags=cv2.INTER_LINEAR,
+                                              borderMode=cv2.BORDER_CONSTANT,
+                                              borderValue=0)
+                    p_w = cv2.warpPerspective(prem, Pm, (w, h),
+                                              flags=cv2.INTER_LINEAR,
+                                              borderMode=cv2.BORDER_CONSTANT,
+                                              borderValue=(0, 0, 0))
+                    a_w = _np.clip(a_w, 0, 1)
+                    straight = _np.divide(p_w, _np.maximum(a_w[..., None], 1e-6))
+                    straight[a_w <= 1e-4] = 0
+                    keep = a_w * (1.0 - protect)
+                    out = (out.astype(_np.float32) * (1 - keep[..., None])
+                           + straight * keep[..., None])
+                    out = _np.clip(out, 0, 255).astype(_np.uint8)
+
+                    xs, ys = q4[:, 0], q4[:, 1]
+                    objs.append({"class": kind,
+                                 "bbox": [float(xs.min()), float(ys.min()),
+                                          float(xs.max()), float(ys.max())],
+                                 "world": {"x_m": p["x_m"], "y_m": p["y_m"]},
+                                 "size_m": [w_m, h_m]})
+
+                out_p = os.path.join(out_dir, stem + "_placed.jpg")
+                cv2.imwrite(out_p, out, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+                # 标注
+                ann = {
+                    "image": os.path.basename(out_p),
+                    "batch": batch, "clip": clip, "stem": stem,
+                    "width": w, "height": h,
+                    "module": "OBJ",
+                    "calibration": {"source": "xml",
+                                    "fx": cam["fx"], "fy": cam["fy"],
+                                    "cx": cam["cx"], "cy": cam["cy"]},
+                    "objects": objs,
+                    "rejected": rejected,
+                    "training_eligible": False,
+                    "training_blockers": ["appearance_unverified",
+                                          "multi_camera_missing"],
+                }
+                ad = os.path.join(out_dir, "annotations")
+                os.makedirs(ad, exist_ok=True)
+                with open(os.path.join(ad, stem + ".json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump(ann, f, ensure_ascii=False, indent=1)
+
+                return self._send(200, {
+                    "ok": True, "job": job, "out": out_dir,
+                    "image_url": "/api/real/place_image?job=" + job +
+                                 "&name=" + stem + "_placed.jpg",
+                    "placed": placed, "objects": objs,
+                    "rejected": rejected, "count": len(objs),
+                })
+            except Exception as e:
+                import traceback
+                return self._send(500, {"ok": False, "error": str(e),
+                                        "trace": traceback.format_exc()[-700:]})
+
+        # [REAL-DISPATCH] 真实数据批量派发
+        if u.path == "/api/real/dispatch":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                batch = str(body.get("batch") or "")
+                nclip = int(body.get("clips") or 2)
+                nfrm = int(body.get("frames") or 8)
+                nclip = max(1, min(nclip, 20))
+                nfrm = max(1, min(nfrm, 50))
+                if not batch or "/" in batch or ".." in batch:
+                    return self._send(400, {"ok": False, "error": "bad batch"})
+
+                REAL_ROOT = "/data/test_data/real_clips"
+                bp = os.path.join(REAL_ROOT, batch)
+                if not os.path.isdir(bp):
+                    return self._send(404, {"ok": False,
+                                            "error": "数据包不存在"})
+
+                job = "real_" + time.strftime("%Y%m%d_%H%M%S")
+                out_dir = "/data/render/" + job
+                os.makedirs(out_dir, exist_ok=True)
+
+                cmd = [ALGO_PYTHON,
+                       os.path.join(TOOLS_DIR, "verify_batch.py"),
+                       "--per-clip", str(nfrm),
+                       "--out", out_dir]
+                env = dict(os.environ)
+                env["PYTHONPATH"] = TOOLS_DIR
+                env["REAL_ONLY_BATCH"] = batch
+                lf = open(os.path.join(out_dir, "run.log"), "w")
+                subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                                 env=env, start_new_session=True)
+
+                with open(os.path.join(out_dir, "summary_meta.json"), "w",
+                          encoding="utf-8") as sf:
+                    json.dump({"module": "REAL", "type": "batch",
+                               "batch": batch, "clips": nclip,
+                               "frames": nfrm,
+                               "created": time.strftime("%Y%m%d_%H%M%S")},
+                              sf, ensure_ascii=False, indent=1)
+
+                return self._send(200, {"ok": True, "job": job,
+                                        "out": out_dir,
+                                        "n_clips": nclip,
+                                        "n_frames": nfrm})
+            except Exception as e:
+                import traceback
+                return self._send(500, {"ok": False, "error": str(e),
+                                        "trace": traceback.format_exc()[-500:]})
+
+        # [PARAMS] 按前端参数实时重绘 OBJ / GND
+        # RENDER-ASYNC: OBJ 参数重绘（异步）
+        if u.path == "/api/real/render_params":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                batch = str(body.get("batch") or "")
+                clip = str(body.get("clip") or "")
+                params = body.get("params") or {}
+                if not (batch and clip):
+                    return self._send(400, {"ok": False, "error": "missing"})
+                jid = _start_render_job("obj", batch, clip, params)
+                return self._send(202, {"ok": True, "job": jid})
+            except Exception as e:
+                return self._send(500, {"ok": False,
+                                        "error": str(e)[:300]})
+
         if u.path == "/api/gnd/dispatch":
             try:
                 body = self._body()
