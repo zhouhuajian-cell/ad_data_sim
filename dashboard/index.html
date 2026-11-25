@@ -10702,7 +10702,6 @@ pipe = SignRealismPipeline(cfg)`;
 
     var tp = Math.max(1, Math.ceil(keys.length / PAGE.size));
     if (PAGE.p >= tp) PAGE.p = tp - 1;
-    keys.sort(function(a,b){var ca=(REG[a].country||'ZZ'),cb=(REG[b].country||'ZZ');return ca.localeCompare(cb)||((REG[b].started||0)-(REG[a].started||0));});
     var page = keys.slice(PAGE.p*PAGE.size, (PAGE.p+1)*PAGE.size);
     var D = {};
     await Promise.all(page.map(async function(key){
@@ -10714,7 +10713,6 @@ pipe = SignRealismPipeline(cfg)`;
       }catch(e){}
     }));
     if(revision!==tableRenderRevision)return;
-    var previousCountry=null;
     var rows = page.map(function(k){
       var t = REG[k] || {}, d = D[k] || {};
       var mod = String(d.module || MODS[k] || (MODTAG(k)) || '').toUpperCase();
@@ -10748,8 +10746,7 @@ pipe = SignRealismPipeline(cfg)`;
       var du = (st && en && en > st) ? (en - st) : 0;
       var unit = type === 'detect' ? ' \u5e27' : ' \u5f20';
 
-      var group='';if(cc!==previousCountry){previousCountry=cc;group='<tr class="jt-country-group"><td colspan="11" style="color:#9ec7f5;background:#142038;font-size:12px;padding:6px 10px">国家：'+(cc?cn(cc)+'（'+cc+'）':'未设置')+'　/　数据类型：'+mod+'</td></tr>';}
-      return group+'<tr>' +
+      return '<tr>' +
         '<td class="jt-mod" style="color:'+MC[mod]+'">'+mod+'</td>' +
         '<td class="jt-type" style="color:'+tagC+'">'+tag+'</td>' +
         '<td class="jt-id" title="'+vtitle+'">'+k+'<br><small style="color:#94a3b8">'+(vv[mod.toLowerCase()]?'v'+vv[mod.toLowerCase()]:'版本未记录')+'</small></td>' +
@@ -13912,7 +13909,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
       if (side === 'orig' && o.source !== 'real') { window.__DBG.rets.src=1; return; }
       if (side === 'sim' && o.source !== 'synthetic' && o.source !== 'real') return;
       var rawNeeded = side === 'orig' && o.source === 'real' &&
-        (f.__needsRawProjection || (P.simOverride && /^objtask_/.test(P.simOverride.job || '')));
+      (f.__needsRawProjection || (P.simOverride && /^(objtask_|obj3d_)/.test(P.simOverride.job || '')));
       if (rawNeeded && !o.bbox2d_orig) return;
       var b = rawNeeded ? o.bbox2d_orig : (o.bbox2d_sim || o.bbox2d);
       if (!b || b.length !== 4) { window.__DBG.rets.nob=1; return; }
@@ -14163,7 +14160,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                 if (a.width && a.height) { frameRef.width = a.width; frameRef.height = a.height; }
                 frameRef.frame_status = a.frame_status || '';
                 frameRef.original_geometry = a.original_geometry || 'unavailable';
-                frameRef.__needsRawProjection = /^objtask_/.test(expectedJob);
+                frameRef.__needsRawProjection = /^(objtask_|obj3d_)/.test(expectedJob);
                 frameRef.__pairedAnnResolved = expectedJob;
                 if (P.idx === frameIndex && !P.simOverride) {
                   draw3dBbox(frameRef, oi, 'cpCv', 'orig');
@@ -14181,22 +14178,29 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     // 真实框保留，旧合成框清除；快速播放时只接受当前帧响应。
     if (P.simOverride &&
         (!P.simOverride.onlyStem || f.stem === P.simOverride.onlyStem)) {
+      if (f.__simAnnJob !== P.simOverride.job) {
+        f.objects = (f.objects || []).filter(function(o){ return o.source === 'real'; });
+      }
       (function(frameRef, frameIndex, stem, job){
         fetch('/api/render_job_annotation?job=' + encodeURIComponent(job) +
               '&stem=' + encodeURIComponent(stem), {cache:'no-store'})
           .then(function(r){ return r.ok ? r.json() : {objects:[]}; })
           .then(function(a){
-            if (P.__bboxRenderSeq !== renderSeq || P.idx !== frameIndex ||
-                !P.frames[frameIndex] || P.frames[frameIndex].stem !== stem) return;
+            if (!P.simOverride || P.simOverride.job !== job ||
+                P.frames[frameIndex] !== frameRef || frameRef.stem !== stem ||
+                !a || a.frame !== stem) return;
             var supplied = (a && Array.isArray(a.objects)) ? a.objects : [];
             var real = supplied.filter(function(o){ return o.source === 'real'; });
             if (!real.length) real = (frameRef.objects || []).filter(function(o){ return o.source === 'real'; });
             frameRef.objects = real.concat(supplied.filter(function(o){ return o.source === 'synthetic'; }));
             if (a && a.width && a.height) { frameRef.width = a.width; frameRef.height = a.height; }
-            frameRef.__needsRawProjection = /^objtask_/.test(job);
+            frameRef.__simAnnJob = job;
+            frameRef.__needsRawProjection = /^(objtask_|obj3d_)/.test(job);
             frameRef.original_geometry = (a && a.original_geometry) || 'unavailable';
-            draw3dBbox(frameRef, oi, 'cpCv', 'orig');
-            draw3dBbox(frameRef, si, 'cpCvSim', 'sim');
+            if (P.idx === frameIndex && P.__bboxRenderSeq === renderSeq) {
+              draw3dBbox(frameRef, oi, 'cpCv', 'orig');
+              draw3dBbox(frameRef, si, 'cpCvSim', 'sim');
+            }
           })
           .catch(function(){});
       })(f, i, f.stem, P.simOverride.job);
@@ -14581,7 +14585,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                 '&stem=' + encodeURIComponent(st) + '&max=1280');
         return Object.assign({}, f, {
           stem: st, orig: original, sim: f.sim || original,
-          __needsRawProjection: /[?&]job=objtask_/.test(f.sim || ''),
+          __needsRawProjection: /[?&]job=(objtask_|obj3d_)/.test(f.sim || ''),
           objects: Array.isArray(f.objects) ? (P.simOverride ? f.objects.filter(function(o){return o.source==='real';}) : f.objects) : []
         });
       });
@@ -14839,6 +14843,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
       harmonize: true,    // 可见车体轻度色彩融合
       hdri_enabled: false,
       paint_coat_enabled: false,
+      lights_enabled: true,
       light: 'auto',      // day/night/auto
     },
     gnd: {
@@ -15077,12 +15082,13 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         '<div style="color:#D8DEE9;font-size:11px;font-weight:600;' +
           'margin-bottom:8px;padding-bottom:5px;' +
           'border-bottom:1px solid #1F2630">OBJ 参数</div>' +
-        '<div style="color:#8B95A5;font-size:10.5px;margin-bottom:8px">渲染方式：写实 3D 全片段预览<br><span style="color:#EAB308">单车相对自车位置固定；失败帧显示原图；不用于训练</span></div>' +
+        '<div style="color:#8B95A5;font-size:10.5px;margin-bottom:8px">渲染方式：写实 3D 世界轨迹全片段预览<br><span style="color:#EAB308">轨迹与任务中心一致；未经验证的数据不用于训练</span></div>' +
         '<div style="padding:8px;border:1px solid #35546b;border-radius:5px;margin-bottom:10px">' +
         '<div style="color:#22D3EE;font-size:11px;font-weight:600;margin-bottom:8px">仿真融合与材质</div>' +
         toggle('harmonize', '轻度场景颜色融合', 'obj') +
         toggle('hdri_enabled', '街道环境反射（试验）', 'obj') +
         toggle('paint_coat_enabled', '识别车漆清漆（试验）', 'obj') +
+        toggle('lights_enabled', '启用已配置的前灯和尾灯', 'obj') +
         '<div style="color:#8B95A5;font-size:9px">调整后点击底部“应用参数并重绘”。清漆仅对可识别的车漆材质生效。</div></div>' +
         '<div style="margin-bottom:9px">' +
           '<div style="color:#8B95A5;font-size:10.5px;margin-bottom:3px">' +
@@ -16542,6 +16548,11 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     }
     return P.frames.map(function(f){
       var copy = Object.assign({}, f);
+      if (f.__simAnnJob !== P.simOverride.job) {
+        copy.objects = (f.objects || []).filter(function(o){ return o.source === 'real'; });
+        copy.original_geometry = '';
+        copy.__needsRawProjection = /^(objtask_|obj3d_)/.test(P.simOverride.job || '');
+      }
       if (P.simOverride.onlyStem) {
         copy.objects = (f.objects || []).filter(function(o){ return o.source === 'real'; });
         if (f.stem !== P.simOverride.onlyStem) { copy.sim = f.orig; return copy; }
@@ -16619,7 +16630,8 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     if (!f) return;
     // Resolve exact native dimensions and boxes for the displayed job/frame.
     // The full-screen player can advance independently from the main player.
-    if ((!(f.width && f.height) || (f.__needsRawProjection && !f.original_geometry)) && f.sim && window.__clipPlayer) {
+    if ((!(f.width && f.height) || (f.__needsRawProjection && !f.original_geometry) ||
+         (window.__clipPlayer && window.__clipPlayer.simOverride && f.__simAnnJob !== window.__clipPlayer.simOverride.job)) && f.sim && window.__clipPlayer) {
       try {
         var frameURL = new URL(f.sim, window.location.href);
         var frameJob = frameURL.origin === window.location.origin &&
@@ -16636,9 +16648,11 @@ LatestRequest.prototype.run = async function(fetcher, apply){
               .then(function(a){
                 if (!itemRef || !playerRef.frames || playerRef.frames[index] !== itemRef ||
                     itemRef.stem !== stem || !a || a.frame !== stem) return;
+                if (playerRef.simOverride && playerRef.simOverride.job !== job) return;
                 if (a.width && a.height) { itemRef.width = a.width; itemRef.height = a.height; }
                 itemRef.original_geometry = a.original_geometry || 'unavailable';
-                itemRef.__needsRawProjection = /^objtask_/.test(job);
+                itemRef.__needsRawProjection = /^(objtask_|obj3d_)/.test(job);
+                itemRef.__simAnnJob = job;
                 if (Array.isArray(a.objects)) itemRef.objects = a.objects;
                 if (FS.open && FS.idx === index) drawFsBbox(index);
               }).catch(function(e){ console.warn('[FULLSCREEN-ANNOTATION]', e); })
@@ -16709,7 +16723,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         if (!o.box3d) ctx.globalAlpha = 1.0;   // TSR 无 3D → 不淡化
         // FS-BBOX-2D-ONLY: TSR 只有 2D 框
         var rawNeeded = side === 'orig' && o.source === 'real' &&
-          (f.__needsRawProjection || ((window.__clipPlayer || {}).simOverride && /^objtask_/.test(window.__clipPlayer.simOverride.job || '')));
+          (f.__needsRawProjection || ((window.__clipPlayer || {}).simOverride && /^(objtask_|obj3d_)/.test(window.__clipPlayer.simOverride.job || '')));
         if (rawNeeded && !o.bbox2d_orig) return;
         var C = rawNeeded ? o.corners_orig : o.corners;
         if (C && typeof FS2 === 'function') { C = C.map(FS2); }

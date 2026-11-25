@@ -2,7 +2,7 @@
 """GND clip preview: LiDAR odometry, world-fixed markings, semantic occlusion.
 Source data is read-only. Outputs are validation artifacts, never full GT.
 """
-import argparse, glob, json, os, sys, time
+import argparse, glob, json, os, sys, time, re
 from pathlib import Path
 import cv2
 import numpy as np
@@ -12,6 +12,7 @@ from kiss_icp.config import KISSConfig
 from kiss_icp.kiss_icp import KissICP
 sys.path.insert(0, '/opt/ue5_synth/tools')
 from gnd_asset_render import load_asset_tex, load_asset_meta
+from gnd_world_style import prepare_texture, composite
 
 CAMS=('cam_st_x2f_front','cam_st_x8d_front','cam_ld_x8d_front','cam_hk_x8b_front')
 
@@ -112,6 +113,10 @@ class RoadInpainter:
         out=img.copy();region=out[y0:y1,x0:x1]; region[m>0]=clean[m>0]
         return out
 
+class Cv2Inpainter:
+    def apply(self, img, mask):
+        return cv2.inpaint(img, mask, 3, cv2.INPAINT_TELEA) if np.any(mask) else img.copy()
+
 def warp_quad(rgb,alpha,tex,pts):
     h,w=alpha.shape; th,tw=tex.shape[:2]
     src=np.float32([[0,th-1],[0,0],[tw-1,0],[tw-1,th-1]])
@@ -147,26 +152,48 @@ def paint(img,K,Tcb,Twb,tex,meta,pp,path,smax):
     h,w=img.shape[:2]; alpha=np.zeros((h,w),np.uint8);rgb=np.zeros((h,w,3),np.uint8)
     # +X is forward in the validated body-coordinate LAS; the asset is fixed in frame-0 world.
     Tcw=np.linalg.inv(Twb@Tcb); lanes=int(pp.get('lanes',3)); half=3.5*lanes/2
+    if not 1<=lanes<=5:raise ValueError('lane count must be 1..5')
     ys=[-half+3.5*i for i in range(lanes+1)]
-    is_horizontal=bool(meta.get('horizontal')); key=str(pp['mat']);
-    is_arrow=('arrow' in key); is_dash=bool(meta.get('dash')) and not is_horizontal
-    width=.15; length=3.0 if is_arrow else 12.0
-    if is_horizontal: width=3.5;length=.45
-    if is_arrow: width=1.0;length=3.0
-    # Draw only internal lane boundaries. For arrows, one per lane. No output behind camera.
-    for y in ((ys[1:-1] if len(ys)>2 else ys) if not is_arrow else [0.]):
-        for x in np.arange(8.,smax,6. if is_arrow else 4.):
-            if not is_arrow and not is_horizontal:
-                # A 12m texture is split into 4m pieces to retain its dash pattern
-                # while allowing near-plane clipping without removing the whole marking.
-                tile=int((x-8.)//4)%3; htex=tex.shape[0]; lo=(2-tile)*htex//3; hi=(3-tile)*htex//3
-                tile_tex=tex[lo:hi]; piece=4.
-            else:
-                tile_tex=tex; piece=length
+    width=float(pp.get('width',.15));edge=float(pp.get('edge',.20))
+    if not (.03<=width<=2 and .03<=edge<=2):raise ValueError('invalid marking width')
+    wear=float(pp.get('wear',.35));dirt=float(pp.get('dirt',.25))
+    placements=[]; items=pp.get('gnd_items') or []
+    if pp.get('gnd_spec_on'):
+        if not items:raise ValueError('指定素材已启用但列表为空')
+        if len(items)>20:raise ValueError('指定素材最多20项')
+        for item in items:
+            key=str(item.get('asset') or '')
+            if not re.fullmatch(r'[A-Za-z0-9_-]+',key):raise ValueError('invalid asset key')
+            asset=load_asset_tex(key);asset_meta=load_asset_meta(key)
+            if asset is None or asset_meta is None:raise ValueError('asset unavailable: '+key)
+            x=float(item.get('x',10));y=float(item.get('y',0));length=float(item.get('len_m',3));wd=float(item.get('width_m',.2))
+            if not np.isfinite([x,y,length,wd]).all() or not (0<=x<=smax and abs(y)<=30 and .05<=length<=100 and .03<=wd<=30):raise ValueError('指定素材位置或尺寸无效: '+key)
+            asset=prepare_texture(asset,wear,dirt,key)
+            placements.append((x,y,length,wd,asset,False))
+    else:
+        key=str(pp['mat']);is_horizontal=bool(meta.get('horizontal'));is_arrow='arrow' in key
+        if is_horizontal or is_arrow:
+            for x in np.arange(8.,smax,6. if is_arrow else 12.):
+                placements.append((x,0.,3. if is_arrow else .45,1. if is_arrow else 3.5,tex,False))
+        else:
+            for i,y in enumerate(ys):
+                outer=i in (0,len(ys)-1)
+                placements.append((8.,y,max(0.,smax-8.),edge if outer else width,tex,bool(pp.get('dash')) and not outer))
+    if pp.get('stop'):
+        stop=load_asset_tex('stop_line')
+        if stop is None:raise ValueError('stop line asset unavailable')
+        placements.append((25.,0.,.45,3.5*lanes,prepare_texture(stop,wear,dirt,'stop_line'),False))
+    for start,y,length,wd,asset,dashed in placements:
+        # Split long surfaces in world coordinates; wear remains attached to the texture.
+        for x in np.arange(start,min(start+length,smax),4.):
+            if dashed and int((x-start)//4)%2:continue
+            piece=min(4.,start+length-x,smax-x)
+            if piece<=0:continue
+            tile_tex=asset
             p0,d0=path(x);p1,d1=path(x+piece)
             n0=np.array([-d0[1],d0[0],0.]);n1=np.array([-d1[1],d1[0],0.])
-            v0=p0+n0*(y+width/2);v1=p1+n1*(y+width/2)
-            v2=p1+n1*(y-width/2);v3=p0+n0*(y-width/2)
+            v0=p0+n0*(y+wd/2);v1=p1+n1*(y+wd/2)
+            v2=p1+n1*(y-wd/2);v3=p0+n0*(y-wd/2)
             corners=np.c_[np.stack((v0,v1,v2,v3)),np.ones(4)]
             cam=(Tcw@corners.T).T[:,:3];z=cam[:,2]
             if np.any(z<1.): continue
@@ -182,14 +209,22 @@ def main():
     src=cfg.get('source') or os.path.join('/data/test_data/real_clips',cfg['batch'],cfg['clip']);out=cfg['out']; pp=cfg['params']
     imgs,clouds,dt=files_for_clip(src)
     if args.limit: imgs,clouds,dt=imgs[:args.limit],clouds[:args.limit],dt[:args.limit]
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',str(pp.get('mat') or '')):raise ValueError('invalid material key')
     K,D,Tcb=calibration(src); tex=load_asset_tex(pp['mat']);meta=load_asset_meta(pp['mat'])
     if tex is None or meta is None:raise ValueError('asset unavailable')
+    # The checkbox controls dash gaps in world space, rather than layering gaps
+    # on top of a pre-dashed texture.
+    if pp['mat'] in ('lane_dashed_white','lane_dashed_yellow'):
+        solid=load_asset_tex(pp['mat'].replace('lane_dashed_','lane_solid_'))
+        if solid is None:raise ValueError('solid lane texture unavailable')
+        tex=solid
+    tex=prepare_texture(tex,float(pp.get('wear',.35)),float(pp.get('dirt',.25)),str(pp['mat']))
     os.makedirs(out,exist_ok=True); ad=os.path.join(out,'annotations');os.makedirs(ad,exist_ok=True)
     poses,ground=odometry(clouds); path,smax=build_reference_path(poses,ground)
     with open(os.path.join(out,'ego_trajectory.json'),'w') as f:json.dump({'source':'KISS-ICP on LAS; assumes LAS is body coordinates','poses':[p.tolist() for p in poses],'training_eligible':False},f)
     mode=str(pp.get('marking_mode') or 'add');
     if mode not in ('add','replace'):raise ValueError('invalid marking mode')
-    seg=Segmenter(); inpainter=RoadInpainter() if mode=='replace' else None; n=0; painted=0
+    seg=Segmenter(); inpainter=(Cv2Inpainter() if pp.get('gnd_mode')=='legacy' else RoadInpainter()) if mode=='replace' else None; n=0; painted=0
     for i,(im,Twb) in enumerate(zip(imgs,poses)):
         t=time.monotonic();raw=cv2.imread(im)
         if raw is None:raise ValueError('image unreadable: '+im)
@@ -197,11 +232,7 @@ def main():
         road,erase=seg.masks(und)
         clean=inpainter.apply(und,erase) if inpainter else und
         rgb,a=paint(clean,K,Tcb,Twb,tex,meta,pp,path,smax)
-        a=(a.astype(np.float32)/255.)*road*.85
-        # Preserve scene light on the painted surface without changing the background.
-        l=cv2.cvtColor(clean,cv2.COLOR_BGR2GRAY).astype(np.float32)/128.
-        light=np.clip(l,.55,1.1)[:,:,None]; fg=np.clip(rgb.astype(np.float32)*light,0,255)
-        sim=np.clip(fg*a[:,:,None]+clean.astype(np.float32)*(1-a[:,:,None]),0,255).astype(np.uint8)
+        sim,a=composite(clean,rgb,a,road,opacity=pp.get('opacity',.82),reflectivity=pp.get('reflectivity',1.95),optical_blur=pp.get('optical_blur',1.2),occlusion=bool(pp.get('occlusion',True)))
         stem=Path(im).stem; mask=(a>0.05).astype(np.uint8)*255
         if not cv2.imwrite(os.path.join(out,stem+'_gnd.jpg'),sim):raise RuntimeError('failed writing output')
         os.makedirs(os.path.join(out,'synthetic_masks'),exist_ok=True)
@@ -212,8 +243,8 @@ def main():
             os.makedirs(os.path.join(out,'clean_frames'),exist_ok=True)
             cv2.imwrite(os.path.join(out,'clean_frames',stem+'.jpg'),clean)
         px=int(np.count_nonzero(mask));painted+=bool(px)
-        with open(os.path.join(ad,stem+'.json'),'w') as f:json.dump({'frame':stem,'index':i,'rendered':True,'synthetic_pixels':px,'erased_pixels':int(np.count_nonzero(erase)) if inpainter else 0,'marking_mode':mode,'mask':'synthetic_masks/'+stem+'.png','labels_complete':False,'training_eligible':False,'image_space':'undistorted'},f)
+        with open(os.path.join(ad,stem+'.json'),'w') as f:json.dump({'frame':stem,'index':i,'rendered':True,'synthetic_pixels':px,'erased_pixels':int(np.count_nonzero(erase)) if inpainter else 0,'marking_mode':mode,'mask':'synthetic_masks/'+stem+'.png','params':pp,'labels_complete':False,'training_eligible':False,'image_space':'undistorted'},f)
         n+=1;print('RENDER %d/%d paint=%d %.2fs'%(n,len(imgs),px,time.monotonic()-t),flush=True)
-    with open(os.path.join(out,'trajectory_manifest.json'),'w') as f:json.dump({'schema_version':1,'module':'gnd','frames_total':len(imgs),'frames_rendered':n,'frames_with_paint':painted,'camera_lidar_max_offset_ms':float(dt.max()*1000),'ground_z':ground,'marking_mode':mode,'training_eligible':False,'labels_complete':False,'note':'validation preview; road layout approximated from ego trajectory; original labels not merged'},f)
-    return 0
+    with open(os.path.join(out,'trajectory_manifest.json'),'w') as f:json.dump({'schema_version':1,'module':'gnd','frames_total':len(imgs),'frames_rendered':n,'frames_with_paint':painted,'camera_lidar_max_offset_ms':float(dt.max()*1000),'ground_z':ground,'marking_mode':mode,'params':pp,'training_eligible':False,'labels_complete':False,'note':'validation preview; road layout approximated from ego trajectory; original labels not merged'},f)
+    return 0 if painted else 2
 if __name__=='__main__':sys.exit(main())

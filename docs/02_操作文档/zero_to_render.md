@@ -51,7 +51,7 @@ bash /opt/ue5_synth/linux/compile_ue5.sh /data/UE_5.3
 打开 <http://10.2.248.34:8010>，第 3 步点「开始出图 / 继续出图」。
 400 预检提示会消失，后台 tmux 会话 `ue5_render` 开始渲染；进度按 `/data/queue/done` 计数，断点续跑。
 
-**但先别放全量**：按 [`docs/phase3_checklist.md`](../docs/phase3_checklist.md) 的 T0-1~T0-10 核对这几项，
+**但先别放全量**：按 [阶段三检查表](../03_开发计划/phase3_checklist.md) 的 T0-1~T0-10 核对这几项，
 它们必须在真实工程里验证，过了再跑 360 帧：
 
 | 项 | 一句话 |

@@ -242,6 +242,7 @@ def main():
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
                                fit_to_inner, measure_face)
+    from tsr_semantics import compatible, semantic_name, valid_box
 
     t0 = time.time()
     print("[1/3] 扫描目录…", flush=True)
@@ -275,6 +276,10 @@ def main():
     print("  找到 %d 个图片文件（%.1fs）" % (len(files), time.time() - t0), flush=True)
 
     table = list_signs(a.signs_dir, a.country)
+    # Country must be explicit; never silently use _common or a flat library.
+    table = {key: path for key, path in table.items()
+             if os.path.basename(os.path.dirname(path)).upper() == a.country.upper()
+             or os.path.basename(os.path.dirname(path)).upper().startswith(a.country.upper() + '_')}
     if not table:
         print("ERROR: 国家 %s 在素材库里没有资产" % a.country)
         return 2
@@ -297,6 +302,9 @@ def main():
     p6_reasons = {}
     sd_fail = 0
     qc_reasons = {}
+    match_reasons = {}
+    def reject(reason):
+        match_reasons[reason] = match_reasons.get(reason, 0) + 1
     summary = []
     total = len(files)
 
@@ -306,6 +314,7 @@ def main():
         d = {"phase": phase, "done": cur, "total": tot,
              "ok": ok, "skip_no_sign": skip_no_sign,
              "skip_small": skip_small, "skip_color": skip_color, "fail": fail,
+             "match_reasons": dict(match_reasons),
              "elapsed": round(time.time() - t0, 1)}
         if extra:
             d.update(extra)
@@ -391,17 +400,22 @@ def main():
             for d in dets:
                 # 尺寸门槛：太小的标牌 YOLO 分类不可靠，贴上去必然错
                 _x1, _y1, _x2, _y2 = [int(v) for v in d["bbox"]]
+                if not valid_box(d["bbox"], im.shape, a.min_sign):
+                    reject('invalid_detection_box')
+                    continue
                 _w, _h = max(0, _x2 - _x1), max(0, _y2 - _y1)
                 if min(_w, _h) < a.min_sign:
                     continue
                 sh = std_shape(im, d["bbox"])
                 if sh == "unknown":
+                    reject('unknown_sign_shape')
                     continue
                 # 颜色一致性：检测框主色与类别族必须匹配
                 _crop = im[max(0, _y1):_y2, max(0, _x1):_x2]
                 ok_color, _why = color_consistent(_crop, _crop, d.get("class") or d.get("cls"))
                 if not ok_color:
                     skip_color += 1
+                    reject('sign_color_mismatch')
                     continue
                 want = "circle" if sh == "circle" else ("triangle" if sh == "triangle" else "rect")
                 keep_dets.append((d, want))
@@ -418,10 +432,14 @@ def main():
 
             for d, want in keep_dets:
                 # 指定标牌模式：只用指定的那一张，检测不到同族就跳过这帧
-                if a.pin_class:
-                    pin_nm = a.pin_class
+                if a.pin_class or a.pin_material:
+                    pin_nm = a.pin_material or a.pin_class
                     pin_pp = table.get(pin_nm)
-                    if not pin_pp:
+                    if a.pin_material:
+                        exact = [(nm, pp) for nm, pp in table.items()
+                                 if os.path.basename(pp).lower() == os.path.basename(a.pin_material).lower()]
+                        pin_nm, pin_pp = exact[0] if len(exact) == 1 else (pin_nm, None)
+                    if not pin_pp and not a.pin_material:
                         # 允许不带扩展名
                         for nm, pp in table.items():
                             if nm.rsplit(".", 1)[0] == pin_nm:
@@ -429,29 +447,31 @@ def main():
                                 pin_nm = nm
                                 break
                     if not pin_pp:
+                        reject('specified_asset_missing')
                         continue          # 没这个素材，跳过
-                    # 检测框必须和指定标牌同族（大类匹配）
                     base_cls = pin_nm.rsplit(".", 1)[0]
-                    fam = []
-                    parts = base_cls.split("_")
-                    for k in range(min(3, len(parts)), 0, -1):
-                        fam.append("_".join(parts[:k]))
-                    if not any(d["class"].startswith(f) for f in fam):
-                        continue          # 不是同一族标牌，跳过
-                    cls_name, path = base_cls, pin_pp
+                    if a.pin_class and not compatible(a.pin_class, base_cls, a.country):
+                        reject('specified_material_class_mismatch')
+                        continue
+                    if not compatible(d["class"], base_cls, a.country) or asset_shape(base_cls) != want:
+                        reject('semantic_or_shape_mismatch')
+                        continue
+                    cls_name, path = semantic_name(base_cls, a.country), pin_pp
                 else:
                     # 在该大类下找「形状匹配」的素材
                     cands = [(nm, pp) for nm, pp in table.items()
-                             if (nm == d["class"] or nm.startswith(d["class"] + "_"))
+                             if compatible(d["class"], nm, a.country)
                              and asset_shape(nm) == want]
                     if not cands:
+                        reject('no_compatible_asset')
                         continue
                     if a.vary_class:
                         import hashlib
-                        h = int(hashlib.md5((os.path.basename(p) + str(d["bbox"])).encode()).hexdigest()[:8], 16)
+                        h = int(hashlib.md5((os.path.dirname(p) + d["class"]).encode()).hexdigest()[:8], 16)
                         cls_name, path = cands[h % len(cands)]
                     else:
                         cls_name, path = cands[0]
+                    cls_name = semantic_name(cls_name, a.country)
                 s = load_sign(path)
                 m = sign_mask(s)
                 # 先把检测框收缩到原标牌实际轮廓，避免新牌比原牌大一圈
@@ -831,6 +851,7 @@ def main():
         "v46_double_skip": v46_double_skip,
         "cache_hit": cache_hit,
         "pipe6_fail_reasons": p6_reasons,
+        "match_reasons": match_reasons,
         "sd_enabled": a.sd,
         "sd_refined": sd_count,
         "sd_fail": sd_fail,

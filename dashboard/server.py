@@ -1034,7 +1034,7 @@ def _render_worker():
         if rec is None:
             continue
         out_dir = (os.path.join('/data/render','manual_gnd_'+jid) if kind == "gnd"
-                   else "/data/render/obj_params")
+                   else os.path.join('/data/render_hybrid','obj3d_'+jid))
         queue_lock=None
         try:
             os.makedirs('/data/render_hybrid',exist_ok=True)
@@ -1047,10 +1047,22 @@ def _render_worker():
             payload = os.path.join(out_dir, "_p_%s.json" % jid)
             with open(payload, "w", encoding="utf-8") as f:
                 if kind=='gnd' and params.get('_world_source'):
-                    data={'batch':batch,'clip':clip,'source':params['_world_source'],'out':out_dir,'params':{'mat':params.get('lane_type','lane_dashed_white'),'marking_mode':'replace' if params.get('gnd_mode')=='clean' else 'add','lanes':int(params.get('lanes') or 3),'render_mode':'world_preview','dash':int(bool(params.get('dash'))),'stop':int(bool(params.get('stop')))}}
+                    world_params={k:v for k,v in params.items() if not k.startswith('_')}
+                    world_params.update(mat=params.get('lane_type','lane_dashed_white'),marking_mode='replace',render_mode='world_preview')
+                    data={'batch':batch,'clip':clip,'source':params['_world_source'],'out':out_dir,'params':world_params}
+                elif kind=='obj':
+                    obj_params=dict(params)
+                    obj_params['render_mode']='canonical_clip'
+                    obj_params.setdefault('trajectory_mode','follow_road')
+                    obj_params.setdefault('lights',{'enabled':bool(params.get('lights_enabled',True)),'target':'driving','brightness':1.0,'mode':'steady'})
+                    data={"batch":batch,"clip":clip,"params":obj_params,"out":out_dir}
+                    alias=os.path.join('/data/render','obj3d_'+jid)
+                    if not os.path.lexists(alias):os.symlink(out_dir,alias,target_is_directory=True)
                 else:data={"batch": batch, "clip": clip, "params": params,"out": out_dir}
                 json.dump(data, f, ensure_ascii=False)
-            script = os.path.join(TOOLS_DIR, "gnd_render_one.py" if kind == "gnd" else "render_obj_params.py")
+            if kind=='obj':
+                with open(os.path.join(out_dir,'config.json'),'w',encoding='utf8') as f:json.dump(data,f,ensure_ascii=False)
+            script = os.path.join(TOOLS_DIR, "gnd_render_one.py" if kind == "gnd" else "render_obj_task.py")
             if kind=='gnd' and params.get('_world_source'):script=os.path.join(TOOLS_DIR,'gnd_clip_world.py')
             env = dict(os.environ)
             env["PYTHONPATH"] = TOOLS_DIR
@@ -1069,6 +1081,12 @@ def _render_worker():
             if kind=='obj':
                 target=os.path.join('/data/render_hybrid','obj3d_'+jid)
                 manifest=os.path.join(target,'annotations','__clip__.json')
+                trajectory=os.path.join(target,'trajectory_manifest.json')
+                if os.path.isfile(trajectory):
+                    with open(trajectory,encoding='utf8') as f: tm=json.load(f)
+                    m={'job':'obj3d_'+jid,'batch':batch,'clip':clip,'total':int(tm.get('frames_requested') or 0),'synthetic':int(tm.get('frames_rendered') or 0),'motion_assumption':tm.get('trajectory_mode'),'training_eligible':False}
+                    os.makedirs(os.path.dirname(manifest),exist_ok=True)
+                    with open(manifest,'w',encoding='utf8') as f:json.dump(m,f,ensure_ascii=False)
                 if os.path.isfile(manifest):
                     with open(manifest,encoding='utf8') as f: m=json.load(f)
                     n=int(m.get('synthetic') or 0)
@@ -1077,6 +1095,12 @@ def _render_worker():
             else:
                 rec['output_job']='manual_gnd_'+jid
                 rec['suffix']='_gnd.jpg' if params.get('_world_source') else '_sim.jpg'
+                if params.get('_world_source'):
+                    trajectory=os.path.join(out_dir,'trajectory_manifest.json')
+                    if os.path.isfile(trajectory):
+                        with open(trajectory,encoding='utf8') as f: gm=json.load(f)
+                        rec['total']=int(gm.get('frames_total') or 0)
+                        n=int(gm.get('frames_with_paint') or 0)
             with _RJ_LOCK:
                 rec["state"] = "done" if r.returncode == 0 and n>0 else "failed"
                 rec["n"] = n
@@ -1146,7 +1170,7 @@ def _start_render_job(kind, batch, clip, params):
         _RJ[jid] = {"state": "queued", "kind": kind, "batch": batch,
                     "clip": clip, "n": 0, "t0": time.time(),"manual":True,"params":params,"versions":_manual_versions(),"source":params.get('_world_source') or os.path.join('/data/test_data/real_clips',batch,clip)}
         if params.get('_world_source'):_RJ[jid]['world_source']=params['_world_source']
-        if params.get('_world_source'):_RJ[jid]['warning']='真实片段当前仅应用标线类型、车道数和虚实线设置；磨损、反光等参数暂未接入'
+        if params.get('_world_source'):_RJ[jid]['warning']='验证预览：道路按自车轨迹近似；反光为亮度近似，遮挡依赖路面分割，尚不可直接用于训练'
         _manual_save(jid,_RJ[jid])
         if len(_RJ) > 40:
             for o in sorted(_RJ, key=lambda k: _RJ[k]["t0"])[:10]:
@@ -2398,7 +2422,7 @@ class H(BaseHTTPRequestHandler):
                     ann = json.load(f)
                 # OBJ task images are undistorted; project real boxes separately
                 # onto the original distorted image using this frame's calibration.
-                if job.startswith('objtask_') and ann.get('frame') == stem:
+                if job.startswith(('objtask_', 'obj3d_')) and ann.get('frame') == stem:
                     try:
                         cfg_path = os.path.join(os.path.dirname(os.path.dirname(ap)), 'config.json')
                         with open(cfg_path, encoding='utf-8') as cf: cfg = json.load(cf)
@@ -4316,15 +4340,14 @@ class H(BaseHTTPRequestHandler):
                     with open(mp,encoding='utf8') as f:meta=json.load(f)
                     with open(os.path.join(os.path.dirname(mp),'config.json'),encoding='utf8') as f:old=json.load(f)
                     if old.get('batch')!=batch or old.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
-                    if params.get('gnd_spec_on') and params.get('gnd_items'):
-                        return self._send(400,{'ok':False,'error':'当前真实片段重绘暂不支持指定多素材位置，请关闭指定素材后使用'})
                     cp=meta.get('source') or '';params=dict(params);params['_world_source']=cp
                 elif source_job.startswith('manual_gnd_'):
                     previous=_manual_load(source_job[len('manual_gnd_'):])
                     if not previous or previous.get('batch')!=batch or previous.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
                     if previous.get('world_source'):
-                        if params.get('gnd_spec_on') and params.get('gnd_items'):return self._send(400,{'ok':False,'error':'当前真实片段重绘暂不支持指定多素材位置，请关闭指定素材后使用'})
                         cp=previous['world_source'];params=dict(params);params['_world_source']=cp
+                if not params.get('_world_source'):
+                    return self._send(400, {'ok':False,'error':'请选择支持自车世界轨迹的 GND 片段任务，当前来源不能进行世界轨迹重绘'})
                 if not os.path.isdir(cp):
                     return self._send(404, {"ok": False,
                                             "error": "clip not found"})
@@ -4722,6 +4745,8 @@ class H(BaseHTTPRequestHandler):
                 params = body.get("params") or {}
                 if not (batch and clip):
                     return self._send(400, {"ok": False, "error": "missing"})
+                if params.get('pos_on'):
+                    return self._send(400, {"ok":False,"error":"世界轨迹重绘暂不支持指定参考帧位置，请关闭指定位置；不能用固定自车坐标代替"})
                 jid = _start_render_job("obj", batch, clip, params)
                 return self._send(202, {"ok": True, "job": jid})
             except Exception as e:

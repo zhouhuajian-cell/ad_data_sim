@@ -14,6 +14,7 @@ light_cfg 字段（由 render_obj_task.py 从 config.json 透传）：
 import json
 import math
 import os
+import re
 
 LIGHT_INDEX = "/data/assets_global/OBJ_3D/light_index.json"
 
@@ -80,7 +81,7 @@ def frame_group_factors(frame_idx, fps, cfg):
     out = {}
     for grp in ("head", "tail", "turn"):
         active = cfg.get("enabled", True) and (
-            target == "all" or target == grp)
+            target == "all" or target == grp or (target == "driving" and grp in ("head", "tail")))
         out[grp] = base if active else 0.0
     return out
 
@@ -99,10 +100,20 @@ def apply_lights(objs, uid, frame_idx, fps, cfg, log=None):
     factors = frame_group_factors(frame_idx, fps, cfg)
 
     # 材质名 -> 组
-    name2grp = {}
+    name2groups = {}
     for grp, names in groups.items():
         for n in names:
-            name2grp[n.lower()] = grp
+            name2groups.setdefault(n.lower(), set()).add(grp)
+    name2grp = {}
+    for name, candidates in name2groups.items():
+        if len(candidates) == 1:
+            name2grp[name] = next(iter(candidates))
+        elif any(x in name for x in ('head','front','drl')) and 'head' in candidates:
+            name2grp[name] = 'head'
+        elif any(x in name for x in ('tail','rear','brake')) and 'tail' in candidates:
+            name2grp[name] = 'tail'
+        elif log:
+            log('  灯组冲突，请在素材工坊修正: %s' % name)
 
     # 遍历所有对象上的材质
     touched = {"head": 0, "tail": 0, "turn": 0}
@@ -123,7 +134,7 @@ def apply_lights(objs, uid, frame_idx, fps, cfg, log=None):
             key = (m.name or "").lower()
             if key in seen:
                 continue
-            grp = name2grp.get(key)
+            grp = name2grp.get(key) or name2grp.get(re.sub(r'\.\d{3}$', '', key))
             if not grp:
                 continue
             seen.add(key)
@@ -162,14 +173,17 @@ def _set_emission(mat, grp, factor):
     if bsdf is not None:
         # 4.x: Emission Color / Emission Strength
         for cname in ("Emission Color", "Emission"):
-            if cname in bsdf.inputs and not bsdf.inputs[cname].is_linked:
+            if cname in bsdf.inputs:
                 try:
+                    for link in list(bsdf.inputs[cname].links):
+                        mat.node_tree.links.remove(link)
                     bsdf.inputs[cname].default_value = (r, g, b, 1.0)
                 except Exception:
                     pass
                 break
-        if "Emission Strength" in bsdf.inputs and \
-                not bsdf.inputs["Emission Strength"].is_linked:
+        if "Emission Strength" in bsdf.inputs:
+            for link in list(bsdf.inputs["Emission Strength"].links):
+                mat.node_tree.links.remove(link)
             bsdf.inputs["Emission Strength"].default_value = strength
     else:
         # 无 Principled：找任意 Emission 节点

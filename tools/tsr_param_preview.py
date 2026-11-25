@@ -31,6 +31,7 @@ def pick_material(lib_root, country, cls, material=""):
       3) 类名包含关系
       4) 大类前缀匹配（speed_limit_60 → speed_limit）
     """
+    from tsr_semantics import semantic_name
     d = os.path.join(lib_root, country)
     if not os.path.isdir(d):
         return None
@@ -41,8 +42,9 @@ def pick_material(lib_root, country, cls, material=""):
     # 1) material 精确
     if material:
         for f in files:
-            if f.lower() == material.lower():
+            if f.lower() == material.lower() and (not cls or semantic_name(f, country) == semantic_name(cls, country)):
                 return os.path.join(d, f)
+        return None
 
     # 2) 类名归一化后比较
     key = (cls or "").strip()
@@ -57,21 +59,9 @@ def pick_material(lib_root, country, cls, material=""):
         if b.lower() == key_low:
             return os.path.join(d, f)
 
-    # 3) 包含
-    if key_low:
-        cands = [f for f in files if key_low in f.lower()]
-        if cands:
-            return os.path.join(d, sorted(cands)[0])
-
-    # 4) 大类前缀
-    base_key = key_low.split("_")[0] if key_low else ""
-    if base_key:
-        cands = [f for f in files if base_key in f.lower()]
-        if cands:
-            return os.path.join(d, sorted(cands)[0])
-
-    # Never substitute an unrelated class silently.
-    return os.path.join(d, sorted(files)[0]) if not cls else None
+    # Only same semantic class may be used for variants; never guess.
+    cands = [f for f in files if semantic_name(f, country) == semantic_name(cls, country)] if cls else []
+    return os.path.join(d, sorted(cands)[0]) if cands else None
 
 
 def main():
@@ -113,6 +103,11 @@ def main():
             print(json.dumps({"ok": False, "error": "未检测到标牌"}))
             return 1
         bbox = dets[0]["bbox"]
+
+    from tsr_semantics import valid_box
+    if not valid_box(bbox, img.shape, 14):
+        print(json.dumps({"ok": False, "error": "标牌框无效、越界或尺寸不适合替换"}, ensure_ascii=False))
+        return 1
 
     # 素材
     cls = a.target_class or ""
