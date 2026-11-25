@@ -44,6 +44,11 @@ def _conn():
         cls        TEXT,
         created_at REAL
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS scan_cache_v2 (
+        src TEXT NOT NULL, mtime REAL NOT NULL, detector TEXT NOT NULL,
+        conf REAL NOT NULL, detections TEXT NOT NULL, created_at REAL,
+        PRIMARY KEY(src, detector, conf)
+    )""")
     c.execute("CREATE INDEX IF NOT EXISTS ix_render_src ON render_cache(src)")
     c.execute("""CREATE TABLE IF NOT EXISTS walk_log (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +75,7 @@ def param_hash(params):
 
 # ---------------- 扫描缓存 ----------------
 
-def get_scan(src):
+def get_scan(src, conf=None, detector=None):
     """返回缓存的检测结果；源图改动过则失效。"""
     try:
         st = os.stat(src)
@@ -78,8 +83,11 @@ def get_scan(src):
         return None
     c = _conn()
     try:
-        row = c.execute(
-            "SELECT mtime, detections FROM scan_cache WHERE src=?", (src,)).fetchone()
+        if conf is not None and detector:
+            row = c.execute("SELECT mtime, detections FROM scan_cache_v2 WHERE src=? AND detector=? AND conf=?",
+                            (src, str(detector), float(conf))).fetchone()
+        else:
+            row = c.execute("SELECT mtime, detections FROM scan_cache WHERE src=?", (src,)).fetchone()
         if not row:
             return None
         mtime, det_json = row
@@ -93,18 +101,19 @@ def get_scan(src):
         c.close()
 
 
-def put_scan(src, detections):
+def put_scan(src, detections, conf=None, detector=None):
     try:
         st = os.stat(src)
     except OSError:
         return
     c = _conn()
     try:
-        c.execute(
-            "INSERT OR REPLACE INTO scan_cache(src,mtime,n_objects,detections,created_at) "
-            "VALUES(?,?,?,?,?)",
-            (src, st.st_mtime, len(detections),
-             json.dumps(detections, ensure_ascii=False), time.time()))
+        if conf is not None and detector:
+            c.execute("INSERT OR REPLACE INTO scan_cache_v2(src,mtime,detector,conf,detections,created_at) VALUES(?,?,?,?,?,?)",
+                      (src,st.st_mtime,str(detector),float(conf),json.dumps(detections,ensure_ascii=False),time.time()))
+        else:
+            c.execute("INSERT OR REPLACE INTO scan_cache(src,mtime,n_objects,detections,created_at) VALUES(?,?,?,?,?)",
+                      (src,st.st_mtime,len(detections),json.dumps(detections,ensure_ascii=False),time.time()))
         c.commit()
     finally:
         c.close()

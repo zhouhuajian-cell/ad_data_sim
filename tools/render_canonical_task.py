@@ -290,7 +290,8 @@ def main():
             log("SKIP %s" % uid)
             continue
         place(objs, float(v["x"]), float(v["y"]),
-              math.radians(float(v.get("yaw", 0.0))))
+              math.radians(float(v.get("yaw", 0.0))),
+              ground_z=float(v.get("z", 0.0)))
         # NO-GHOST-FIX: 强制不透明（除玻璃外），避免半透明重影
         for o in objs:
             for m in (o.data.materials or []):

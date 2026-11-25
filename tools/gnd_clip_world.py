@@ -13,6 +13,7 @@ from kiss_icp.kiss_icp import KissICP
 sys.path.insert(0, '/opt/ue5_synth/tools')
 from gnd_asset_render import load_asset_tex, load_asset_meta
 from gnd_world_style import prepare_texture, composite
+from gnd_erase_refine import refine_local, ground_homography, refine_temporal
 
 CAMS=('cam_st_x2f_front','cam_st_x8d_front','cam_ld_x8d_front','cam_hk_x8b_front')
 
@@ -225,11 +226,20 @@ def main():
     mode=str(pp.get('marking_mode') or 'add');
     if mode not in ('add','replace'):raise ValueError('invalid marking mode')
     seg=Segmenter(); inpainter=(Cv2Inpainter() if pp.get('gnd_mode')=='legacy' else RoadInpainter()) if mode=='replace' else None; n=0; painted=0
+    prev_erase=None;prev_pose=None
     for i,(im,Twb) in enumerate(zip(imgs,poses)):
         t=time.monotonic();raw=cv2.imread(im)
         if raw is None:raise ValueError('image unreadable: '+im)
         und=cv2.undistort(raw,K,D) if len(D) else raw
         road,erase=seg.masks(und)
+        refine_info={'added_pixels':0,'temporal_added_pixels':0,'temporal_aligned':False}
+        if inpainter and pp.get('erase_refine',False):
+            raw_erase=erase.copy()
+            erase,refine_info=refine_local(und,road,erase)
+            H=ground_homography(K,Tcb,prev_pose,Twb,ground) if prev_pose is not None else None
+            erase,added=refine_temporal(erase,prev_erase,H,road)
+            refine_info.update(temporal_added_pixels=added,temporal_aligned=H is not None)
+            prev_erase=raw_erase;prev_pose=Twb.copy()
         clean=inpainter.apply(und,erase) if inpainter else und
         rgb,a=paint(clean,K,Tcb,Twb,tex,meta,pp,path,smax)
         sim,a=composite(clean,rgb,a,road,opacity=pp.get('opacity',.82),reflectivity=pp.get('reflectivity',1.95),optical_blur=pp.get('optical_blur',1.2),occlusion=bool(pp.get('occlusion',True)))
@@ -243,7 +253,7 @@ def main():
             os.makedirs(os.path.join(out,'clean_frames'),exist_ok=True)
             cv2.imwrite(os.path.join(out,'clean_frames',stem+'.jpg'),clean)
         px=int(np.count_nonzero(mask));painted+=bool(px)
-        with open(os.path.join(ad,stem+'.json'),'w') as f:json.dump({'frame':stem,'index':i,'rendered':True,'synthetic_pixels':px,'erased_pixels':int(np.count_nonzero(erase)) if inpainter else 0,'marking_mode':mode,'mask':'synthetic_masks/'+stem+'.png','params':pp,'labels_complete':False,'training_eligible':False,'image_space':'undistorted'},f)
+        with open(os.path.join(ad,stem+'.json'),'w') as f:json.dump({'frame':stem,'index':i,'rendered':True,'synthetic_pixels':px,'erased_pixels':int(np.count_nonzero(erase)) if inpainter else 0,'erase_refinement':refine_info,'marking_mode':mode,'mask':'synthetic_masks/'+stem+'.png','params':pp,'labels_complete':False,'training_eligible':False,'image_space':'undistorted'},f)
         n+=1;print('RENDER %d/%d paint=%d %.2fs'%(n,len(imgs),px,time.monotonic()-t),flush=True)
     with open(os.path.join(out,'trajectory_manifest.json'),'w') as f:json.dump({'schema_version':1,'module':'gnd','frames_total':len(imgs),'frames_rendered':n,'frames_with_paint':painted,'camera_lidar_max_offset_ms':float(dt.max()*1000),'ground_z':ground,'marking_mode':mode,'params':pp,'training_eligible':False,'labels_complete':False,'note':'validation preview; road layout approximated from ego trajectory; original labels not merged'},f)
     return 0 if painted else 2

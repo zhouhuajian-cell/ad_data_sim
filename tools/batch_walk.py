@@ -70,6 +70,14 @@ def color_consistent(src_crop, asset_img, det_cls, min_red=0.06, min_blue=0.10):
     会把「禁止超车」认成 speed_limit。用颜色兜底能挡掉大部分误贴。
     """
     fam = _sign_family(det_cls)
+    if (det_cls or '').lower().startswith('speed_limit') and src_crop is not None and src_crop.size:
+        import cv2
+        hsv = cv2.cvtColor(src_crop, cv2.COLOR_BGR2HSV)
+        hh, ss, vv = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+        blue = float(((hh>=95)&(hh<=130)&(ss>=60)&(vv>=50)).mean())
+        yellow = float(((hh>=14)&(hh<=40)&(ss>=60)&(vv>=70)).mean())
+        if blue > .05 or yellow > .35:
+            return False, 'speed_limit_conflicting_colors'
     if fam == "red":
         r_src = _red_ratio(src_crop)
         r_ast = _red_ratio(asset_img)
@@ -242,7 +250,7 @@ def main():
     from batch_replace import (fit_bbox, pick_varied_asset, list_signs,
                                fit_to_sign_contour, std_shape, asset_shape,
                                fit_to_inner, measure_face)
-    from tsr_semantics import compatible, semantic_name, valid_box
+    from tsr_semantics import compatible, compatible_explicit, semantic_name, valid_box, candidate_shape
 
     t0 = time.time()
     print("[1/3] 扫描目录…", flush=True)
@@ -284,6 +292,12 @@ def main():
         print("ERROR: 国家 %s 在素材库里没有资产" % a.country)
         return 2
     print("  素材库 %s: %d 个类别" % (a.country, len(table)), flush=True)
+    weights = '/opt/ad_mining/tsr_sign.pt'
+    try:
+        st = os.stat(weights)
+        detector_key = '%s:%d:%d' % (os.path.realpath(weights),st.st_size,st.st_mtime_ns)
+    except OSError:
+        detector_key = weights + ':missing'
 
     ok = skip_no_sign = skip_small = skip_color = fail = 0
     qc_reject = 0
@@ -350,7 +364,7 @@ def main():
             dets = None
             if walk_cache is not None:
                 try:
-                    dets = walk_cache.get_scan(p)
+                    dets = walk_cache.get_scan(p, conf=a.conf, detector=detector_key)
                     if dets is not None:
                         cache_hit += 1
                 except Exception:
@@ -359,7 +373,7 @@ def main():
                 dets = detect_signs(p, a.conf)
                 if walk_cache is not None:
                     try:
-                        walk_cache.put_scan(p, dets)
+                        walk_cache.put_scan(p, dets, conf=a.conf, detector=detector_key)
                     except Exception:
                         pass
             if not dets:
@@ -400,6 +414,9 @@ def main():
             for d in dets:
                 # 尺寸门槛：太小的标牌 YOLO 分类不可靠，贴上去必然错
                 _x1, _y1, _x2, _y2 = [int(v) for v in d["bbox"]]
+                if str(d.get('class') or '').lower() == 'speed_limit' and float(d.get('conf') or 0) < .40:
+                    reject('speed_limit_semantics_low_confidence')
+                    continue
                 if not valid_box(d["bbox"], im.shape, a.min_sign):
                     reject('invalid_detection_box')
                     continue
@@ -407,16 +424,19 @@ def main():
                 if min(_w, _h) < a.min_sign:
                     continue
                 sh = std_shape(im, d["bbox"])
-                if sh == "unknown":
-                    reject('unknown_sign_shape')
-                    continue
                 # 颜色一致性：检测框主色与类别族必须匹配
                 _crop = im[max(0, _y1):_y2, max(0, _x1):_x2]
-                ok_color, _why = color_consistent(_crop, _crop, d.get("class") or d.get("cls"))
+                ok_color, _why = color_consistent(_crop, _crop, d.get("class") or d.get("cls"),min_red=.04,min_blue=.06)
                 if not ok_color:
                     skip_color += 1
                     reject('sign_color_mismatch')
                     continue
+                inferred_class = a.pin_class or d.get('class') or ''
+                sh, shape_basis = candidate_shape(sh, asset_shape(inferred_class), d.get('conf',0))
+                if sh == 'unknown':
+                    reject('unknown_sign_shape')
+                    continue
+                d['_shape_basis'] = shape_basis
                 want = "circle" if sh == "circle" else ("triangle" if sh == "triangle" else "rect")
                 keep_dets.append((d, want))
             if not keep_dets:
@@ -453,7 +473,7 @@ def main():
                     if a.pin_class and not compatible(a.pin_class, base_cls, a.country):
                         reject('specified_material_class_mismatch')
                         continue
-                    if not compatible(d["class"], base_cls, a.country) or asset_shape(base_cls) != want:
+                    if not compatible_explicit(d["class"], base_cls, a.country) or asset_shape(base_cls) != want:
                         reject('semantic_or_shape_mismatch')
                         continue
                     cls_name, path = semantic_name(base_cls, a.country), pin_pp
@@ -526,6 +546,7 @@ def main():
                             "class": cls_name,
                             "orig_class": str(d.get("class") or ""),
                             "orig_conf": round(float(d["conf"]), 3),
+                            "shape_basis": d.get('_shape_basis'),
                             "category": cls_name.split("_")[0],
                             "bbox": [round(float(v), 1) for v in bb46],
                             "source_bbox": [round(float(v), 1) for v in d["bbox"]],
@@ -563,8 +584,10 @@ def main():
                         "class": cls_name,
                         "orig_class": str(d.get("class") or ""),
                         "orig_conf": round(float(d["conf"]), 3),
+                        "shape_basis": d.get('_shape_basis'),
                         "category": cls_name.split("_")[0],
                         "bbox": [round(float(v), 1) for v in bbox_used],
+                        "source_bbox": [round(float(v), 1) for v in d["bbox"]],
                         "score": round(float(d["conf"]), 3),
                         "material": os.path.basename(path),
                         "pipeline": "v6",
@@ -579,8 +602,10 @@ def main():
                     "class": cls_name,
                     "orig_class": str(d.get("class") or ""),
                     "orig_conf": round(float(d["conf"]), 3),
+                    "shape_basis": d.get('_shape_basis'),
                     "category": cls_name.split("_")[0],
                     "bbox": [round(float(v), 1) for v in bbox],
+                    "source_bbox": [round(float(v), 1) for v in d["bbox"]],
                     "score": round(float(d["conf"]), 3),
                     "material": os.path.basename(path),
                     "occluder_ratio": cinfo.get("occluder_ratio", 0),

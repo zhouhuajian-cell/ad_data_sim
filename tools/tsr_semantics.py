@@ -23,6 +23,23 @@ def compatible(source, target, country=''):
                 re.fullmatch(r'speed_limit_\d+', dst))
 
 
+def compatible_explicit(source, target, country=''):
+    """Explicitly selected replacement may use a detector's broad family.
+
+    Broad-family matches are proposals, not proof of the original subtype.
+    Specific left/right classes still cannot be swapped.
+    """
+    src, dst = semantic_name(source,country), semantic_name(target,country)
+    return compatible(src,dst,country) or bool(src in ('mandatory','prohibition','warning') and dst.startswith(src+'_'))
+
+
+def candidate_shape(observed, inferred, confidence):
+    if observed != 'unknown':return observed, 'measured'
+    if inferred in ('circle','triangle','rect') and float(confidence) >= .35:
+        return inferred, 'class_inferred_review'
+    return 'unknown', 'unknown'
+
+
 def valid_box(box, shape, min_size):
     try:
         h, w = shape[:2]

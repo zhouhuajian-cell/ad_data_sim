@@ -31,6 +31,7 @@ import numpy as np
 
 # GPU 设备选择：TSR_YOLO_DEVICE 环境变量优先，默认自动（有 CUDA 就用 GPU）
 _YOLO_DEVICE = None
+_YOLO_MODELS = {}
 
 
 def _pick_device():
@@ -61,7 +62,10 @@ def detect_signs(image_path, conf=0.3, weights="/opt/ad_mining/tsr_sign.pt"):
     except Exception as e:
         print("WARN: 无法导入 ultralytics（%s），退回纯图像方案" % e)
         return []
-    model = YOLO(weights)
+    model = _YOLO_MODELS.get(weights)
+    if model is None:
+        model = YOLO(weights)
+        _YOLO_MODELS[weights] = model
     dev = _pick_device()
     try:
         model.to(dev)

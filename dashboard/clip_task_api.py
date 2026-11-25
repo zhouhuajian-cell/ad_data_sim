@@ -176,13 +176,16 @@ def start_tsr(body, source_path):
     export=str(body.get('export_dir') or '').strip()
     if export and not os.path.realpath(export).startswith('/data/render/'):
         raise ValueError('输出仅支持服务器本地 /data/render，网盘数据保持只读')
+    conf=float(body.get('conf') or .15);min_sign=int(body.get('min_sign') or 16)
+    if not .05 <= conf <= .95 or not 12 <= min_sign <= 500:
+        raise ValueError('置信度需在 0.05 至 0.95，最小尺寸需在 12 至 500 像素')
     base='/data/render/tsr_v3_10';os.makedirs(base,exist_ok=True)
     job=country+'_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
     out=os.path.join(base,'walk_'+job);os.makedirs(out)
     progress=os.path.join(base,'walk_'+job+'_progress.json')
     cfg={'images':source_path,'source':source_path,'country':country,'out':out,'progress':progress,
-         'frames':0,'limit':int(body.get('limit') or 10000),'min_sign':int(body.get('min_sign') or 20),
-         'conf':float(body.get('conf') or .2),'pin_class':str(body.get('pin_class') or ''),
+         'frames':0,'limit':int(body.get('limit') or 10000),'min_sign':min_sign,
+         'conf':conf,'pin_class':str(body.get('pin_class') or ''),
          'pin_material':str(body.get('pin_material') or '')}
     config=os.path.join(out,'config.json');json.dump(cfg,open(config,'w'),ensure_ascii=False)
     json.dump({'phase':'queued','done':0,'total':0,'ok':0},open(progress,'w'))

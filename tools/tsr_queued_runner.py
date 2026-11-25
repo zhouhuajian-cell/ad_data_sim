@@ -28,7 +28,7 @@ with open('/data/render_hybrid/.objtask.lock','w') as lock:
   m.refine=unavailable;m.make_sign_mask=unavailable;m.strength_for_size=unavailable;sys.modules['sd_refine']=m
  sys.argv=['/opt/ue5_synth/tools/batch_walk.py','--images',cfg['images'],
    '--country',cfg['country'],'--out',cfg['out'],'--limit',str(cfg.get('limit') or 10000),
-   '--min-sign',str(cfg.get('min_sign') or 20),'--conf',str(cfg.get('conf') or .2),'--signs-dir','/data/tsr_library_v2',
+   '--min-sign',str(cfg.get('min_sign') or 16),'--conf',str(cfg.get('conf') or .15),'--signs-dir','/data/tsr_library_v2',
    '--jobs-progress',progress,'--vary-class','--legacy-render']
  if cfg.get('pin_class'):sys.argv+=['--pin-class',cfg['pin_class']]
  if cfg.get('pin_material'):sys.argv+=['--pin-material',cfg['pin_material']]
