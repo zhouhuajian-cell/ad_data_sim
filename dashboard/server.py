@@ -5184,9 +5184,20 @@ class H(BaseHTTPRequestHandler):
             out = os.path.join(TSR_OUT_DIR,
                                "param_%s_%s.jpg" % (_ph, stem[-24:]))
 
+            # Reuse the selected task's country and curated library; a material
+            # filename can refer to a different sign in the default library.
+            library=load_config().get('tsr_library') or DEFAULT_TSR_LIBRARY
+            try:
+                with open(os.path.join(d,'config.json'),encoding='utf8') as f:taskcfg=json.load(f)
+                taskcountry=str(taskcfg.get('country') or '').upper()
+                if re.fullmatch(r'[A-Z]{2}',taskcountry):country=taskcountry
+                candidate=os.path.realpath(str(taskcfg.get('signs_dir') or ''))
+                allowed={'/data/tsr_library_v2','/data/tsr_curated_20261125_v1'}
+                if candidate in allowed and os.path.isdir(candidate):library=candidate
+            except (OSError,ValueError,TypeError):pass
             args = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "tsr_param_preview.py"),
                     src, out,
-                    "--library", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
+                    "--library", library,
                     "--country", country]
             if cls:
                 args += ["--target-class", cls]
@@ -5206,7 +5217,7 @@ class H(BaseHTTPRequestHandler):
             args += ["--params", json.dumps(params, ensure_ascii=False)]
 
             jid='tsr_%d_%s'%(int(time.time()),_uuid.uuid4().hex[:6])
-            manual={'id':jid,'kind':'tsr','state':'running','manual':True,'source':src,'country':country,'t0':time.time(),'n':0,'parent_dir':d,'stem':stem,'params':params,'material':mat0,'versions':_manual_versions()}
+            manual={'id':jid,'kind':'tsr','state':'running','manual':True,'source':src,'country':country,'t0':time.time(),'n':0,'parent_dir':d,'stem':stem,'params':params,'material':mat0,'library':library,'versions':_manual_versions()}
             _manual_save(jid,manual)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=120)

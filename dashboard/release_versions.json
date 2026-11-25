@@ -3,8 +3,8 @@
   "baseline_recorded_at": "2026-11-24",
   "note": "首次建立版本基线；不追溯此前版本",
   "versions": {
-    "platform": "1.1.4",
-    "tsr": "1.0.2",
+    "platform": "1.1.5",
+    "tsr": "1.0.3",
     "obj": "1.1.1",
     "gnd": "1.0.1"
   },
@@ -74,6 +74,18 @@
       "component": "tsr",
       "version": "1.0.2",
       "summary": "工作台按TSR任务加载，手动预览结果纳入任务记录"
+    },
+    {
+      "date": "2026-11-25T13:13:00+08:00",
+      "component": "platform",
+      "version": "1.1.5",
+      "summary": "手动预览保留原任务素材库与国家"
+    },
+    {
+      "date": "2026-11-25T13:13:00+08:00",
+      "component": "tsr",
+      "version": "1.0.3",
+      "summary": "修复精选素材任务重绘时错用默认素材库"
     }
   ]
 }
