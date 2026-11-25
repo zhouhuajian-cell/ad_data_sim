@@ -207,7 +207,8 @@ def draw_lanes_on_clean(clean_bgr, calib, cfg, old_mask=None):
                     clean_bgr, line_rgb, alpha,
                     wear_level=float(cfg.get("wear", 0.35)),
                     dirt_level=float(cfg.get("dirt", 0.25)),
-                    optical_blur=float(cfg.get("optical_blur", 1.2)))
+                    optical_blur=float(cfg.get("optical_blur", 1.2)),
+                    opacity=float(cfg.get("opacity", 0.82)))
                 paint = (alpha * 255).astype(np.uint8)
                 print("    素材渲染: %d 项" % _n)
                 return out, alpha, paint
@@ -224,7 +225,8 @@ def draw_lanes_on_clean(clean_bgr, calib, cfg, old_mask=None):
         clean_bgr, line_rgb, alpha,
         wear_level=float(cfg.get("wear", 0.35)),
         dirt_level=float(cfg.get("dirt", 0.25)),
-        optical_blur=float(cfg.get("optical_blur", 1.2)))
+        optical_blur=float(cfg.get("optical_blur", 1.2)),
+        opacity=float(cfg.get("opacity", 0.82)))
     return out, alpha, paint
 
 
@@ -237,59 +239,179 @@ def apply_vehicle_occlusion(synth_bgr, orig_bgr, vehicle_mask):
 
 # ---------- 完整流程 ----------
 
-def run_pipeline(img_bgr, calib, cfg, objects=None, semantic=None,
-                 verbose=True, clip_dir=None, stem=None):
-    """三步走完整流程。
+def prepare_clean_base(img_bgr, calib_clip_dir, stem, verbose=True,
+                        prob_thresh=0.12):
+    """阶段 1：只跑一次，生成净面底图（供 Session 缓存）。
 
-    返回 dict:
-      clean_base: 净面底图（只有沥青、树影、车辆，无标线）
-      erase_mask: 旧标线掩码
-      final:      最终合成图
-      stats:      统计信息
+    返回 (clean_bg, erase_mask, free, veh)
+    """
+    from gnd_mask_v2 import extract_clean_markings_mask_v3, compute_masks
+
+    h, w = img_bgr.shape[:2]
+    _free, _veh, _sem = compute_masks(img_bgr, calib_clip_dir, stem,
+                                      use_semantic_gt=True)
+    _m_v3 = extract_clean_markings_mask_v3(img_bgr, _free, _veh)
+    erase_mask = _m_v3
+
+    if verbose:
+        _n = int(np.count_nonzero(_m_v3))
+        print("       v3 擦除区: %d 像素 (%.2f%%)"
+              % (_n, _n / float(h * w) * 100))
+
+    # 4A：Mask2Former 语义 Mask 取并集
+    try:
+        import os as _os
+        _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        from gnd_mask_4a import (MapillaryMarkingExtractor,
+                                  build_final_erase_mask_4a)
+        _ext = _get_4a()
+        erase_mask = build_final_erase_mask_4a(
+            img_bgr, _m_v3, _free, _veh, _ext, prob_thresh=prob_thresh)
+        if verbose:
+            _n2 = int(np.count_nonzero(erase_mask))
+            print("       4A 擦除区: %d 像素 (%.2f%%)"
+                  % (_n2, _n2 / float(h * w) * 100))
+    except Exception as _e4:
+        print("       4A 失败，用 v3:", str(_e4)[:80])
+
+    if verbose:
+        print("    ② LaMa 清零（只跑一次）...")
+    clean_bg = erase_to_clean_base(img_bgr, erase_mask)
+    return clean_bg, erase_mask, _free, _veh
+
+
+_EXTRACTOR_4A = None
+
+
+def _get_4a():
+    global _EXTRACTOR_4A
+    if _EXTRACTOR_4A is None:
+        from gnd_mask_4a import MapillaryMarkingExtractor
+        _EXTRACTOR_4A = MapillaryMarkingExtractor()
+    return _EXTRACTOR_4A
+
+
+def draw_on_clean(clean_bgr, calib, cfg):
+    """阶段 2：从净面底图全新拷贝渲染（无状态）。"""
+    canvas = clean_bgr.copy()
+    return draw_lanes_on_clean(canvas, calib, cfg)
+
+
+def run_pipeline(img_bgr, calib, cfg, objects=None, semantic=None,
+                 verbose=True, clip_dir=None, stem=None, use_session=True):
+    """三步走 + Session 只读缓存。
+
+    有 clip_dir/stem 且 use_session=True 时：
+      · 净面底图走 GNDRenderSession 缓存（只跑一次 LaMa）
+      · 每次调用从 clean.copy() 全新渲染
+      · 车辆前景用原始 raw + vehicle_mask 回贴
     """
     h, w = img_bgr.shape[:2]
 
-    # 可行驶区
     drv = build_drivable_mask(calib, img_bgr.shape)
     if not np.any(drv):
-        # 兜底：地平线以下
         drv[int(h * 0.55):, :] = 255
 
-    # 车辆掩码
-    veh = build_vehicle_mask(objects, img_bgr.shape)
+    veh0 = build_vehicle_mask(objects, img_bgr.shape)
 
-    # ① 全量提取（FULL-MASK-WIRED: 方案 B 三重约束）
+    # ---------- Session 路径 ----------
+    if use_session and clip_dir and stem:
+        from gnd_session import get_session
+        sess = get_session()
+        fid = "%s/%s" % (os.path.basename(clip_dir), stem)
+
+        def _erase(raw, drivable, vmask):
+            c, _m, _f, _v = prepare_clean_base(
+                raw, clip_dir, stem, verbose=verbose)
+            return c
+
+        if not sess.has(fid):
+            if verbose:
+                print("    ① 提取旧标线 + LaMa（首次）...")
+            # 先算 free/veh（prepare_clean_base 内部也算，这里需要一份给 Session）
+            from gnd_mask_v2 import compute_masks
+            _free, _veh, _ = compute_masks(img_bgr, clip_dir, stem,
+                                           use_semantic_gt=True)
+            veh0 = _veh
+            drv = _free
+            clean = sess.prepare_frame(fid, img_bgr, _free, _veh, _erase)
+        else:
+            if verbose:
+                print("    ① 命中缓存，跳过 LaMa")
+            clean = sess.get_clean(fid)
+            _vm = sess.get_vehicle_mask(fid)
+            if _vm is not None:
+                veh0 = _vm
+
+        erase_mask = np.zeros((h, w), np.uint8)
+        if verbose:
+            print("    ③ 净面重绘（从 clean.copy()）...")
+
+        def _render(shape, asset_config):
+            # SIG-FIX: Session 传的是 (shape, asset_config)
+            _items = (asset_config or {}).get("gnd_items")
+            _shape = shape
+            if _items and isinstance(_items, list) and len(_items) > 0:
+                try:
+                    from gnd_asset_render import render_items
+                    a, rgb, _n = render_items(calib, _items, _shape)
+                    return rgb, a
+                except Exception:
+                    pass
+            from gnd_fusion import render_lane_alpha
+            a, _paint = render_lane_alpha(calib, asset_config or {}, _shape)
+            return np.full((_shape[0], _shape[1], 3), 236, np.uint8), a
+
+        def _blend(canvas, new_bgr, new_alpha):
+            from compose_core import blend_new_gnd_realistic
+            return blend_new_gnd_realistic(
+                canvas, new_bgr, new_alpha,
+                wear_level=float(cfg.get("wear", 0.35)),
+                dirt_level=float(cfg.get("dirt", 0.25)),
+                optical_blur=float(cfg.get("optical_blur", 1.2)),
+                opacity=float(cfg.get("opacity", 0.82)))
+
+        final = sess.render_asset(fid, cfg, _render, _blend)
+        if final is None:
+            final = img_bgr.copy()
+
+        n_paint = 0
+        try:
+            _bgr, _alpha = _render(clean.shape, cfg)
+            n_paint = int(np.count_nonzero(_alpha > 0.005))
+        except Exception:
+            n_paint = 0
+
+        return {
+            "clean_base": clean,
+            "erase_mask": erase_mask,
+            "drivable": drv,
+            "vehicle": veh0,
+            "final": np.asarray(final),
+            "cached": True,
+            "frame_id": fid,
+            "stats": {
+                "erase_px": 0,
+                "erase_pct": 0.0,
+                "paint_px": n_paint,
+                "paint_pct": round(n_paint / float(h * w) * 100, 2),
+            },
+        }
+
+    # ---------- 无缓存路径（兼容 batch 批处理）----------
     if verbose:
-        print("    ① 提取旧标线（含文字/箭头）...")
-    # WIRE-V2-FINAL: 用户方案 v2（相对亮度 + 多尺度 Top-Hat + 连通域筛选）
-    from gnd_mask_v2 import build_mask as _build_v2
-    _r = _build_v2(img_bgr, clip_dir, stem,
-                   use_semantic_gt=(semantic is not None))
-    erase_mask = _r["mask"]
-    # 车辆 mask 用 v2 算出的（外扩 11px）
-    veh = _r["veh"]
-    if verbose:
-        print("       统计: %s" % _r["stats"])
+        print("    ① 提取旧标线...")
+    clean_base, erase_mask, drv2, veh = prepare_clean_base(
+        img_bgr, clip_dir, stem, verbose=verbose)
+    if drv2 is not None:
+        drv = drv2
     n_erase = int(np.count_nonzero(erase_mask))
-    if verbose:
-        print("       擦除区: %d 像素 (%.2f%%)" %
-              (n_erase, n_erase / float(h * w) * 100))
 
-    # ② LaMa 清零
-    if verbose:
-        print("    ② LaMa 清零...")
-    clean_base = erase_to_clean_base(img_bgr, erase_mask)
-
-    # ③ 净面重绘
     if verbose:
         print("    ③ 净面重绘...")
-    synth, alpha, paint = draw_lanes_on_clean(clean_base, calib, cfg)
+    synth, alpha, paint = draw_lanes_on_clean(clean_base.copy(), calib, cfg)
     n_paint = int(np.count_nonzero(paint))
-    if verbose:
-        print("       新标线: %d 像素 (%.2f%%)" %
-              (n_paint, n_paint / float(h * w) * 100))
 
-    # 车辆遮挡
     final = apply_vehicle_occlusion(synth, img_bgr, veh)
 
     return {
@@ -298,6 +420,7 @@ def run_pipeline(img_bgr, calib, cfg, objects=None, semantic=None,
         "drivable": drv,
         "vehicle": veh,
         "final": final,
+        "cached": False,
         "stats": {
             "erase_px": n_erase,
             "erase_pct": round(n_erase / float(h * w) * 100, 2),
@@ -305,3 +428,21 @@ def run_pipeline(img_bgr, calib, cfg, objects=None, semantic=None,
             "paint_pct": round(n_paint / float(h * w) * 100, 2),
         },
     }
+
+
+def _render_items_or_lanes(calib, cfg, canvas_for_shape):
+    """统一渲染入口：有 gnd_items 用素材贴图，否则用程序生成线。"""
+    # 兼容传入画布或 shape
+    shape = canvas_for_shape.shape if hasattr(canvas_for_shape, "shape") \
+        else canvas_for_shape
+    items = cfg.get("gnd_items")
+    if items and isinstance(items, list) and len(items) > 0:
+        try:
+            from gnd_asset_render import render_items
+            alpha, rgb, _n = render_items(calib, items, shape)
+            return rgb, alpha
+        except Exception:
+            pass
+    from gnd_fusion import render_lane_alpha
+    alpha, paint = render_lane_alpha(calib, cfg, shape)
+    return np.full(shape, 236, np.uint8), alpha

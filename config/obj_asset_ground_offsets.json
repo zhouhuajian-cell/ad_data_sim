@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "unit": "meter",
+  "description": "Visual tire-contact sink relative to fitted road plane; positive values move the mesh downward. Physical 3D boxes remain on the measured road plane.",
+  "by_asset_uid": {
+    "08_car_9409145e": {
+      "contact_sink_m": 0.14,
+      "status": "visual_verified",
+      "note": "Front view required 6 cm more sink than the class default."
+    }
+  }
+}

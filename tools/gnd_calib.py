@@ -47,16 +47,19 @@ def load_gnd_calib(batch, clip):
     K = np.array(ic["intrinsic"], float)
     dist = np.array(ic.get("distortion") or [], float).ravel()
 
-    # 外参 camera → body
-    R_cb = np.eye(3)
-    t_cb = np.zeros(3)
-    ep = os.path.join(cdir, "extrinsic", "camera-1_to_body-1.yaml")
-    if os.path.isfile(ep):
-        with open(ep, encoding="utf-8") as f:
-            ec = yaml.safe_load(f)
-        T = np.array(ec["transformation"], float)
-        R_cb = T[:3, :3]
-        t_cb = T[:3, 3]
+    # 外参必须明确存在，不能以单位矩阵冒充有效标定。
+    import glob
+    exts = glob.glob(os.path.join(cdir, 'extrinsic', 'camera-1_to_body-*.yaml'))
+    if len(exts) != 1:
+        raise ValueError('缺少或存在多个 camera-to-body 外参: %s' % cdir)
+    with open(exts[0], encoding='utf-8') as f:
+        ec = yaml.safe_load(f)
+    T = np.array(ec['transformation'], float)
+    if T.shape != (4, 4) or not np.isfinite(T).all():
+        raise ValueError('camera-to-body 外参无效')
+    R_cb, t_cb = T[:3, :3], T[:3, 3]
+    if not np.allclose(R_cb.T @ R_cb, np.eye(3), atol=1e-3) or not np.isclose(np.linalg.det(R_cb), 1.0, atol=1e-3):
+        raise ValueError('camera-to-body 旋转矩阵无效')
 
     return {
         "fx": float(K[0, 0]), "fy": float(K[1, 1]),

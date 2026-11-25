@@ -232,6 +232,7 @@ def blend_new_gnd_realistic(
     wear_level=0.35,
     dirt_level=0.25,
     optical_blur=1.2,
+    opacity=0.82,
 ):
     """物理级 GND 做旧融合（用户方案）。
 
@@ -242,6 +243,8 @@ def blend_new_gnd_realistic(
       ④ 树影不够暗    → shadow_ratio ** 1.35
     """
     h, w = clean_bg_bgr.shape[:2]
+    if float(opacity) <= 0:
+        return clean_bg_bgr.copy()
     mask_bool = new_gnd_alpha > 0.05
     if not np.any(mask_bool):
         return clean_bg_bgr
@@ -262,9 +265,11 @@ def blend_new_gnd_realistic(
     gnd_lab[:, :, 1] = gnd_lab[:, :, 1] * 0.65 + bg_lab[:, :, 1] * 0.35
     gnd_lab[:, :, 2] = gnd_lab[:, :, 2] * 0.65 + bg_lab[:, :, 2] * 0.35
 
+    # DETERMINISTIC-RNG2: 固定种子，同素材每次渲染完全一致
+    _rng = np.random.RandomState(20261122)
     # 3. 低频胎印/灰尘脏污
     dirt_noise = cv2.resize(
-        np.random.rand(max(h // 16, 2), max(w // 16, 2)).astype(np.float32),
+        _rng.rand(max(h // 16, 2), max(w // 16, 2)).astype(np.float32),
         (w, h))
     dirt_noise = cv2.GaussianBlur(dirt_noise, (15, 15), 0)
     gnd_lab[:, :, 0] = np.clip(
@@ -275,16 +280,16 @@ def blend_new_gnd_realistic(
 
     # 4. 油漆剥落 + 粗糙沥青透底
     fine_wear = cv2.resize(
-        np.random.rand(max(h // 2, 2), max(w // 2, 2)).astype(np.float32),
+        _rng.rand(max(h // 2, 2), max(w // 2, 2)).astype(np.float32),
         (w, h))
     coarse_wear = cv2.resize(
-        np.random.rand(max(h // 12, 2), max(w // 12, 2)).astype(np.float32),
+        _rng.rand(max(h // 12, 2), max(w // 12, 2)).astype(np.float32),
         (w, h))
     wear_map = 0.6 * fine_wear + 0.4 * coarse_wear
     asphalt_pit = np.clip(-L_grain / 20.0, 0, 1.0) * 0.25
 
     eff_alpha = new_gnd_alpha * (1.0 - wear_level * wear_map - asphalt_pit)
-    eff_alpha = np.clip(eff_alpha, 0.0, 0.82).astype(np.float32)
+    eff_alpha = np.clip(eff_alpha, 0.0, 1.0).astype(np.float32) * float(np.clip(opacity,0.0,1.0))
 
     # 5. 镜头光学退化
     if optical_blur > 0:
@@ -292,12 +297,14 @@ def blend_new_gnd_realistic(
                                          sigmaX=optical_blur)
         eff_alpha = cv2.GaussianBlur(eff_alpha, (0, 0),
                                      sigmaX=optical_blur)
+        # Never leak paint outside the supplied road/marking support.
+        eff_alpha *= (new_gnd_alpha > 0).astype(np.float32)
 
     # 6. 传感器 ISO 噪点
     bg_float = clean_bg_bgr.astype(np.float32)
     bg_noise_std = float(np.std(
         bg_float - cv2.GaussianBlur(bg_float, (3, 3), 0)))
-    sensor_noise = np.random.normal(
+    sensor_noise = _rng.normal(
         0, bg_noise_std * 0.8, realistic_gnd.shape).astype(np.float32)
     realistic_gnd = np.clip(realistic_gnd + sensor_noise, 0, 255)
 

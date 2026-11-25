@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "baseline_recorded_at": "2026-11-24",
+  "note": "首次建立版本基线；不追溯此前版本",
+  "versions": {
+    "platform": "1.1.0",
+    "tsr": "1.0.0",
+    "obj": "1.1.0",
+    "gnd": "1.0.0"
+  },
+  "changes": [
+    {
+      "date": "2026-11-24",
+      "component": "all",
+      "version": "1.0.0",
+      "summary": "建立平台和模块版本跟踪基线"
+    },
+    {
+      "date": "2026-11-25T00:49:43+08:00",
+      "component": "obj",
+      "version": "1.1.0",
+      "summary": "multitrack_random_preview"
+    },
+    {
+      "date": "2026-11-25T00:49:43+08:00",
+      "component": "platform",
+      "version": "1.1.0",
+      "summary": "obj_multitrack_task_controls"
+    }
+  ]
+}

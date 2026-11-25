@@ -70,8 +70,8 @@ def pick_material(lib_root, country, cls, material=""):
         if cands:
             return os.path.join(d, sorted(cands)[0])
 
-    # 兜底：第一个素材
-    return os.path.join(d, sorted(files)[0])
+    # Never substitute an unrelated class silently.
+    return os.path.join(d, sorted(files)[0]) if not cls else None
 
 
 def main():
@@ -129,12 +129,8 @@ def main():
 
     # 渲染
     try:
-        from pipeline_v411 import SignRealismV411Renderer, DoubleSignSkip
-        R = SignRealismV411Renderer(jpeg_quality=jpeg_q)
-        sim, bb, _, _ = R.render(img, bbox, asset)
-    except DoubleSignSkip:
-        print(json.dumps({"ok": False, "error": "双牌场景，跳过"}))
-        return 1
+        from tsr_preview_fallback import render
+        sim, bb = render(img, bbox, asset, p)
     except Exception as e:
         print(json.dumps({"ok": False, "error": "渲染失败: " + str(e)}))
         return 1
@@ -147,6 +143,8 @@ def main():
         "bbox": [round(v, 1) for v in bb],
         "overcover": overcover,
         "jpeg_quality": jpeg_q,
+        "preview_only": True,
+        "warning": "仅单帧预览，未检测组合牌或清除旧牌，不可直接用于训练",
     }, ensure_ascii=False))
     return 0
 

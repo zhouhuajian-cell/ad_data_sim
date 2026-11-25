@@ -66,8 +66,8 @@ def list_clips(prefer_local=True):
                 subs = os.listdir(p)
             except OSError:
                 continue
-            has = any(os.path.isdir(os.path.join(p, sd, "cam_st_x2f_front"))
-                      for sd in subs)
+            has = any(os.path.isdir(os.path.join(p, sd, cam))
+                      for sd in subs for cam in ("cam_st_x2f_front", "cam_st_x8d_front", "cam_ld_x8d_front", "cam_hk_x8b_front"))
             if has:
                 out.append((n, p, kind))
                 seen.add(n)

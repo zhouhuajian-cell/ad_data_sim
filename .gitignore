@@ -71,3 +71,16 @@ dashboard/static/tmp/
 *_u8.py
 rs.sh
 44.py
+
+# 本地实验、模型下载和素材工作区，保留在本机，不提交 Git
+/.codex_work/
+/tools_local/
+/work_obj3d_ui/
+/ad_data_sim.bundle
+/bbox_final.png
+/左转_36帧合成_3D框预览.mp4
+/tools/_session_exact.txt
+/tools/_v3_exact.txt
+/tools/good_cutouts.json
+/tools/rear_cutouts.json
+/推送说明.md

@@ -120,7 +120,9 @@ def compute_masks(img_bgr, clip_dir, stem, use_semantic_gt=True):
                 if r > l:
                     free[y, l:r + 1] = 255
 
-    # 车辆 mask（obj_mask，外扩 11px ≈ 5px 半径）
+    # VEH-SLIM: 车辆 mask 用 obj_mask 像素级掩码，外扩严格收敛
+    #   原外扩 11px 会把车旁路面吞掉（虚线紧贴前车左侧时被误扣）
+    #   新规则：远景 1px / 近中景 2px（按 road_mask 纵坐标分区）
     veh = np.zeros((h, w), np.uint8)
     p = "%s/obj_mask_ori_3.1.1/%s.png" % (clip_dir, stem)
     if os.path.isfile(p):
@@ -128,8 +130,21 @@ def compute_masks(img_bgr, clip_dir, stem, use_semantic_gt=True):
         if m is not None:
             if m.shape[:2] != (h, w):
                 m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-            veh = ((m > 0).astype(np.uint8)) * 255
-            veh = cv2.dilate(veh, np.ones((11, 11), np.uint8))
+            veh_raw = ((m > 0).astype(np.uint8)) * 255
+            # 分区膨胀
+            _ys, _ = np.where(free > 127)
+            if len(_ys) > 100:
+                _y0, _y1 = int(_ys.min()), int(_ys.max())
+                _ysplit = int(_y0 + (_y1 - _y0) * 0.55)
+            else:
+                _ysplit = int(h * 0.7)
+            _k1 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            _k2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            _near = cv2.dilate(veh_raw, _k2)     # 近中景 2px
+            _far = cv2.dilate(veh_raw, _k1)      # 远景 1px
+            veh = _near.copy()
+            if _ysplit > 0:
+                veh[:_ysplit, :] = _far[:_ysplit, :]
 
     # 语义真值（可选叠加）
     sem_extra = None
@@ -172,3 +187,152 @@ def build_mask(img_bgr, clip_dir, stem, use_semantic_gt=True):
             "veh_pct": round(np.count_nonzero(veh) / float(h * w) * 100, 2),
         },
     }
+
+def extract_clean_markings_mask_v3(img_bgr, drivable_mask, vehicle_mask):
+    # 1. 纯路面区域（向下延伸防底部截断，扣除车辆）
+    expanded_road = cv2.dilate(drivable_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25)))
+    pure_road = cv2.bitwise_and(expanded_road, cv2.bitwise_not(vehicle_mask))
+
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L = lab[:, :, 0]
+
+    # 2. 用形态学 Top-Hat 替代 ratio_map（Top-Hat 对阶梯状树影边界不敏感，只对"细条/文字"敏感）
+    th_31 = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+    th_55 = cv2.morphologyEx(L, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (55, 55)))
+
+    # 阳光区阈值 18，树影暗区(L < 100) 自动降低阈值到 10，既能抓暗处白线，又不误伤树影边界
+    is_shadow = L < 100
+    bright_mask = np.where(is_shadow, (th_31 > 10) | (th_55 > 10), (th_31 > 18) | (th_55 > 18)).astype(np.uint8) * 255
+
+    # 3. 黄色标线补充
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    yellow_mask = cv2.inRange(hsv, np.array([15, 60, 80]), np.array([35, 255, 255]))
+
+    raw = cv2.bitwise_and(cv2.bitwise_or(bright_mask, yellow_mask), pure_road)
+
+    # 4. 连通域过滤：剔除极小噪点(< 20px) 和 误检的大片反光/树影块(> 路面面积的 8%)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(raw, connectivity=8)
+    road_area = np.count_nonzero(pure_road) + 1
+    filtered = np.zeros_like(raw)
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if 20 < area < road_area * 0.08:
+            filtered[labels == i] = 255
+
+    # 5. 适度膨胀包住旧油漆边缘，严格避开车辆
+    final_mask = cv2.dilate(filtered, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)))
+    final_mask = cv2.bitwise_and(final_mask, cv2.bitwise_not(vehicle_mask))
+    return final_mask
+
+def text_from_unet_and_contour(img_bgr, drivable_mask, vehicle_mask,
+                                use_unet=True):
+    """方案 C：U-Net 预测 + 轮廓填充 —— 专门补地面文字/箭头。
+
+    流程：
+      ① U-Net 预测车道线（4 类）
+      ② 把所有细线连通域合并成"路网骨架"
+      ③ 对骨架外的孤立亮块（文字/箭头），用轮廓填充补齐
+      ④ 严格限制在 free_road 且排除车辆
+    """
+    h, w = img_bgr.shape[:2]
+
+    # 纯路面
+    expanded_road = cv2.dilate(
+        drivable_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25)))
+    pure_road = cv2.bitwise_and(expanded_road,
+                                cv2.bitwise_not(vehicle_mask))
+
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    L = lab[:, :, 0]
+
+    # ① U-Net 预测（可选）
+    unet_mask = np.zeros((h, w), np.uint8)
+    if use_unet:
+        try:
+            import torch
+            _ck = None
+            try:
+                from gnd_ab_mask import predict_marking
+                pred = predict_marking(img_bgr)
+                for k in (1, 2, 3):
+                    unet_mask[pred == k] = 255
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ② Top-Hat 抓所有亮点（v3 逻辑）
+    th_31 = cv2.morphologyEx(
+        L, cv2.MORPH_TOPHAT,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+    th_55 = cv2.morphologyEx(
+        L, cv2.MORPH_TOPHAT,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (55, 55)))
+    is_shadow = L < 100
+    bright = np.where(is_shadow,
+                      (th_31 > 10) | (th_55 > 10),
+                      (th_31 > 18) | (th_55 > 18)).astype(np.uint8) * 255
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, np.array([15, 60, 80]),
+                         np.array([35, 255, 255]))
+
+    raw = cv2.bitwise_or(bright, yellow)
+    raw = cv2.bitwise_or(raw, unet_mask)
+    raw = cv2.bitwise_and(raw, pure_road)
+
+    # ③ 连通域分析
+    n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(raw, 8)
+    road_area = np.count_nonzero(pure_road) + 1
+    keep = np.zeros((h, w), np.uint8)
+
+    # 先按 v3 规则保留细长线和中小块
+    for i in range(1, n_lab):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < 20:
+            continue
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        ratio = max(bw, bh) / float(max(min(bw, bh), 1))
+        fill = area / float(max(bw * bh, 1))
+        # 细长线 或 文字状（填充率低）→ 保留
+        if ratio >= 1.6 or fill <= 0.55:
+            keep[labels == i] = 255
+        elif area <= road_area * 0.08:
+            keep[labels == i] = 255
+
+    # ④ C-CONSTRAINED: 文字补全（严格约束）
+    #    · 只在"已保留块"内部闭合，不生成新区域
+    #    · 闭运算核小（5x5），只连接笔画间隙
+    #    · 每个块面积上限 1.5% 路面
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, k_close,
+                              iterations=1)
+
+    # 轮廓填充，但只填原始 keep 已有的连通域范围内
+    cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                               cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros((h, w), np.uint8)
+    for c in cnts:
+        a = cv2.contourArea(c)
+        if a < 150:
+            continue
+        if a > road_area * 0.015:      # 严格上限 1.5%
+            continue
+        x, y, ww, hh = cv2.boundingRect(c)
+        fill_ratio = a / float(max(ww * hh, 1))
+        # 文字/箭头填充率 0.25~0.75
+        if 0.25 <= fill_ratio <= 0.75:
+            # 额外要求：框内必须有足够的原始亮点（防止填满空区）
+            sub_keep = keep[y:y+hh, x:x+ww]
+            if np.count_nonzero(sub_keep) / float(max(ww*hh, 1)) < 0.10:
+                continue
+            cv2.drawContours(filled, [c], -1, 255, -1)
+
+    # 合并：原始细线 + 文字填充块
+    final = cv2.bitwise_or(keep, filled)
+    final = cv2.dilate(final, cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (11, 11)))
+    final = cv2.bitwise_and(final, cv2.bitwise_not(vehicle_mask))
+    final = cv2.bitwise_and(final, pure_road)
+    return final

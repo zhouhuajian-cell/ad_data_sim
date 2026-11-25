@@ -40,6 +40,9 @@ import sys
 
 import numpy as np
 
+# BLACK-ANCHOR-FORCE-DEF: 黑位强制对齐开关
+_FORCE_BLACK = True
+
 sys.path.insert(0, "/opt/ue5_synth/tools")
 
 
@@ -171,26 +174,37 @@ def align_color_three_anchors(bg_roi, asset_bgr, asset_alpha):
 
     info = {"ok": True}
     if bg_non_red.sum() > 10 and as_non_red.sum() > 10:
+        # KBG-FULL-ROI: 黑锚点必须在"全 ROI"上取
+        #   （原图黑字是低饱和深灰，用 bg_non_red 会把它排除，K_bg 只剩灰底）
         bg_w = np.percentile(bg_gray[bg_non_red], 75)
-        bg_k = np.percentile(bg_gray[bg_non_red], 15)
+        bg_k = np.percentile(bg_gray[valid], 2)   # 全 ROI 的 P2 = 真正黑位
         as_w = np.percentile(as_gray[as_non_red], 75)
-        as_k = np.percentile(as_gray[as_non_red], 15)
+        as_k = np.percentile(as_gray[valid], 2)
 
         W_bg = np.mean(bg_roi[bg_non_red & (bg_gray >= bg_w)], axis=0)
-        K_bg = np.mean(bg_roi[bg_non_red & (bg_gray <= bg_k)], axis=0)
+        # 黑锚点也用全 ROI（找最暗那批像素）
+        K_bg = np.mean(bg_roi[valid & (bg_gray <= bg_k)], axis=0)
         W_as = np.mean(asset_bgr[as_non_red & (as_gray >= as_w)], axis=0)
-        K_as = np.mean(asset_bgr[as_non_red & (as_gray <= as_k)], axis=0)
+        K_as = np.mean(asset_bgr[valid & (as_gray <= as_k)], axis=0)
+        info["K_bg"] = [round(float(v), 1) for v in K_bg]
+        info["K_as"] = [round(float(v), 1) for v in K_as]
+        info["W_bg"] = [round(float(v), 1) for v in W_bg]
 
         # 对比度缩放限幅，避免把极暗/极亮场景拉爆
         scale = (W_bg - K_bg) / (W_as - K_as + 1e-5)
-        scale = np.clip(scale, 0.70, 1.6)
+        scale = np.clip(scale, 0.55, 1.6)
         # 实测：原牌拍灰后白底~150/黑字~40，素材纯白~245/纯黑~25，
         # 直接按黑白锚点映射会把素材压到 0.5~0.73 倍对比度，
         # 红圈和白底一起发灰 —— 这是「失真」的根因。
-        # 折中：只压一半，保留素材的通透感。
-        scale = 1.0 - (1.0 - scale) * 0.5
+        # BLACK-ANCHOR-FORCE: 强制对齐黑位（原折中只压一半，黑字被抬亮）
+        if _FORCE_BLACK:
+            # 保留 scale 原值，黑位直接锁到 K_bg
+            pass
+        else:
+            scale = 1.0 - (1.0 - scale) * 0.5
         out_f = (asset_bgr.astype(np.float32) - K_as) * scale + K_bg
         out_bgr = np.clip(out_f, 0, 255).astype(np.uint8)
+        info["force_black"] = bool(_FORCE_BLACK)
         info["white_shift"] = [round(float(v), 1) for v in (W_bg - W_as)]
         info["scale"] = [round(float(v), 2) for v in scale]
     else:
@@ -198,27 +212,43 @@ def align_color_three_anchors(bg_roi, asset_bgr, asset_alpha):
         info["ok"] = False
         info["reason"] = "no_anchor"
 
-    # 红圈单独对齐 S / V
-    if bg_red.sum() > 10 and as_red.sum() > 10:
-        out_hsv = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    # ===== RED-FIX-V2: 红圈一次性压到原图 =====
+    # 关键：必须在【映射后的 out_bgr】上重新算红掩码，
+    # 否则 as_rs/as_rv 混合了原始素材和映射后图像的统计，两次压缩互相抵消
+    out_hsv = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    out_red = (((out_hsv[:, :, 0] <= 12) |
+                (out_hsv[:, :, 0] >= 160)) &
+               (out_hsv[:, :, 1] >= 45) & valid)
+
+    if bg_red.sum() > 10 and out_red.sum() > 10:
         bg_rs = float(np.mean(bg_hsv[:, :, 1][bg_red]))
         bg_rv = float(np.mean(bg_hsv[:, :, 2][bg_red]))
-        as_rs = float(np.mean(out_hsv[:, :, 1][as_red]))
-        as_rv = float(np.mean(out_hsv[:, :, 2][as_red]))
+        cur_rs = float(np.mean(out_hsv[:, :, 1][out_red]))
+        cur_rv = float(np.mean(out_hsv[:, :, 2][out_red]))
 
-        if as_rs > 1e-3:
-            # 比例限幅 0.5~2.2，防止素材红圈被拉到过饱和
-            k_s = float(np.clip(bg_rs / as_rs, 0.75, 1.6))
-            out_hsv[:, :, 1][as_red] = np.clip(out_hsv[:, :, 1][as_red] * k_s, 0, 255)
-            info["red_s_ratio"] = round(k_s, 2)
-        if as_rv > 1e-3:
-            # 实测：原限幅 0.6~1.8 让 red_v_ratio 落到 0.65，
-            # 红圈被压暗发灰（S_P90 掉 36.7）。
-            # 红圈的亮度本来就该跟背景接近，不该大幅压暗，收窄到 0.85~1.25。
-            k_v = float(np.clip(bg_rv / as_rv, 0.85, 1.25))
-            out_hsv[:, :, 2][as_red] = np.clip(out_hsv[:, :, 2][as_red] * k_v, 0, 255)
-            info["red_v_ratio"] = round(k_v, 2)
-        out_bgr = cv2.cvtColor(out_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        # S：直接比例拉到原图 S（不限制下限，雨雾 S=100 也能对上）
+        if cur_rs > 1e-3:
+            # RED-FINAL-TUNE: S 目标上浮 12%（JPEG 会掉约 10）
+            k_s = float(bg_rs / cur_rs) * 1.12
+            k_s = float(np.clip(k_s, 0.20, 2.5))
+            out_hsv[:, :, 1][out_red] = np.clip(
+                out_hsv[:, :, 1][out_red] * k_s, 0, 255)
+
+        # RED-FIX-V3: V 直接锁到原图 bg_rv（不做 0.7 放宽）
+        if cur_rv > 1e-3:
+            v_cur = out_hsv[:, :, 2][out_red]
+            # 线性映射：均值 -> bg_rv，保留相对起伏
+            # RED-FINAL-TUNE: 再压一档（JPEG+融合会回升约 20）
+            v_new = (v_cur - cur_rv) * 0.8 + bg_rv * 0.72
+            _cap = float(np.mean(W_bg) * 0.60) if 'W_bg' in dir() else 160.0
+            v_new = np.clip(v_new, 20.0, _cap)
+            out_hsv[:, :, 2][out_red] = v_new
+
+        out_bgr = cv2.cvtColor(out_hsv.astype(np.uint8),
+                               cv2.COLOR_HSV2BGR)
+        info["red_s_ratio"] = round(bg_rs / max(cur_rs, 1e-3), 2)
+        info["red_v_target"] = round(bg_rv, 1)
+        info["red_v_before"] = round(cur_rv, 1)
         info["red_px"] = int(bg_red.sum())
     else:
         info["red_px"] = int(bg_red.sum())
@@ -306,11 +336,35 @@ def apply_dashcam_jpeg_artifact(blended_roi, mask_roi, quality=60):
     """
     import cv2
 
+    # JPEG-CHROMA-GUARD:
+    #   JPEG 默认 4:2:0 色度下采样会把高饱和红色洗成粉色。
+    #   对策：① 提高质量到 88（视觉上仍像车载压缩）
+    #        ② 压缩后把红色区域的饱和度补回来
     q = int(np.clip(quality, 55, 65))
-    ok, buf = cv2.imencode(".jpg", blended_roi, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+    _q = max(q, 88)
+    ok, buf = cv2.imencode(".jpg", blended_roi,
+                           [int(cv2.IMWRITE_JPEG_QUALITY), _q])
     if not ok:
         return blended_roi, {"applied": False}
     compressed = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    # ② 红色饱和度补偿：JPEG 后按压缩前的 S 恢复
+    try:
+        hsv_b = cv2.cvtColor(blended_roi, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv_c = cv2.cvtColor(compressed, cv2.COLOR_BGR2HSV).astype(np.float32)
+        _rb = (((hsv_b[:, :, 0] <= 12) | (hsv_b[:, :, 0] >= 160)) &
+               (hsv_b[:, :, 1] >= 40))
+        if _rb.sum() > 20:
+            _s_before = float(np.mean(hsv_b[:, :, 1][_rb]))
+            _s_after = float(np.mean(hsv_c[:, :, 1][_rb]))
+            if _s_after > 1e-3:
+                _k = float(np.clip(_s_before / _s_after, 1.0, 1.8))
+                hsv_c[:, :, 1][_rb] = np.clip(
+                    hsv_c[:, :, 1][_rb] * _k, 0, 255)
+                compressed = cv2.cvtColor(hsv_c.astype(np.uint8),
+                                          cv2.COLOR_HSV2BGR)
+    except Exception:
+        pass
 
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     dil = cv2.dilate(mask_roi, k, iterations=1)
@@ -369,6 +423,51 @@ def run_pipeline6(orig_bgr, yolo_bbox, asset_rgba, dst_shape,
     asset_bgr2, cinfo = align_color_three_anchors(bg_roi, asset_bgr, asset_alpha)
     info["steps"].append({"step": 3, "name": "color_3anchors", **cinfo})
 
+    # ---- Step 3.5：STEP35-BLUR-ONLY 只做光学模糊 + 噪点 ----
+    # 颜色/亮度/饱和度全部收口在 Step3，这里绝不再动 LAB
+    try:
+        from scene_optics import estimate_local_optics
+        _opt = estimate_local_optics(orig_bgr, bg_roi)
+        _sigma = float(_opt.get("blur_sigma", 0.25))
+        if _sigma > 0.35:
+            asset_bgr2 = cv2.GaussianBlur(
+                asset_bgr2, (0, 0), sigmaX=_sigma)
+            asset_alpha = cv2.GaussianBlur(
+                asset_alpha, (0, 0), sigmaX=_sigma * 0.7)
+        # 传感器噪点对齐（只加噪，不改颜色）
+        _vld = asset_alpha > 127
+        if _vld.sum() > 50:
+            _ref = bg_roi[_vld]
+            _smooth = cv2.medianBlur(bg_roi, 3)[_vld]
+            _sd = float(np.std(_ref.astype(np.float32) -
+                               _smooth.astype(np.float32))) * 0.7
+            _sd = float(np.clip(_sd, 0.0, 4.0))
+            if _sd > 0.6:
+                _n = np.random.normal(0, _sd, asset_bgr2.shape)
+                asset_bgr2 = np.clip(
+                    asset_bgr2.astype(np.float32) + _n, 0, 255).astype(np.uint8)
+        info["steps"].append({"step": 3.5, "name": "optics_blur_only",
+                              "sigma": round(_sigma, 2),
+                              "haze_score": _opt.get("haze_score"),
+                              "is_night": _opt.get("is_night")})
+    except Exception as _e:
+        print("    [3.5 optics] 失败:", str(_e)[:80])
+
+    # ---- Step 3.5：DIRECT-ROI-MAP（可选，scene_optics 已含亮度映射）
+    if False:
+        _vld = asset_alpha > 127
+        if _vld.sum() > 50:
+            bg_g = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2GRAY)
+            as_g = cv2.cvtColor(asset_bgr2, cv2.COLOR_BGR2GRAY)
+            o5 = float(np.percentile(bg_g[_vld], 5))
+            o95 = float(np.percentile(bg_g[_vld], 95))
+            s5 = float(np.percentile(as_g[_vld], 5))
+            s95 = float(np.percentile(as_g[_vld], 95))
+            if s95 - s5 > 5:
+                k = float(np.clip((o95 - o5) / (s95 - s5), 0.30, 1.0))
+                f = (asset_bgr2.astype(np.float32) - s5) * k + o5
+                asset_bgr2 = np.clip(f, o5, o95).astype(np.uint8)
+
     # ---- Step 4：轻微光学退化 ----
     asset_bgr3, dinfo = degrade_light(asset_bgr2, bg_roi, asset_alpha)
     info["steps"].append({"step": 4, "name": "light_degrade", **dinfo})
@@ -382,6 +481,43 @@ def run_pipeline6(orig_bgr, yolo_bbox, asset_rgba, dst_shape,
     final_roi, jinfo = apply_dashcam_jpeg_artifact(blended_roi, mask_roi,
                                                    quality=jpeg_quality)
     info["steps"].append({"step": 6, "name": "jpeg", **jinfo})
+
+    # ---- RED-TERMINAL-CAL: 终态红圈校准 ----
+    # Step4/5/6（模糊+羽化+JPEG）会把红圈的 S 拉低、V 拉高，
+    # 这里在出图前对红圈做一次最终校正，确保贴合原图
+    try:
+        _vh = bg_red if 'bg_red' in dir() else None
+        _hsv_f = cv2.cvtColor(final_roi, cv2.COLOR_BGR2HSV).astype(np.float32)
+        _hsv_b = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2HSV).astype(np.float32)
+        _f_red = (((_hsv_f[:, :, 0] <= 12) |
+                   (_hsv_f[:, :, 0] >= 160)) &
+                  (_hsv_f[:, :, 1] >= 40))
+        _b_red = (((_hsv_b[:, :, 0] <= 12) |
+                   (_hsv_b[:, :, 0] >= 160)) &
+                  (_hsv_b[:, :, 1] >= 35))
+        if _f_red.sum() > 20 and _b_red.sum() > 20:
+            _bs = float(np.mean(_hsv_b[:, :, 1][_b_red]))
+            _bv = float(np.mean(_hsv_b[:, :, 2][_b_red]))
+            _fs = float(np.mean(_hsv_f[:, :, 1][_f_red]))
+            _fv = float(np.mean(_hsv_f[:, :, 2][_f_red]))
+
+            # S：比例拉到原图
+            if _fs > 1e-3:
+                _ks = float(np.clip(_bs / _fs, 0.6, 2.5))
+                _hsv_f[:, :, 1][_f_red] = np.clip(
+                    _hsv_f[:, :, 1][_f_red] * _ks, 0, 255)
+            # V：平移到原图
+            _dv = _bv - _fv
+            _hsv_f[:, :, 2][_f_red] = np.clip(
+                _hsv_f[:, :, 2][_f_red] + _dv, 15, 200)
+
+            final_roi = cv2.cvtColor(_hsv_f.astype(np.uint8),
+                                     cv2.COLOR_HSV2BGR)
+            info["terminal_cal"] = {
+                "S_before": round(_fs, 1), "S_after_target": round(_bs, 1),
+                "V_before": round(_fv, 1), "V_after_target": round(_bv, 1)}
+    except Exception as _e:
+        print("    [TERMINAL-CAL] 失败:", str(_e)[:60])
 
     out = orig_bgr.copy()
     out[ny1:ny2, nx1:nx2] = final_roi

@@ -28,7 +28,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import cv2                                                    # noqa: E402
+import cv2
+import numpy as np                                                    # noqa: E402
 from replace_sign import detect_signs, load_sign, sign_mask  # noqa: E402
 from sign_realism import paste_realistic, make_realistic     # noqa: E402
 from sign_occlusion import paste_with_occlusion              # noqa: E402
@@ -156,6 +157,45 @@ def asset_shape(name):
     return "unknown"
 
 
+def pick_by_shape(shape, sign_table, seed=None, prefer_cls=None):
+    """SHAPE-AWARE: 按原标牌形状从素材库挑素材。
+
+    shape: 'circle' | 'triangle' | 'square' | 'rect' | 'unknown'
+    返回 (类别名, 路径) 或 (None, None)
+    """
+    if not sign_table:
+        return None, None
+    import hashlib
+    import random as _rd
+
+    _S2T = {"circle": "circle", "triangle": "triangle",
+            "square": "square", "rect": "square", "unknown": None}
+    want = _S2T.get(shape, None)
+
+    pool = [(nm, p) for nm, p in sign_table.items()]
+    if want:
+        same = [(nm, p) for nm, p in pool if asset_shape(nm) == want]
+        if same:
+            pool = same
+        else:
+            return None, None      # 该形状完全没有素材
+
+    # 优先同类（同 YOLO 大类）
+    if prefer_cls:
+        pref = [(nm, p) for nm, p in pool if nm == prefer_cls or nm.startswith(prefer_cls)]
+        if pref:
+            pool = pref
+
+    if not pool:
+        return None, None
+    if len(pool) == 1:
+        return pool[0]
+    if seed is None:
+        return _rd.choice(pool)
+    h = int(hashlib.md5(str(seed).encode("utf-8")).hexdigest()[:8], 16)
+    return pool[h % len(pool)]
+
+
 def pick_varied_asset(cls, sign_table, seed=None):
     """在大类下随机挑一个子类，用于让批量产出覆盖多样化类别。
 
@@ -237,6 +277,39 @@ def detect_shape(image, bbox):
     roi = image[y1:y2, x1:x2]
     if roi.size == 0 or roi.shape[0] < 12 or roi.shape[1] < 12:
         return "unknown"
+
+    h, w = roi.shape[:2]
+
+    # SHAPE-RED-FIRST: 先看有没有红圈/红边（禁令牌/限速牌）
+    # 小 ROI 上 Otsu 会把红圈和灰背景合成一类，必须用 HSV 红掩码兜底
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    _h, _s, _v = hsv_roi[:, :, 0], hsv_roi[:, :, 1], hsv_roi[:, :, 2]
+    _red = (((_h <= 12) | (_h >= 160)) & (_s >= 50)) & (_v >= 30)
+    if _red.sum() >= max(30, int(h * w * 0.08)):
+        # 有足够的红色 → 用红色环的形状判定
+        _rm = (_red.astype(np.uint8)) * 255
+        _k2 = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (max(3, w // 8), max(3, h // 8)))
+        _rm = cv2.morphologyEx(_rm, cv2.MORPH_CLOSE, _k2, iterations=1)
+        _cnts, _ = cv2.findContours(_rm, cv2.RETR_EXTERNAL,
+                                    cv2.CHAIN_APPROX_SIMPLE)
+        if _cnts:
+            _c = max(_cnts, key=cv2.contourArea)
+            _area = cv2.contourArea(_c)
+            _per = cv2.arcLength(_c, True)
+            if _area > 30 and _per > 10:
+                _bx, _by, _bw, _bh = cv2.boundingRect(_c)
+                _fill = _area / float(max(_bw * _bh, 1))
+                _asp = _bw / float(max(_bh, 1))
+                _circ = 4.0 * math.pi * _area / (_per * _per + 1e-6)
+                # 圆环：包围框接近方形 + 圆形度高
+                if 0.75 <= _asp <= 1.35 and _circ >= 0.35:
+                    return "circle"
+                # 三角：顶部窄底部宽
+                _top = float((_rm[0:max(1, h // 5), :] > 127).sum())
+                _bot = float((_rm[-max(1, h // 5):, :] > 127).sum())
+                if _bot > 0 and _top / _bot < 0.45:
+                    return "triangle"
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -574,6 +647,119 @@ def fit_bbox(bbox, sign_mask_shape, keep_ratio=True):
     return [cx - nw * 0.5, cy - nh * 0.5, cx + nw * 0.5, cy + nh * 0.5]
 
 
+def _frame_direct_pass(dets):
+    """FRAME-PASS-DEF: 单帧高置信直通（不依赖跨帧轨迹）。"""
+    out = []
+    for d in dets:
+        c = float(d.get("conf", 0))
+        vr = float(d.get("_veh_ratio", 9.0))
+        sr = float(d.get("_sign_ratio", 0.0))
+        sp = float(d.get("_soft_prob", 0.0))
+        b = d.get("bbox")
+        if not b or len(b) < 4:
+            continue
+        side = min(b[2] - b[0], b[3] - b[1])
+        if c >= 0.50 and vr <= 0.10 and (sr >= 0.30 or sp >= 0.15):
+            out.append(d); continue
+        if side >= 24 and c >= 0.45 and vr <= 0.15:
+            out.append(d); continue
+        if side < 24 and c >= 0.30 and vr <= 0.10 and sp >= 0.12:
+            out.append(d); continue
+        if sr >= 0.25 and vr <= 0.30:
+            out.append(d); continue
+    return out
+
+
+_SAMPLER = None
+
+
+def _get_sampler(asset_root):
+    """懒加载全局 sampler。"""
+    global _SAMPLER
+    if _SAMPLER is not None:
+        return _SAMPLER
+    idx = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "asset_index.json")
+    if not os.path.isfile(idx):
+        print("  [ASSET-INDEX] 索引不存在: %s" % idx)
+        return None
+    try:
+        _SAMPLER = AssetIndexSampler(idx, asset_root)
+        print("  [ASSET-INDEX] 已加载索引 (%d 形状组)"
+              % len(getattr(_SAMPLER, "by_shape", {})))
+        return _SAMPLER
+    except Exception as e:
+        print("  [ASSET-INDEX] 加载失败:", str(e)[:60])
+        return None
+
+
+class AssetIndexSampler:
+    """ASSET-INDEX: 按 形状+颜色+国家 查表采样。"""
+
+    def __init__(self, index_json_path, asset_root):
+        import json as _j
+        from collections import defaultdict
+        from pathlib import Path as _P
+        self.asset_root = _P(asset_root)
+        with open(index_json_path, "r", encoding="utf-8") as f:
+            data = _j.load(f)
+        self.by_country_shape_color = defaultdict(list)
+        self.by_country_shape = defaultdict(list)
+        self.by_shape_color = defaultdict(list)
+        self.by_shape = defaultdict(list)
+        for item in data["assets"]:
+            p = str(self.asset_root / item["path"])
+            c, sh, col = item["country"], item["shape"], item["color_type"]
+            self.by_country_shape_color[(c, sh, col)].append(p)
+            self.by_country_shape[(c, sh)].append(p)
+            self.by_shape_color[(sh, col)].append(p)
+            self.by_shape[sh].append(p)
+        self.stats_used = {"exact": 0, "shape_only": 0, "miss": 0}
+
+    def sample(self, shape, color_type=None, country=None,
+               match_color=True, allow_fallback=True, seed=None):
+        import random as _r
+        _sh = {"square": "rect", "rect": "rect",
+               "circle": "circle", "triangle": "triangle"}.get(shape, shape)
+        if country:
+            if match_color and color_type and color_type != "other":
+                pool = self.by_country_shape_color.get(
+                    (country, _sh, color_type), [])
+                if pool:
+                    self.stats_used["exact"] += 1
+                    return (pool[seed % len(pool)] if seed is not None
+                            else _r.choice(pool)), "exact"
+                if not allow_fallback:
+                    self.stats_used["miss"] += 1
+                    return None, "miss"
+            pool = self.by_country_shape.get((country, _sh), [])
+            if pool:
+                self.stats_used["shape_only"] += 1
+                return (pool[seed % len(pool)] if seed is not None
+                        else _r.choice(pool)), "country_shape"
+            self.stats_used["miss"] += 1
+            return None, "miss"
+        if match_color and color_type and color_type != "other":
+            pool = self.by_shape_color.get((_sh, color_type), [])
+            if pool:
+                self.stats_used["exact"] += 1
+                return (pool[seed % len(pool)] if seed is not None
+                        else _r.choice(pool)), "exact"
+            if not allow_fallback:
+                self.stats_used["miss"] += 1
+                return None, "miss"
+        pool = self.by_shape.get(_sh, [])
+        if pool:
+            self.stats_used["shape_only"] += 1
+            return (pool[seed % len(pool)] if seed is not None
+                    else _r.choice(pool)), "shape_only"
+        self.stats_used["miss"] += 1
+        return None, "miss"
+
+
+_SAMPLER = None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--images", required=True, help="场景图目录或单张图")
@@ -613,6 +799,26 @@ def main():
                     help="不投阴影（默认按场景光照投）")
     ap.add_argument("--strict-shape", action="store_true",
                     help="严格同形状（默认不拦，形状只作参考写入标注）")
+    ap.add_argument("--temporal", action="store_true",
+                    help="启用第3层时序过滤（连续>=3帧才放行，需>=5帧）")
+    ap.add_argument("--match-color", action="store_true", default=True,
+                    help="按 形状+底色 匹配素材（默认开）")
+    ap.add_argument("--no-match-color", dest="match_color",
+                    action="store_false",
+                    help="关闭底色匹配，只按形状")
+    ap.add_argument("--no-gate", action="store_true",
+                    help="关闭三层质检漏斗（不推荐）")
+    ap.add_argument("--no-semantic", action="store_true",
+                    help="只做硬规则，跳过 Mask2Former 交叉验证（快）")
+    ap.add_argument("--roi-match", action="store_true",
+                    help="额外做 ROI 动态范围对齐（pipeline6 Step3 已处理后通常不需要）")
+    ap.add_argument("--haze-blend", type=float, default=0.30,
+                    help="雨雾融合度（晴天0.05，阴雨雾天0.15~0.25）")
+    ap.add_argument("--blur-sigma", type=float, default=0.9,
+                    help="镜头模糊（0.6~1.2）")
+    ap.add_argument("--v6", action="store_true",
+                    help="用 pipeline6 六步管线（形状校验→红圈精定位→三锚点→"
+                         "退化→窄羽化→JPEG）")
     a = ap.parse_args()
 
     global STRICT_SHAPE
@@ -653,11 +859,130 @@ def main():
                "items": []}
     print("待处理 %d 张图，模式=%s" % (len(images), mode))
 
+    # GATE-WIRED: 三层漏斗过滤（专治 YOLO 误检）
+    _gate = None
+    _gate_seq = {}     # name -> dets（时序过滤前）
+    if not getattr(a, "no_gate", False):
+        try:
+            from tsr_filter import SignGate
+            _gate = SignGate(min_conf=max(a.conf, 0.60),
+                             use_semantic=not getattr(a, "no_semantic", False))
+            print("质检漏斗: 已启用 (conf>=%.2f)" % _gate.min_conf)
+        except Exception as _eg:
+            print("质检漏斗不可用:", str(_eg)[:60])
+
+    # TRACKBACK-WIRED: 第3层 = Track-back 轨迹回溯 + 时序
+    _temporal_keep = None
+    _temporal_fill = None
+    # FRAME-MODE-DEFAULT: 默认按帧处理，不依赖时序
+    _use_temporal = getattr(a, "temporal", False)
+    if _gate is not None and _use_temporal and len(images) >= 5:
+        print("轨迹回溯: 预扫描 %d 帧..." % len(images))
+        from tsr_filter import _seg_and_prob, _get_mapillary
+        _seq = []          # 每帧通过的框
+        _verified = []     # 每帧每个框是否通过 Mask2Former 交叉验证
+        _ext = _get_mapillary()
+        for _p in images:
+            _im = cv2.imread(_p)
+            if _im is None:
+                _seq.append([])
+                _verified.append([])
+                continue
+            _dd = detect_signs(_p, a.conf)
+            _pass = _gate.filter_frame(_im, _dd)
+            _seq.append(_pass)
+            # NONE-FIX: _verified 必须与 _pass 等长（逐框一一对应）
+            if not _pass:
+                _verified.append([])
+                continue
+            try:
+                _seg, _prob = _seg_and_prob(_im)
+                _H, _W = _seg.shape[:2]
+                _vf = []
+                for _d in _pass:
+                    try:
+                        _x1, _y1, _x2, _y2 = _d["bbox"]
+                    except Exception:
+                        _vf.append(False)
+                        continue
+                    _cw = float(_x2 - _x1)
+                    _ch = float(_y2 - _y1)
+                    _ex = _cw * 0.5
+                    _ey = _ch * 0.5
+                    _ix1 = max(0, int(_x1 - _ex))
+                    _iy1 = max(0, int(_y1 - _ey))
+                    _ix2 = min(_W, int(_x2 + _ex))
+                    _iy2 = min(_H, int(_y2 + _ey))
+                    _re = _seg[_iy1:_iy2, _ix1:_ix2]
+                    if _re.size == 0:
+                        _vf.append(False)
+                        continue
+                    _sr = float(np.isin(_re, _ext._sign_ids).mean())
+                    _vf.append(bool(_sr >= 0.20))
+                while len(_vf) < len(_pass):
+                    _vf.append(False)
+                _verified.append(_vf)
+            except Exception as _ee:
+                print("    [verified] 失败:", str(_ee)[:60])
+                _verified.append([False] * len(_pass))
+
+        from tsr_trackback import trackback_filter
+        # TRACKLEVEL-WIRED: 轨迹级确证 + 插值补全
+        _keep, _fill, _tstats = trackback_filter(
+            _seq, _verified, near_size=20.0, min_hits=2, max_hole=2)
+        _temporal_keep = {}
+        _temporal_fill = {}
+        for _fi, _p in enumerate(images):
+            _nm = os.path.splitext(os.path.basename(_p))[0]
+            _keys = set()
+            for _bi, _k in enumerate(_keep[_fi]):
+                if not _k or _bi >= len(_seq[_fi]):
+                    continue
+                try:
+                    _bb2 = _seq[_fi][_bi]["bbox"]
+                    _keys.add((round(_bb2[0], 1), round(_bb2[1], 1)))
+                except Exception:
+                    continue
+            _temporal_keep[_nm] = _keys
+            # FILL-NONE-FIX: _fill 里含 None 占位符，必须过滤
+            _temporal_fill[_nm] = [f for f in (_fill[_fi] or [])
+                                   if f is not None]
+        print("轨迹回溯: %d 条轨迹, 确认 %d 条, 放行 %d 框(含 %d 远景小目标), 插值补 %d 框"
+              % (_tstats["tracks"], _tstats["confirmed_tracks"],
+                 _tstats["kept"], _tstats["rescued_small"],
+                 _tstats["filled_holes"]))
+
     for i, img_path in enumerate(images):
         name = os.path.splitext(os.path.basename(img_path))[0]
         rec = {"image": img_path, "replaced": [], "skipped": []}
         try:
+            im = cv2.imread(img_path)
             dets = detect_signs(img_path, a.conf)
+            # GATE-WIRED: 第1+2层过滤
+            if _gate is not None and im is not None:
+                _before = len(dets)
+                dets = _gate.filter_frame(im, dets)
+                # FRAME-MODE-DEFAULT: 单帧高置信直通（无需轨迹）
+                dets = _frame_direct_pass(dets)
+                # TRACKLEVEL-WIRED: 套用轨迹白名单
+                if _temporal_keep is not None and name in _temporal_keep:
+                    _allow = _temporal_keep[name]
+                    dets = [d for d in dets
+                            if (round(d["bbox"][0], 1),
+                                round(d["bbox"][1], 1)) in _allow]
+                # 插值补全：把补出来的框加进去（消除闪烁）
+                if _temporal_fill is not None and name in _temporal_fill:
+                    for _fb in _temporal_fill[name]:
+                        if _fb is None or len(_fb) < 4:
+                            continue
+                        _w = _fb[2] - _fb[0]
+                        _h = _fb[3] - _fb[1]
+                        dets.append({
+                            "bbox": _fb, "conf": 0.60,
+                            "class": "speed_limit", "w": _w, "h": _h,
+                            "interpolated": True})
+                if len(dets) < _before:
+                    rec["gate_dropped"] = _before - len(dets)
             usable = [d for d in dets if d["w"] >= a.min_px]
             if not usable:
                 rec["skipped"].append("无可用检测")
@@ -666,7 +991,6 @@ def main():
                 continue
 
             targets = usable if a.all_signs else [usable[0]]
-            im = cv2.imread(img_path)
             composed = None
             annotations = []
 
@@ -682,12 +1006,53 @@ def main():
                     sign_img = load_sign(path)
                     cls_name = a.target_class
                 else:
-                    # A) 中性代表：按大类挑最中性的子类，不做无依据的猜测
-                    if a.vary_class:
-                        cls_name, path = pick_varied_asset(d["class"], sign_table,
-                                                            seed=os.path.basename(img_path))
+                    # COVER-WIRED: 前景模板 IoU + 颜色投票判形
+                    _tgt_color = None
+                    try:
+                        from tsr_shape_cover import (detect_shape_foreground,
+                                                     detect_sign_color)
+                        tgt_shape0, _shinfo = detect_shape_foreground(
+                            im, d["bbox"], cls_hint=d["class"])
+                        _tgt_color = detect_sign_color(im, d["bbox"])
+                        if tgt_shape0 == "unknown":
+                            tgt_shape0 = detect_shape(im, d["bbox"])
+                    except Exception:
+                        tgt_shape0 = detect_shape(im, d["bbox"])
+
+                    # MATCH-COLOR-CALL: 优先查索引表，同形状+同底色
+                    _used_idx = False
+                    if getattr(a, "match_color", True):
+                        _sp = _get_sampler(a.signs_dir)
+                        if _sp is not None:
+                            _pth, _mode = _sp.sample(
+                                tgt_shape0, _tgt_color, a.country,
+                                match_color=True,
+                                allow_fallback=True,
+                                seed=abs(hash(os.path.basename(img_path)
+                                              + str(d["bbox"][0]))) % 100000)
+                            if _pth:
+                                # VAR-RENAME: 避免与 main 里的 _p 冲突
+                                _base = os.path.basename(_pth)
+                                path = _pth
+                                cls_name = os.path.splitext(_base)[0]
+                                _used_idx = True
+                    if not _used_idx:
+                        pass
+                    if _used_idx:
+                        path = path
                     else:
-                        cls_name, path = pick_neutral_asset(d["class"], sign_table)
+                        cls_name, path = pick_by_shape(
+                            tgt_shape0, sign_table,
+                            seed=os.path.basename(img_path) + str(d["bbox"][0]),
+                            prefer_cls=d["class"] if a.vary_class else None)
+                    if not path:
+                        # 该形状无素材，退回原逻辑
+                        if a.vary_class:
+                            cls_name, path = pick_varied_asset(
+                                d["class"], sign_table,
+                                seed=os.path.basename(img_path))
+                        else:
+                            cls_name, path = pick_neutral_asset(d["class"], sign_table)
                     if not path:
                         rec["skipped"].append("%s 无匹配素材" % d["class"])
                         continue
@@ -695,7 +1060,14 @@ def main():
 
                 sm = sign_mask(sign_img)
                 # 形状约束：原标牌是三角形就不贴圆形图案（否则角会露出来）
-                tgt_shape = detect_shape(im, d["bbox"])
+                # SHAPE-ANNOT-FIX: 用前景模板+颜色投票（与采样同一套）
+                try:
+                    from tsr_shape_cover import detect_shape_foreground as _dsf
+                    tgt_shape, _tsinfo = _dsf(im, d["bbox"], cls_hint=d["class"])
+                    if tgt_shape == "unknown":
+                        tgt_shape = detect_shape(im, d["bbox"])
+                except Exception:
+                    tgt_shape = detect_shape(im, d["bbox"])
                 sign_shape = tsr_mod.shape_of(cls_name) if hasattr(tsr_mod, "shape_of") else "circle"
                 if not shape_matches(sign_shape, tgt_shape, a.shape):
                     rec["skipped"].append("%s(图案%s) vs 场景%s 形状不符"
@@ -703,6 +1075,25 @@ def main():
                     continue
 
                 bbox = fit_bbox(d["bbox"], sm.shape, keep_ratio=True)
+
+                # COVER-WIRED: 防露底 —— 素材 alpha 必须盖住原牌有色前景
+                try:
+                    from tsr_shape_cover import cover_check
+                    bxs = bxs2 = [int(round(v)) for v in bbox]
+                    _aw = bxs[2] - bxs[0]
+                    _ah = bxs[3] - bxs[1]
+                    if _aw > 4 and _ah > 4:
+                        _alpha_r = cv2.resize(sm.astype(np.float32),
+                                              (_aw, _ah),
+                                              interpolation=cv2.INTER_AREA)
+                        _okc, _leak, _cinfo = cover_check(im, bbox, _alpha_r)
+                        if not _okc:
+                            rec["skipped"].append(
+                                "露底 %.0f%% > %.0f%%（%s 盖不住原牌）"
+                                % (_leak * 100, 12, cls_name))
+                            continue
+                except Exception as _ec:
+                    pass
                 if a.scale != 1.0:
                     cx, cy = (bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5
                     hw = (bbox[2] - bbox[0]) * 0.5 * a.scale
@@ -716,15 +1107,43 @@ def main():
                 # 优先用 v2（环境氛围匹配 + 边缘过渡）：
                 #   亮度向「环境亮分位」对齐而不是标牌暗部，
                 #   并在雾天自动抬暗部、降对比，解决「像贴纸」的问题
-                composed, cinfo = paste_v2(
-                    base, sign_img[:, :, :3], sm, bbox,
-                    strength=a.strength, edge_glow=True)
-                if not cinfo.get("ok"):
-                    def _deg(sig, alp, ref):
-                        return make_realistic(sig, alp, ref, strength=a.strength)
-                    composed, cinfo = paste_with_occlusion(
-                        base, sign_img[:, :, :3], sm, bbox, degrade_fn=_deg,
-                        shadow=not a.no_shadow, strength=a.strength)
+                composed = None
+                cinfo = {}
+                # PIPELINE6-WIRED: 六步管线优先
+                if a.v6:
+                    try:
+                        from pipeline6 import run_pipeline6
+                        # 形状名映射
+                        _sm_map = {"circle": "circle", "rect": "square",
+                                   "square": "square",
+                                   "triangle": "triangle",
+                                   "invtriangle": "triangle"}
+                        _dst = _sm_map.get(tgt_shape, "")
+                        _out6, _info6 = run_pipeline6(
+                            base, d["bbox"], sign_img, _dst,
+                            jpeg_quality=60, pad_ratio=1.04)
+                        if _info6.get("ok"):
+                            composed = _out6
+                            cinfo = {"ok": True, "v6": True,
+                                     "bbox": _info6.get("bbox"),
+                                     "steps": len(_info6.get("steps") or [])}
+                        else:
+                            print("    [v6] 跳过: %s" % _info6.get("reason", "?"))
+                    except Exception as _e6:
+                        print("    [v6] 异常，回退 v2: %s" % str(_e6)[:60])
+
+                if composed is None:
+                    composed, cinfo = paste_v2(
+                        base, sign_img[:, :, :3], sm, bbox,
+                        strength=a.strength, edge_glow=True)
+                    if not cinfo.get("ok"):
+                        def _deg(sig, alp, ref):
+                            return make_realistic(sig, alp, ref,
+                                                  strength=a.strength)
+                        composed, cinfo = paste_with_occlusion(
+                            base, sign_img[:, :, :3], sm, bbox,
+                            degrade_fn=_deg,
+                            shadow=not a.no_shadow, strength=a.strength)
                 soft = cinfo if cinfo.get("ok") else None
                 if soft is None:
                     rec["skipped"].append("bbox 过小")
@@ -743,6 +1162,21 @@ def main():
                 })
 
             if rec["replaced"]:
+                # ROI-MATCH-DEFAULT-OFF:
+                # pipeline6 的 Step3 三锚点对齐已足够（白底压暗56、红圈降饱和）
+                # 额外 ROI 后处理会二次冲淡，默认关闭，用 --roi-match 显式开启
+                if getattr(a, "roi_match", False):
+                    try:
+                        from tsr_roi_match import apply_to_tsr_result
+                        _bbox = annotations[-1].get("bbox") if annotations else None
+                        if _bbox and composed is not None:
+                            composed = apply_to_tsr_result(
+                                im, composed, _bbox,
+                                haze_blend=float(getattr(a, "haze_blend", 0.30) or 0.30),
+                                blur_sigma=float(getattr(a, "blur_sigma", 1.1) or 1.1))
+                    except Exception as _er:
+                        print("    [ROI-MATCH] 失败:", str(_er)[:60])
+
                 out_img = os.path.join(a.out, name + "_composed.jpg")
                 cv2.imwrite(out_img, composed, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
@@ -750,6 +1184,7 @@ def main():
                     h, w = composed.shape[:2]
                     ann = {"image": os.path.basename(out_img),
                            "source_image": os.path.basename(img_path),
+                           "source_path": os.path.abspath(img_path),
                            "width": w, "height": h,
                            "objects": annotations}
                     with open(os.path.join(ann_dir, name + ".json"), "w",
@@ -767,6 +1202,7 @@ def main():
             rec["error"] = str(e)[:200]
             summary["failed"] += 1
             print("  [%d/%d] %s -> 失败: %s" % (i + 1, len(images), name, str(e)[:80]))
+            # TRACE-ON-OFF
         summary["items"].append(rec)
 
     with open(os.path.join(a.out, "summary.json"), "w", encoding="utf-8") as f:

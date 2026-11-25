@@ -19,9 +19,53 @@ from done_data_labels import (list_frames, object_corners, parse_xml,
                               project_body_to_pixel)
 
 
-def load_frame_labels(frame_dir, cam_name="cam_st_x2f_front"):
-    """读一帧的真实标注（含 3D 框 + 投影到 2D 的框）。"""
+def list_clip_frames(clip_dir):
+    """LG-COMPAT: 列出 clip 的所有帧 (图片路径, xml 文件名) 对。"""
+    img_dir = None
+    for cand in ("cam_st_x2f_front", "cam_st_x8d_front", "cam_ld_x8d_front", "cam_hk_x8b_front", "img_ori"):
+        p = os.path.join(clip_dir, cand)
+        if os.path.isdir(p):
+            img_dir = p
+            break
+    if img_dir is None:
+        return []
+
     # 找 label 目录
+    lab_dir = None
+    for d in os.listdir(clip_dir):
+        if d.startswith("label_lidar") and not d.endswith("_align"):
+            cand = os.path.join(clip_dir, d)
+            if os.path.isdir(cand):
+                lab_dir = cand
+                break
+
+    xmls = {}
+    if lab_dir:
+        for f in os.listdir(lab_dir):
+            if f.endswith(".xml"):
+                xmls[f] = True
+
+    out = []
+    for f in sorted(os.listdir(img_dir)):
+        if not f.lower().endswith(".jpg"):
+            continue
+        stem = os.path.splitext(f)[0]
+        xml_n = None
+        if xmls:
+            if stem + ".xml" in xmls:
+                xml_n = stem + ".xml"
+            else:
+                for k in xmls:
+                    if k.startswith(stem):
+                        xml_n = k
+                        break
+        out.append((os.path.join(img_dir, f), xml_n))
+    return out
+
+
+def load_frame_labels(frame_dir, cam_name="cam_st_x2f_front", xml_path=None):
+    """读一帧的真实标注（含 3D 框 + 投影到 2D 的框）。"""
+    # LG-COMPAT: 指定 xml 时直接用
     lab_dir = None
     for d in os.listdir(frame_dir):
         if d.startswith("label_lidar") and not d.endswith("_align"):
@@ -32,13 +76,25 @@ def load_frame_labels(frame_dir, cam_name="cam_st_x2f_front"):
     if lab_dir is None:
         return None
 
-    xmls = sorted(f for f in os.listdir(lab_dir) if f.endswith(".xml"))
-    if not xmls:
-        return None
-
-    xml_p = os.path.join(lab_dir, xmls[0])
+    if xml_path:
+        xml_p = os.path.join(lab_dir, xml_path)
+        if not os.path.isfile(xml_p):
+            xml_p = os.path.join(lab_dir, os.path.basename(xml_path))
+        if not os.path.isfile(xml_p):
+            return None
+    else:
+        xmls = sorted(f for f in os.listdir(lab_dir) if f.endswith(".xml"))
+        if not xmls:
+            return None
+        xml_p = os.path.join(lab_dir, xmls[0])
     d = parse_xml(xml_p)
     cam = d["cameras"].get(cam_name)
+    if cam is None and cam_name == "cam_st_x2f_front":
+        # Only fall back when there is one unambiguous front camera in both the clip and XML.
+        matches = [name for name in ("cam_st_x8d_front", "cam_ld_x8d_front", "cam_hk_x8b_front")
+                   if os.path.isdir(os.path.join(frame_dir, name)) and name in d["cameras"]]
+        if len(matches) == 1:
+            cam = d["cameras"][matches[0]]
     if cam is None:
         return None
 

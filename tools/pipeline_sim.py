@@ -223,8 +223,17 @@ def inpaint_objects(bg, boxes, expand=6):
 
 
 # ============ 素材 ============
+_SPRITE_IDX = {"n": 0}
+
+
 def find_sprite(cls, spec_path=None):
     """优先真实抠图素材。SPEC-ASSET-POS: 支持指定 sprite 路径。"""
+    # RANDOM-SPRITES: 从池里按序取（每次调用 +1）
+    if isinstance(spec_path, (list, tuple)) and spec_path:
+        i = _SPRITE_IDX["n"] % len(spec_path)
+        _SPRITE_IDX["n"] += 1
+        spec_path = spec_path[i]
+
     # ① 指定素材优先
     if spec_path:
         cand = spec_path
@@ -572,7 +581,13 @@ def draw_lanes(bg, cam, cfg):
 
 
 # ============ 主流程 ============
-def process_clip(batch, clip_id, module, cfg, out_root, nframes=20):
+def process_clip(batch, clip_id, module, cfg, out_root, nframes=20,
+                 use_session=None):
+    """BATCH-VS-INTERACTIVE:
+      use_session=None → 自动判断（nframes==1 用 Session 缓存，否则批量模式）
+      use_session=True → 强制用 Session（交互）
+      use_session=False → 强制无缓存（批量，整 clip 全处理）
+    """
     # GND-SOURCE: 支持 OBJ(real_clips) 和 GND(gnd_train) 两种数据源
     clip_dir = None
     if module == "gnd":
@@ -761,8 +776,8 @@ def process_clip(batch, clip_id, module, cfg, out_root, nframes=20):
                 print("    render_core 准备失败:", str(_e)[:60])
 
             # 3 放置
-            sp, meta = find_sprite(cfg.get("cls", "car"),
-                                   spec_path=cfg.get("sprite_path"))
+            _sp_arg = cfg.get("random_sprites") or cfg.get("sprite_path")
+            sp, meta = find_sprite(cfg.get("cls", "car"), spec_path=_sp_arg)
             if sp is None:
                 out = clean
                 rec["steps"]["place"] = 0
@@ -900,11 +915,17 @@ def process_clip(batch, clip_id, module, cfg, out_root, nframes=20):
                         raise RuntimeError("无标定")
 
                     # 三步净面流程
+                    # BATCH-VS-INTERACTIVE: 批量整 clip 不走缓存
+                    if use_session is None:
+                        _us = (nframes == 1)
+                    else:
+                        _us = bool(use_session)
                     _r = _gnd_run(bg, cg, cfg,
                                   objects=real_objs,
                                   semantic=segc,
                                   verbose=False,
-                                  clip_dir=clip_dir, stem=stem)
+                                  clip_dir=clip_dir, stem=stem,
+                                  use_session=_us)
                     clean = _r["clean_base"]
                     out = _r["final"]
                     mask = _r["erase_mask"]

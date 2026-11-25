@@ -574,7 +574,7 @@ def precheck(action, cfg):
 TOOLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
 TOOLS_DIR = os.path.abspath(TOOLS_DIR)
 DEFAULT_TSR_LIBRARY = "/data/tsr_library_v2"   # 官方矢量图库渲染的高清素材
-TSR_OUT_DIR = "/data/render/tsr_batch"
+TSR_OUT_DIR = "/data/render/tsr_v3_10"   # TSR-V2-DIR
 # 像素/AI 相关脚本必须用 ad_mining 的 venv（有 ultralytics/opencv），面板本体零依赖
 ALGO_PYTHON = "/opt/ad_mining/venv/bin/python"
 
@@ -1013,11 +1013,14 @@ def _render_worker():
             r = subprocess.run([ALGO_PYTHON, script, "--config", payload],
                                capture_output=True, text=True,
                                timeout=1800, env=env)
-            fd = os.path.join(out_dir, "frames")
+            # COUNT-FIX: 输出可能在根目录或 frames/ 子目录，两处都数
             n = 0
-            if os.path.isdir(fd):
-                n = len([f for f in os.listdir(fd)
-                         if f.endswith(("_sim.jpg", "_gnd.jpg", "_obj.jpg"))])
+            for _cand in (out_dir, os.path.join(out_dir, "frames")):
+                if os.path.isdir(_cand):
+                    _cnt = len([f for f in os.listdir(_cand)
+                                if f.endswith(("_sim.jpg", "_gnd.jpg",
+                                               "_obj.jpg"))])
+                    n = max(n, _cnt)
             with _RJ_LOCK:
                 rec["state"] = "done" if r.returncode == 0 else "failed"
                 rec["n"] = n
@@ -1040,6 +1043,13 @@ def _render_worker():
 
 
 _th.Thread(target=_render_worker, daemon=True).start()
+
+
+# STUDIO-CONSTS: 素材工坊路径
+RAW_EXTERNAL = "/data/assets_global/OBJ_3D/raw_external"
+CANON_DIR = "/data/assets_global/OBJ_3D/canonical"
+OBJ3D_INDEX = "/data/assets_global/OBJ_3D/asset_index_obj3d.json"
+BLENDER = "/data/blender-4.2.23-linux-x64/blender"
 
 
 def _map_spec_params(params):
@@ -1141,6 +1151,85 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+
+        if u.path == '/api/platform/versions':
+            try:
+                with open('/opt/ue5_synth/dashboard/release_versions.json',encoding='utf8') as f: data=json.load(f)
+                return self._send(200, {'ok':True, **data})
+            except Exception as e: return self._send(500, {'ok':False,'error':str(e)[:200]})
+        if u.path == '/api/platform/countries':
+            try:
+                with open('/usr/share/iso-codes/json/iso_3166-1.json',encoding='utf8') as f: data=json.load(f)
+                return self._send(200, {'ok':True,'countries':[{'code':x['alpha_2'],'name':x['name']} for x in data['3166-1']]})
+            except Exception as e: return self._send(500, {'ok':False,'error':str(e)[:200]})
+
+        if u.path in ('/api/taskclip/assets', '/api/taskclip/status', '/api/taskclip/frame', '/api/taskclip/list'):
+            try:
+                import clip_task_api as _tc
+                if u.path.endswith('/assets'): return self._send(200, {'ok': True, 'assets': _tc.assets()})
+                if u.path.endswith('/list'): return self._send(200, {'ok': True, 'tasks': _tc.list_gnd_tasks((q.get('module') or ['gnd'])[0].lower())})
+                job=(q.get('job') or [''])[0]
+                if u.path.endswith('/status'): return self._send(200, _tc.status(job))
+                return self._send(200, _tc.frame(job, int((q.get('index') or ['0'])[0])), 'image/jpeg')
+            except (ValueError, OSError, KeyError) as e: return self._send(400, {'ok':False,'error':str(e)[:300]})
+            except Exception as e: return self._send(500, {'ok':False,'error':str(e)[:300]})
+
+        if u.path in ('/api/studio/v2/image3d-status', '/api/studio/v2/image3d-model'):
+            try:
+                if TOOLS_DIR not in sys.path: sys.path.insert(0, TOOLS_DIR)
+                import studio_image3d
+                task=(q.get('task') or [''])[0]
+                if u.path.endswith('status'):
+                    return self._send(200, studio_image3d.status(task))
+                with open(studio_image3d.model(task),'rb') as f: data=f.read()
+                return self._send(200, data, 'model/gltf-binary')
+            except Exception as e:
+                return self._send(400, {'ok':False, 'error':str(e)[:500]})
+
+        if u.path == '/api/studio/v2/2d-thumb':
+            try:
+                import sys as _studio_sys
+                if TOOLS_DIR not in _studio_sys.path: _studio_sys.path.insert(0, TOOLS_DIR)
+                from studio_2d import preview
+                path=preview((q.get('task') or [''])[0])
+                if not os.path.isfile(path): return self._send(404, {'error':'not found'})
+                with open(path,'rb') as f: data=f.read()
+                return self._send(200,data,'image/png')
+            except (ValueError,OSError) as e:
+                return self._send(400,{'error':str(e)})
+
+        if u.path == '/api/studio/v2/model':
+            try:
+                import sys as _studio_sys
+                if TOOLS_DIR not in _studio_sys.path: _studio_sys.path.insert(0, TOOLS_DIR)
+                from studio_safe import model_path
+                path=model_path((q.get('task') or [''])[0], (q.get('version') or [''])[0])
+                if not os.path.isfile(path): return self._send(404, {'error':'not found'})
+                self.send_response(200)
+                self.send_header('Content-Type','model/gltf-binary')
+                self.send_header('Content-Length',str(os.path.getsize(path)))
+                self.send_header('Cache-Control','private, no-store')
+                self.end_headers()
+                with open(path,'rb') as f:
+                    while True:
+                        chunk=f.read(1024*1024)
+                        if not chunk: break
+                        self.wfile.write(chunk)
+                return
+            except (ValueError,OSError) as e:
+                return self._send(400,{'error':str(e)})
+
+        if u.path == '/api/studio/v2/thumb':
+            try:
+                import sys as _studio_sys
+                if TOOLS_DIR not in _studio_sys.path: _studio_sys.path.insert(0, TOOLS_DIR)
+                from studio_safe import thumb
+                path = thumb((q.get('task') or [''])[0], (q.get('version') or [''])[0])
+                if not os.path.isfile(path): return self._send(404, {'error':'not found'})
+                with open(path,'rb') as f: data=f.read()
+                return self._send(200,data,'image/png')
+            except (ValueError, OSError) as e:
+                return self._send(400,{'error':str(e)})
 
         if u.path in ("/gallery", "/gallery.html"):
             with open(os.path.join(BASE, "gallery.html"), "rb") as f:
@@ -1282,21 +1371,30 @@ class H(BaseHTTPRequestHandler):
                     p = os.path.join(root, n)
                     if not os.path.isdir(p):
                         continue
+                    # MULTI-CAM-SCAN: 支持多种前向相机
+                    _CAMS = ("cam_st_x2f_front", "cam_ld_x8d_front",
+                             "cam_st_x8d_front", "cam_hk_x8b_front",
+                             "images")
                     try:
                         clips = [d for d in os.listdir(p)
-                                 if os.path.isdir(os.path.join(p, d, "cam_st_x2f_front"))]
+                                 if any(os.path.isdir(os.path.join(p, d, c))
+                                        for c in _CAMS)]
                     except OSError:
                         continue
                     if not clips:
                         continue
                     njpg = 0
                     for c in clips:
-                        cd = os.path.join(p, c, "cam_st_x2f_front")
-                        try:
-                            njpg += len([f for f in os.listdir(cd)
-                                         if f.lower().endswith(".jpg")])
-                        except OSError:
-                            pass
+                        for _cam in _CAMS:
+                            cd = os.path.join(p, c, _cam)
+                            if not os.path.isdir(cd):
+                                continue
+                            try:
+                                njpg += len([f for f in os.listdir(cd)
+                                             if f.lower().endswith(".jpg")])
+                            except OSError:
+                                pass
+                            break
                     if any(x in n for x in _EXCL):
                         continue
                     # ONLY-WITH-OUTPUT: 只保留 obj_good 里有该批次的
@@ -1313,25 +1411,264 @@ class H(BaseHTTPRequestHandler):
                                 break
                         except Exception:
                             pass
-                    if _pref == 0:
-                        continue   # 无产出批次直接不显示
+                    # ONLY-RENDERED-CLIPS: 仿真工作台只列有仿真产出的批次
+                    import glob as _g2
+                    _has_out = False
+                    _outs = _g2.glob("/data/render_hybrid/*/task.json")
+                    for _of in _outs:
+                        try:
+                            with open(_of, encoding="utf-8") as _fh:
+                                _md = json.load(_fh)
+                            _cfg = os.path.join(os.path.dirname(_of),
+                                                "config.json")
+                            _b = ""
+                            if os.path.isfile(_cfg):
+                                with open(_cfg, encoding="utf-8") as _cf:
+                                    _b = (json.load(_cf) or {}).get("batch") or ""
+                            if _b == n:
+                                _has_out = True
+                                break
+                        except Exception:
+                            pass
+                    if not _has_out:
+                        continue
                     out.append({"name": n, "clips": len(clips),
                                 "frames": njpg, "preferred": _pref})
                     seen.add(n)
             return out
 
         def _real_clip_frames(clip_name, batch):
+            # MULTI-CAM-FRAMES: 支持多种相机目录
             bp = os.path.join(REAL_ROOT, batch)
             if not os.path.isdir(bp):
                 return []
             cp = os.path.join(bp, clip_name)
-            cd = os.path.join(cp, "cam_st_x2f_front")
-            if not os.path.isdir(cd):
+            cd = None
+            for _cam in ("cam_st_x2f_front", "cam_ld_x8d_front",
+                         "cam_st_x8d_front", "cam_hk_x8b_front",
+                         "images"):
+                _p = os.path.join(cp, _cam)
+                if os.path.isdir(_p):
+                    cd = _p
+                    break
+            if cd is None:
                 return []
             fs = sorted(f for f in os.listdir(cd) if f.lower().endswith(".jpg"))
             return [{"stem": os.path.splitext(f)[0], "file": f} for f in fs]
 
         # 列出数据包
+        # -------- RENDER-JOBS-LIST: 任务中心列表 --------
+        # -------- SELFCHECK-API: 供用户端自检 --------
+        if u.path == "/api/selfcheck":
+            import hashlib as _hh
+            try:
+                _body = b""
+                with open(os.path.join(BASE, "index.html"), "rb") as _f:
+                    _body = _f.read()
+                _h = _hh.md5(_body).hexdigest()[:12]
+                _txt = _body.decode("utf-8", "ignore")
+                _marks = {}
+                for _m in ("BBOX-ANCHOR-FIX", "BBOX-ANN-RESOLVE",
+                           "FS-SCALE-HOIST", "FS-IMG-FIT",
+                           "FSMOD-SYNC-FIX", "FS-COORD-FIX",
+                           "THUMB-DROPDOWN-COMPONENT", "ROUTE-A-CLIPVIEW",
+                           "CLIPPLAY-HYBRID-SCAN", "COORD-ORDER-FIX"):
+                    _marks[_m] = _txt.count(_m)
+                return self._send(200, {
+                    "ok": True,
+                    "html_bytes": len(_body),
+                    "html_md5": _h,
+                    "markers": _marks,
+                    "server_pid": os.getpid(),
+                    "server_time": __import__("time").strftime(
+                        "%Y-%m-%d %H:%M:%S"),
+                    "build": "SELFCHECK-API v1",
+                })
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
+        # -------- LIGHT-API: 车灯组索引 --------
+        if u.path == "/api/light/index":
+            try:
+                LIGHT_IDX = "/data/assets_global/OBJ_3D/light_index.json"
+                if not os.path.isfile(LIGHT_IDX):
+                    return self._send(404, {"ok": False,
+                                            "error": "索引未生成，先跑 build_light_index.py"})
+                with open(LIGHT_IDX, encoding="utf-8") as fh:
+                    d = json.load(fh)
+                return self._send(200, d)
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
+        if u.path == "/api/render/jobs":
+            try:
+                with _RJ_LOCK:
+                    items = []
+                    for _jid, _rec in _RJ.items():
+                        _r = dict(_rec)
+                        _r["id"] = _jid
+                        items.append(_r)
+                items.sort(key=lambda x: x.get("t0") or 0, reverse=True)
+                return self._send(200, {"ok": True, "jobs": items[:500]})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
+        # -------- DELIVERY-EXPORT-API: 数据交付导出 --------
+        if u.path == "/api/delivery/presets":
+            # 常用交付路径预设
+            _pre = [
+                {"label": "网盘 zhj_datasim（默认）",
+                 "path": "/mnt/Data_Platform/zhj_datasim/delivery"},
+                {"label": "本地 /data/delivery",
+                 "path": "/data/delivery"},
+                {"label": "网盘 zhj_datasim/OBJ",
+                 "path": "/mnt/Data_Platform/zhj_datasim/OBJ"},
+            ]
+            _mods = [
+                {"key": "obj", "label": "OBJ 3D 目标"},
+                {"key": "tsr", "label": "TSR 交通标牌"},
+                {"key": "gnd", "label": "GND 地面标线"},
+            ]
+            return self._send(200, {"ok": True, "presets": _pre,
+                                    "modules": _mods})
+
+        if u.path == "/api/delivery/check":
+            # 检查目标路径是否可写
+            try:
+                qs = parse_qs(u.query or "")
+                path = (qs.get("path") or [""])[0].strip()
+                if not path:
+                    return self._send(400, {"ok": False,
+                                            "error": "missing path"})
+                os.makedirs(path, exist_ok=True)
+                tst = os.path.join(path, ".dsh_write_test")
+                with open(tst, "w") as f:
+                    f.write("ok")
+                os.remove(tst)
+                # 剩余空间
+                import shutil as _sh2
+                tot, used, free = _sh2.disk_usage(path)
+                return self._send(200, {
+                    "ok": True, "writable": True,
+                    "free_gb": round(free / 1073741824.0, 1),
+                    "total_gb": round(tot / 1073741824.0, 1)})
+            except Exception as e:
+                return self._send(200, {"ok": True, "writable": False,
+                                        "error": str(e)[:200]})
+
+        if u.path == "/api/delivery/export":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                modules = body.get("modules") or ["obj"]
+                out_root = str(body.get("path") or "").strip()
+                job_id = str(body.get("job") or "").strip()
+                if not out_root:
+                    return self._send(400, {"ok": False,
+                                            "error": "missing path"})
+                os.makedirs(out_root, exist_ok=True)
+
+                import subprocess as _sp5
+                results = []
+                env = dict(os.environ)
+                env["PYTHONPATH"] = TOOLS_DIR
+
+                for mod in modules:
+                    try:
+                        if mod == "obj":
+                            script = os.path.join(TOOLS_DIR,
+                                                  "export_to_label.py")
+                            ann = os.path.join("/data", "render_hybrid",
+                                               job_id, "annotations")
+                            if not (job_id and os.path.isdir(ann)):
+                                results.append({
+                                    "module": "obj", "ok": False,
+                                    "error": "无标注目录（先跑渲染）"})
+                                continue
+                            out = os.path.join(out_root, "OBJ")
+                            ok_n = 0
+                            for fp in sorted(os.listdir(ann))[:200]:
+                                if not fp.endswith(".json"):
+                                    continue
+                                r5 = _sp5.run(
+                                    [ALGO_PYTHON, script,
+                                     "--ann", os.path.join(ann, fp),
+                                     "--out", out],
+                                    capture_output=True, text=True,
+                                    timeout=120, env=env)
+                                if r5.returncode == 0:
+                                    ok_n += 1
+                            results.append({"module": "obj", "ok": True,
+                                            "count": ok_n, "out": out})
+                        else:
+                            results.append({
+                                "module": mod, "ok": False,
+                                "error": "需要 %s 仿真产出" % mod})
+                    except Exception as e5:
+                        results.append({"module": mod, "ok": False,
+                                        "error": str(e5)[:200]})
+
+                return self._send(200, {"ok": True, "path": out_root,
+                                        "results": results})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:300]})
+
+        # -------- CHECK-CLIP-API: 数据目录自检 --------
+        if u.path == "/api/data/check":
+            try:
+                qs = parse_qs(u.query or "")
+                path = (qs.get("path") or [""])[0].strip()
+                force = (qs.get("type") or ["auto"])[0]
+                if not path:
+                    return self._send(400, {"ok": False,
+                                            "error": "missing path"})
+                ap = [os.path.join(TOOLS_DIR, "check_clip.py"), path]
+                if force in ("obj", "gnd"):
+                    ap += ["--type", force]
+                ap.append("--json")
+                import subprocess as _sp4
+                r4 = _sp4.run([ALGO_PYTHON] + ap, capture_output=True,
+                              text=True, timeout=180)
+                try:
+                    import json as _j5
+                    d5 = _j5.loads(r4.stdout or "{}")
+                    return self._send(200, {"ok": True, "result": d5})
+                except Exception:
+                    return self._send(200, {"ok": False,
+                                            "raw": (r4.stdout or "")[:2000],
+                                            "err": (r4.stderr or "")[:500]})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
+        # -------- STUDIO-SPLIT-GET: 素材工坊 GET 接口 --------
+        if u.path == "/api/studio/classes":
+            # STUDIO-CLASSES-FIX: 不导入 bpy 依赖，直接内联类目表
+            _TBL = {
+                "car": 4.6, "suv": 4.8, "pickup": 5.4, "van": 5.1,
+                "truck": 8.5, "bus": 12.0,
+                "tricycle": 2.6, "motorcycle": 2.1, "bicycle": 1.8,
+                "rickshaw": 2.8, "low_speed_ev": 2.9,
+                "scooter": 1.2, "skateboard": 0.8,
+                "pedestrian": 1.7, "rider": 1.8, "child": 1.2,
+                "camel": 2.2, "kangaroo": 1.6, "animal": 1.5,
+                "cone": 0.7, "barrier": 1.0,
+            }
+            return self._send(200, {"ok": True, "classes": _TBL})
+
+        if u.path == "/api/studio/status":
+            try:
+                qs = parse_qs(u.query or "")
+                uid = (qs.get("uid") or [""])[0]
+                meta = os.path.join(RAW_EXTERNAL, uid, "meta.json")
+                if not os.path.isfile(meta):
+                    return self._send(200, {"ok": True, "exists": False})
+                import json as _j
+                return self._send(200, {"ok": True, "exists": True,
+                                        "meta": _j.load(open(meta, encoding="utf-8"))})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
         if u.path == "/api/real/clips":
             try:
                 return self._send(200, {"root": REAL_ROOT,
@@ -1339,11 +1676,80 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"error": str(e)})
 
+        # REAL-CLIP-FRAMES-API: 列出某批次下的 seq 目录
+        if u.path == "/api/real/clips/frames":
+            import glob as _gf
+            try:
+                qs = parse_qs(u.query or "")
+                batch = (qs.get("batch") or [""])[0]
+                if not batch:
+                    return self._send(400, {"error": "missing batch"})
+                # FRAMES-MULTIROOT: 两个根目录都要找
+                _roots = [REAL_ROOT,
+                          "/data/test_data/real_clips_extra"]
+                cd = None
+                for _r0 in _roots:
+                    _c = os.path.join(_r0, batch)
+                    if os.path.isdir(_c):
+                        cd = _c
+                        break
+                if cd is None:
+                    return self._send(200, {"batch": batch,
+                                            "frames": [],
+                                            "note": "batch not found"})
+                # FRAMES-LOGIC-FIX: 子目录直接含 cam_st_x2f_front 就是 seq
+                frames = []
+                # FRAMES-LEVEL-OUTGATE: 只列有仿真产出的 clip
+                _done2 = set()
+                import glob as _gg2
+                for _cf2 in _gg2.glob("/data/render_hybrid/*/config.json"):
+                    try:
+                        with open(_cf2, encoding="utf-8") as _fh2:
+                            _cd2 = json.load(_fh2) or {}
+                        if _cd2.get("batch") == batch and _cd2.get("clip"):
+                            _done2.add(_cd2["clip"])
+                    except Exception:
+                        pass
+                for d in sorted(os.listdir(cd)):
+                    dp = os.path.join(cd, d)
+                    if not os.path.isdir(dp):
+                        continue
+                    if d not in _done2:
+                        continue
+                    for cam in ("cam_st_x2f_front", "cam_ld_x8d_front",
+                                "cam_st_x8d_front", "cam_hk_x8b_front",
+                                "images"):
+                        cp = os.path.join(dp, cam)
+                        if os.path.isdir(cp):
+                            nd = len(_gf.glob(os.path.join(cp, "*.jpg")))
+                            if nd == 0:
+                                nd = len(_gf.glob(os.path.join(cp, "*.png")))
+                            frames.append({"name": d, "frames": nd})
+                            break
+                    else:
+                        # 再深一层（batch/xxx/yyy/cam_...）
+                        for sub in sorted(os.listdir(dp)):
+                            sp2 = os.path.join(dp, sub)
+                            if not os.path.isdir(sp2):
+                                continue
+                            for cam in ("cam_st_x2f_front", "images"):
+                                cp = os.path.join(sp2, cam)
+                                if os.path.isdir(cp):
+                                    nd = len(_gf.glob(os.path.join(cp, "*.jpg")))
+                                    frames.append({"name": sub, "frames": nd})
+                                    break
+                return self._send(200, {"batch": batch, "frames": frames})
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
+
         # 列出某包下的 clip
         # SPEC-ASSET-POS: 素材库列表（供人工指定）
         if u.path == "/api/obj/assets":
             import glob as _ga
-            _roots = ["/data/obj_assets_real", "/data/obj_assets_pc",
+            # OBJ-PATCH-ROOT: Blender 渲染贴片库（新素材主源）
+            _roots = ["/data/assets_global/OBJ_PATCH",
+                      "/data/obj_assets_real", "/data/obj_assets_pc",
                       "/data/obj_assets"]
             _out = {}
             for _r in _roots:
@@ -1357,12 +1763,33 @@ class H(BaseHTTPRequestHandler):
                     if not _fs:
                         continue
                     _lst = _out.setdefault(_cls, [])
+                    # DEDUP-BY-MODEL: 同一模型的 12 个 yaw 只保留 yaw180 作代表
+                    _bymodel = {}
                     for _f in _fs:
+                        _bn = os.path.basename(_f)
+                        _base = _bn.split("_yaw")[0] \
+                            if "_yaw" in _bn else _bn[:-4]
+                        _yaw = 180
+                        if "_yaw" in _bn:
+                            try:
+                                _yaw = int(_bn.split("_yaw")[1][:3])
+                            except Exception:
+                                _yaw = 180
+                        _prev = _bymodel.get(_base)
+                        # 优先 yaw180，其次最接近 180
+                        if (_prev is None or
+                                abs(_yaw - 180) < abs(_prev[0] - 180)):
+                            _bymodel[_base] = (_yaw, _f)
+                    for _base, (_yaw, _f) in sorted(_bymodel.items()):
                         _thumb = "/api/obj/asset_thumb?" + \
                                  "path=" + quote(_f)
-                        _lst.append({"name": os.path.basename(_f),
+                        _n_yaw = len([x for x in _fs
+                                      if x.split("_yaw")[0] == _f.split(
+                                          "_yaw")[0]])
+                        _lst.append({"name": _base,
                                      "path": _f, "thumb": _thumb,
-                                     "w": 0})
+                                     "w": 0, "yaw": _yaw,
+                                     "yaw_count": _n_yaw})
             for _c in _out:
                 _out[_c] = _out[_c][:200]
             return self._send(200, {"classes": _out,
@@ -1375,7 +1802,8 @@ class H(BaseHTTPRequestHandler):
             _p = (q.get("path") or [""])[0]
             if (not _p or ".." in _p or
                     not any(_p.startswith(_r) for _r in
-                            ("/data/obj_assets_real", "/data/obj_assets_pc",
+                            ("/data/assets_global/OBJ_PATCH",
+                             "/data/obj_assets_real", "/data/obj_assets_pc",
                              "/data/obj_assets"))):
                 return self._send(400, {"error": "bad path"})
             if not os.path.isfile(_p):
@@ -1490,9 +1918,30 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             items = []
+            # CLIP-LEVEL-OUTGATE: 只返回真正跑过仿真的 clip
+            _done_clips = set()
+            import glob as _gc
+            for _cf in _gc.glob("/data/render_hybrid/*/config.json"):
+                try:
+                    with open(_cf, encoding="utf-8") as _fh:
+                        _cd = json.load(_fh) or {}
+                    if _cd.get("batch") == batch and _cd.get("clip"):
+                        _done_clips.add(_cd["clip"])
+                except Exception:
+                    pass
+            # BATCH-MULTICAM-FIX: 支持多种相机目录
+            _BCAMS = ("cam_st_x2f_front", "cam_ld_x8d_front",
+                      "cam_st_x8d_front", "cam_hk_x8b_front", "images")
             for d in sorted(os.listdir(bp)):
-                cd = os.path.join(bp, d, "cam_st_x2f_front")
-                if not os.path.isdir(cd):
+                if d not in _done_clips:
+                    continue
+                cd = None
+                for _c in _BCAMS:
+                    _cp = os.path.join(bp, d, _c)
+                    if os.path.isdir(_cp):
+                        cd = _cp
+                        break
+                if cd is None:
                     continue
                 _stems = [os.path.splitext(f)[0]
                           for f in os.listdir(cd)
@@ -1521,18 +1970,47 @@ class H(BaseHTTPRequestHandler):
             if (not batch or not clip or not stem or "/" in clip or
                     ".." in clip or "/" in stem or ".." in stem):
                 return self._send(400, {"error": "bad param"})
-            # BATCH-MULTI-ROOT: 原图也可能在 extra
+            # REAL-IMAGE-MULTICAM: 支持多种相机目录
             fp = None
+            _CAMS3 = ("cam_st_x2f_front", "cam_ld_x8d_front",
+                      "cam_st_x8d_front", "cam_hk_x8b_front", "images")
             for _r in (REAL_ROOT, "/data/test_data/real_clips_extra"):
-                _c = os.path.join(_r, batch, clip, "cam_st_x2f_front",
-                                  stem + ".jpg")
-                if os.path.isfile(_c):
-                    fp = _c
+                for _cam in _CAMS3:
+                    _c = os.path.join(_r, batch, clip, _cam,
+                                      stem + ".jpg")
+                    if os.path.isfile(_c):
+                        fp = _c
+                        break
+                if fp:
                     break
             if fp is None:
                 return self._send(404, {"error": "not found"})
-            with open(fp, "rb") as f:
-                data = f.read()
+            # IMG-RESIZE-MAX: 支持 max= 缩放，避免 3840 大图卡死
+            _mx = 0
+            try:
+                _mx = int((q.get("max") or ["0"])[0] or 0)
+            except Exception:
+                _mx = 0
+            data = None
+            if _mx and _mx > 0:
+                try:
+                    import cv2 as _cv2
+                    _im = _cv2.imread(fp)
+                    if _im is not None and _im.shape[1] > _mx:
+                        _sc = _mx / float(_im.shape[1])
+                        _im = _cv2.resize(
+                            _im, (int(_im.shape[1] * _sc),
+                                 int(_im.shape[0] * _sc)),
+                            interpolation=_cv2.INTER_AREA)
+                        _ok, _buf = _cv2.imencode(
+                            ".jpg", _im, [int(_cv2.IMWRITE_JPEG_QUALITY), 88])
+                        if _ok:
+                            data = _buf.tobytes()
+                except Exception:
+                    data = None
+            if data is None:
+                with open(fp, "rb") as f:
+                    data = f.read()
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(data)))
@@ -1635,14 +2113,20 @@ class H(BaseHTTPRequestHandler):
             sub = (q.get("sub") or [""])[0]
             if sub and ("/" in sub or ".." in sub):
                 return self._send(400, {"error": "bad sub"})
-            base = os.path.join("/data/render", job)
-            fp = os.path.join(base, sub, name) if sub else os.path.join(base, name)
-            # 兼容：没带 sub 时自动找 frames/
-            if not os.path.isfile(fp):
-                cand = os.path.join(base, "frames", name)
-                if os.path.isfile(cand):
-                    fp = cand
-            if not os.path.isfile(fp):
+            # RENDER-JOB-HYBRID-B: 兼容两个根目录
+            fp = None
+            for base in (os.path.join("/data/render", job),
+                         os.path.join("/data/render_hybrid", job)):
+                cand0 = (os.path.join(base, sub, name) if sub
+                         else os.path.join(base, name))
+                if os.path.isfile(cand0):
+                    fp = cand0
+                    break
+                c2 = os.path.join(base, "frames", name)
+                if os.path.isfile(c2):
+                    fp = c2
+                    break
+            if not fp:
                 return self._send(404, {"error": "not found"})
             with open(fp, "rb") as f:
                 data = f.read()
@@ -1675,19 +2159,28 @@ class H(BaseHTTPRequestHandler):
             if _bp is None:
                 return self._send(404, {"error": "batch 不存在"})
 
-            # 原图帧
+            # CLIPPLAY-MULTICAM: 支持多种相机
+            _CAMS5 = ("cam_st_x2f_front", "cam_ld_x8d_front",
+                      "cam_st_x8d_front", "cam_hk_x8b_front", "images")
+            def _cam_dir(base, cn):
+                for _c in _CAMS5:
+                    _p = os.path.join(base, cn, _c)
+                    if os.path.isdir(_p):
+                        return _p
+                return None
             if clip:
-                cd = os.path.join(_bp, clip, "cam_st_x2f_front")
-                if not os.path.isdir(cd):
+                cd = _cam_dir(_bp, clip)
+                if cd is None:
                     return self._send(404, {"error": "clip 不存在"})
             else:
-                subs = [d for d in os.listdir(_bp)
-                        if os.path.isdir(os.path.join(_bp, d,
-                                                      "cam_st_x2f_front"))]
+                subs = []
+                for d in os.listdir(_bp):
+                    if os.path.isdir(os.path.join(_bp, d)) and _cam_dir(_bp, d):
+                        subs.append(d)
                 if not subs:
                     return self._send(404, {"error": "无 clip"})
                 clip = sorted(subs)[0]
-                cd = os.path.join(_bp, clip, "cam_st_x2f_front")
+                cd = _cam_dir(_bp, clip)
 
             stems = sorted(os.path.splitext(f)[0]
                            for f in os.listdir(cd) if f.lower().endswith(".jpg"))
@@ -1709,15 +2202,40 @@ class H(BaseHTTPRequestHandler):
 
             # OBJ-NEW-SOURCE: 多源查找（新流水线优先，回退旧数据）
             # OBJ-GOOD-SRC: 只读优质场景产出
-            NEW_DIRS = ["/data/render/obj_good/frames",
-                        "/data/render/pipe_pc/frames",
-                        "/data/render/pipe3d/frames",
-                        "/data/render/pipe_obj/frames",
-                        "/data/render/gnd_model/frames"]
-            ANN_DIRS = ["/data/render/obj_good/annotations",
-                        "/data/render/pipe_pc/annotations",
-                        "/data/render/pipe3d/annotations",
-                        "/data/render/gnd_model/annotations"]
+            # V2-SOURCE: v2 优先
+            _obj_dirs = []
+            _ann_dirs = []
+            for _cand in ("/data/render/obj_v3_10",
+                          "/data/render/obj_good_v2",
+                          "/data/render/obj_good"):
+                if os.path.isdir(_cand + "/frames") and \
+                        len(os.listdir(_cand + "/frames")) > 0:
+                    _obj_dirs.append(_cand + "/frames")
+                    _ann_dirs.append(_cand + "/annotations")
+            # CLIPPLAY-HYBRID-SCAN: 纳入 render_hybrid 的 objtask
+            import glob as _gh
+            _hybrid = []
+            for _cf in _gh.glob("/data/render_hybrid/*/config.json"):
+                try:
+                    with open(_cf, encoding="utf-8") as _fh:
+                        _cd = json.load(_fh) or {}
+                except Exception:
+                    continue
+                if _cd.get("batch") != batch:
+                    continue
+                _jobdir = os.path.dirname(_cf)
+                # 只纳入当前 clip（或未指定 clip）
+                if _cd.get("clip") and _cd.get("clip") != clip:
+                    continue
+                _hybrid.append(_jobdir)
+            # hybrid 目录直接用 _obj.jpg，标注在 annotations/
+            NEW_DIRS = _hybrid + _obj_dirs + [
+                "/data/render/pipe_pc/frames",
+                "/data/render/pipe3d/frames",
+                "/data/render/pipe_obj/frames"]
+            ANN_DIRS = [os.path.join(h, "annotations") for h in _hybrid] + \
+                _ann_dirs + ["/data/render/pipe_pc/annotations",
+                             "/data/render/pipe3d/annotations"]
 
             frames = []
             for st in stems:
@@ -1725,7 +2243,8 @@ class H(BaseHTTPRequestHandler):
                 src_dir = None
                 # 1) 新流水线
                 for d in NEW_DIRS:
-                    for suf in ("_sim.jpg", "_composed.jpg", "_gnd.jpg"):
+                    for suf in ("_obj.jpg", "_sim.jpg", "_composed.jpg",
+                                "_gnd.jpg"):
                         cand = os.path.join(d, st + suf)
                         if os.path.isfile(cand):
                             sim_p = cand
@@ -1766,7 +2285,12 @@ class H(BaseHTTPRequestHandler):
                             ann = None
                         break
 
-                if src_dir and "render" in src_dir:
+                if src_dir and "render_hybrid" in src_dir:
+                    # 直接在 job 目录里
+                    job = os.path.basename(src_dir)
+                    sim_url = ("/api/render_job_image?job=" + job +
+                               "&name=" + os.path.basename(sim_p))
+                elif src_dir and "render" in src_dir:
                     job = os.path.basename(os.path.dirname(src_dir))
                     sim_url = ("/api/render_job_image?job=" + job +
                                "&name=" + os.path.basename(sim_p))
@@ -1790,6 +2314,47 @@ class H(BaseHTTPRequestHandler):
                                     "frames": frames,
                                     "n": len(frames)})
 
+        # [OBJ-BBOX] 参数化任务逐帧合成标注
+        if u.path == "/api/render_job_annotation":
+            job = (q.get("job") or [""])[0]
+            stem = (q.get("stem") or [""])[0]
+            if (not job or not stem or "/" in job or ".." in job or
+                    "/" in stem or ".." in stem):
+                return self._send(400, {"error": "bad param"})
+            # RENDER-JOB-HYBRID-B: 标注接口也兼容两个根目录
+            ap = None
+            for base in (os.path.join("/data/render", job),
+                         os.path.join("/data/render_hybrid", job)):
+                for cand in (
+                        os.path.join(base, "annotations", stem + ".json"),
+                        os.path.join(base, "frames", "annotations",
+                                     stem + ".json")):
+                    if os.path.isfile(cand):
+                        ap = cand
+                        break
+                if ap:
+                    break
+            if ap is None:
+                return self._send(404, {"error": "annotation not found"})
+            try:
+                with open(ap, encoding="utf-8") as f:
+                    ann = json.load(f)
+                # OBJ task images are undistorted; project real boxes separately
+                # onto the original distorted image using this frame's calibration.
+                if job.startswith('objtask_') and ann.get('frame') == stem:
+                    try:
+                        cfg_path = os.path.join(os.path.dirname(os.path.dirname(ap)), 'config.json')
+                        with open(cfg_path, encoding='utf-8') as cf: cfg = json.load(cf)
+                        if TOOLS_DIR not in sys.path: sys.path.insert(0, TOOLS_DIR)
+                        from real_bbox_original import enrich
+                        ann = enrich(ann, str(cfg.get('batch') or ''), str(cfg.get('clip') or ''), stem)
+                    except Exception as exc:
+                        ann['original_geometry'] = 'unavailable'
+                        ann['original_geometry_error'] = str(exc)[:200]
+                return self._send(200, ann)
+            except Exception as e:
+                return self._send(500, {"error": str(e)})
+
         # [PARAMS] 读取参数化产出图
         if u.path == "/api/render_job_image":
             job = (q.get("job") or [""])[0]
@@ -1800,16 +2365,49 @@ class H(BaseHTTPRequestHandler):
             sub = (q.get("sub") or [""])[0]
             if sub and ("/" in sub or ".." in sub):
                 return self._send(400, {"error": "bad sub"})
-            base = os.path.join("/data/render", job)
-            fp = os.path.join(base, sub, name) if sub else os.path.join(base, name)
-            if not os.path.isfile(fp):
-                _c = os.path.join(base, "frames", name)
-                if os.path.isfile(_c):
-                    fp = _c
-            if not os.path.isfile(fp):
+            # RENDER-JOB-HYBRID-ROOT: 兼容 /data/render 与 /data/render_hybrid
+            _bases = [os.path.join("/data/render", job),
+                      os.path.join("/data/render_hybrid", job)]
+            fp = None
+            for base in _bases:
+                cand = (os.path.join(base, sub, name) if sub
+                        else os.path.join(base, name))
+                if os.path.isfile(cand):
+                    fp = cand
+                    break
+                if not sub:
+                    _c = os.path.join(base, "frames", name)
+                    if os.path.isfile(_c):
+                        fp = _c
+                        break
+            if not fp:
                 return self._send(404, {"error": "not found"})
-            with open(fp, "rb") as f:
-                data = f.read()
+            # IMG-RESIZE-MAX: 同样支持 max= 缩放
+            _mx2 = 0
+            try:
+                _mx2 = int((q.get("max") or ["0"])[0] or 0)
+            except Exception:
+                _mx2 = 0
+            data = None
+            if _mx2 and _mx2 > 0:
+                try:
+                    import cv2 as _cv2b
+                    _im2 = _cv2b.imread(fp)
+                    if _im2 is not None and _im2.shape[1] > _mx2:
+                        _sc2 = _mx2 / float(_im2.shape[1])
+                        _im2 = _cv2b.resize(
+                            _im2, (int(_im2.shape[1] * _sc2),
+                                   int(_im2.shape[0] * _sc2)),
+                            interpolation=_cv2b.INTER_AREA)
+                        _ok2, _buf2 = _cv2b.imencode(
+                            ".jpg", _im2, [int(_cv2b.IMWRITE_JPEG_QUALITY), 88])
+                        if _ok2:
+                            data = _buf2.tobytes()
+                except Exception:
+                    data = None
+            if data is None:
+                with open(fp, "rb") as f:
+                    data = f.read()
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(data)))
@@ -2500,6 +3098,38 @@ class H(BaseHTTPRequestHandler):
                     "source_image": a.get("source_image", ""),
                 })
             sp = a.get("source_path", "")
+            # SRC-PATH-VALIDATE: source_path 可能指向已删除的临时目录
+            # （batch 跑完 /tmp 被清），必须校验存在性
+            if sp and not os.path.isfile(sp):
+                sp = ""
+            if not sp:
+                # TSR-SRC-FALLBACK: 只有 source_image（文件名），反查真实目录
+                si = a.get("source_image", "") or ""
+                if si:
+                    # 格式 <批次>__<帧名>.jpg 或直接 <帧名>.jpg
+                    frame = si.split("__")[-1] if "__" in si else si
+                    # ① 同目录下找
+                    _c1 = os.path.join(d, si)
+                    if os.path.isfile(_c1):
+                        sp = _c1
+                    if not sp:
+                        _c2 = os.path.join(d, frame)
+                        if os.path.isfile(_c2):
+                            sp = _c2
+                    # ② 到真实数据目录找
+                    if not sp:
+                        import glob as _gg
+                        for _root in ("/data/test_data/real_clips_extra",
+                                      "/data/test_data/real_clips",
+                                      "/data/test_data/gnd_train"):
+                            _hits = _gg.glob(
+                                os.path.join(_root, "*", "*",
+                                             "cam_st_x2f_front", frame))
+                            if _hits:
+                                sp = _hits[0]
+                                break
+            if not sp or not os.path.isfile(sp):
+                return self._send(404, {"error": "原图不存在"})
             return self._send_image(max_w=maxw)(sp)
 
         if u.path == "/api/tsr/image":
@@ -2742,30 +3372,57 @@ class H(BaseHTTPRequestHandler):
                                 "img_ori")
             if not os.path.isdir(imgd):
                 return self._send(404, {"ok": False, "error": "no clip"})
-            # GND-FUSION-SRC: 优先新光影继承产出
-            prod = "/data/render/gnd_fusion/frames"
-            if not os.path.isdir(prod):
-                prod = "/data/render/gnd_model/frames"
-            job_name = "gnd_fusion" if "gnd_fusion" in prod else "gnd_model"
+            # GND-MULTI-SRC: 候选目录列表（逐帧查找，不锁死一个目录）
+            _src_dirs = []
+            # GND-PRIORITY-V3: gnd_clean_v3（4A全量）优先
+            for _cand in ("/data/render/gnd_clean_v3",
+                          "/data/render/gnd_v3_10",
+                          "/data/render/gnd_clean_v2",
+                          "/data/render/gnd_clean"):
+                if os.path.isdir(_cand + "/frames"):
+                    _src_dirs.append((_cand + "/frames",
+                                      os.path.basename(_cand)))
+            if not _src_dirs:
+                _src_dirs = [("/data/render/gnd_clean/frames", "gnd_clean")]
+            prod = _src_dirs[0][0]
+            job_name = _src_dirs[0][1]
+
+            def _find_src(stem, suffix):
+                """在全部候选目录（含 clean/ 子目录）里找 stem+suffix。"""
+                for _d, _j in _src_dirs:
+                    # 主目录
+                    if os.path.isfile(os.path.join(_d, stem + suffix)):
+                        return _j, stem + suffix
+                    # clean/ 子目录
+                    _sub = os.path.join(os.path.dirname(_d), "clean",
+                                        stem + suffix)
+                    if os.path.isfile(_sub):
+                        return _j, "clean/" + stem + suffix
+                return None, None
             frames = []
             for f in sorted(os.listdir(imgd)):
                 if not f.endswith(".jpg"):
                     continue
                 stem = os.path.splitext(f)[0]
-                sp = os.path.join(prod, stem + "_sim.jpg")
-                gp = os.path.join(prod, stem + "_seg.png")
-                # GND-GT-FIELD: 真值掩码
-                gtp = os.path.join(prod, stem + "_gt.png")
+                # GND-FRAME-FIND: 逐帧在所有候选目录里查
+                _j_sim, _n_sim = _find_src(stem, "_sim.jpg")
+                _j_seg, _n_seg = _find_src(stem, "_seg.png")
+                _j_gt, _n_gt = _find_src(stem, "_gt.png")
+                _j_clean, _n_clean = _find_src(stem, "_clean.jpg")
                 frames.append({
                     "stem": stem,
                     "orig": "/api/gnd/image?batch=%s&clip=%s&name=%s"
                             % (batch, clip, f),
-                    "sim": ("/api/render_job_image?job=%s&name=%s_sim.jpg"
-                            % (job_name, stem)) if os.path.isfile(sp) else None,
-                    "seg": ("/api/render_job_image?job=%s&name=%s_seg.png"
-                            % (job_name, stem)) if os.path.isfile(gp) else None,
-                    "gt": ("/api/render_job_image?job=%s&name=%s_gt.png"
-                           % (job_name, stem)) if os.path.isfile(gtp) else None,
+                    "sim": ("/api/render_job_image?job=%s&name=%s"
+                            % (_j_sim, _n_sim)) if _j_sim else None,
+                    "seg": ("/api/render_job_image?job=%s&name=%s"
+                            % (_j_seg, _n_seg)) if _j_seg else None,
+                    "gt": ("/api/render_job_image?job=%s&name=%s"
+                           % (_j_gt, _n_gt)) if _j_gt else None,
+                    "clean": ("/api/render_job_image?job=%s&name=%s"
+                              % (_j_clean, (_n_clean[6:] if _n_clean and _n_clean.startswith("clean/") else _n_clean))
+                              + ("&sub=clean" if _n_clean and _n_clean.startswith("clean/") else "")
+                              ) if _j_clean else None,
                 })
             return self._send(200, {"ok": True, "batch": batch,
                                     "clip": clip, "frames": frames,
@@ -2799,6 +3456,92 @@ class H(BaseHTTPRequestHandler):
 
             def scan_obj():
                 items = []
+                # ASSETS-GLOBAL: 新 3D 素材库（按国家/类别分层）
+                _groot = "/data/assets_global/OBJ_3D"
+                # CANON-ASSETS: 优先读规范化车辆 + 障碍物索引
+                try:
+                    _cidx = os.path.join(_groot, "asset_index_obj3d.json")
+                    if os.path.isfile(_cidx):
+                        _ci = json.load(open(_cidx, encoding="utf-8"))
+                        _bycls = {}
+                        for _a in (_ci.get("assets") or []):
+                            _uid = _a.get("uid")
+                            _cls = _a.get("true_class") or "car"
+                            _fp = _a.get("path") or ""
+                            if not (_uid and os.path.isfile(_fp)):
+                                continue
+                            _bycls.setdefault(_cls, []).append(
+                                {"uid": _uid, "path": _fp,
+                                 "lwh": _a.get("lwh")})
+                        for _cls, _its in _bycls.items():
+                            items.append({
+                                "key": "CANON/" + _cls,
+                                "kind": "canon3d",
+                                "root": "global",
+                                "n": len(_its),
+                                "assets": _its,
+                                "files": [_x["uid"] + ".glb"
+                                          for _x in _its],
+                            })
+                except Exception:
+                    pass
+                # 障碍物
+                try:
+                    _oroot = os.path.join(_groot, "_obs_dec")
+                    if os.path.isdir(_oroot):
+                        for _oc in sorted(os.listdir(_oroot)):
+                            _op = os.path.join(_oroot, _oc)
+                            if not os.path.isdir(_op):
+                                continue
+                            _ol = []
+                            for _m in sorted(os.listdir(_op)):
+                                _mp = os.path.join(_op, _m)
+                                _mf = os.path.join(_mp, "mesh.glb")
+                                _tv = os.path.join(_mp, "view_000.png")
+                                if os.path.isfile(_mf):
+                                    _ol.append(_m)
+                            if _ol:
+                                items.append({
+                                    "key": "OBS/" + _oc,
+                                    "kind": "obs3d",
+                                    "root": "global",
+                                    "n": len(_ol),
+                                    "files": _ol,
+                                })
+                except Exception:
+                    pass
+                if os.path.isdir(_groot):
+                    # SKIP-DUP-DIRS: 这些已由上面的专用分支处理
+                    _SKIP = {"SELECTED", "_obs_dec", "_raw_obs", "canonical"}
+                    for country in sorted(os.listdir(_groot)):
+                        if country in _SKIP:
+                            continue
+                        cd = os.path.join(_groot, country)
+                        if not os.path.isdir(cd):
+                            continue
+                        for cls in sorted(os.listdir(cd)):
+                            d = os.path.join(cd, cls)
+                            if not os.path.isdir(d):
+                                continue
+                            # 每个模型一个子目录，取其 view_000.png 作为缩略图
+                            files = []
+                            for md in sorted(os.listdir(d)):
+                                md_p = os.path.join(d, md)
+                                if not os.path.isdir(md_p):
+                                    continue
+                                for vn in ("view_000.png", "view_001.png"):
+                                    if os.path.isfile(os.path.join(md_p, vn)):
+                                        files.append(md + "/" + vn)
+                                        break
+                            if files:
+                                items.append({
+                                    "key": country + "/" + cls,
+                                    "kind": "glb3d",
+                                    "root": "global",
+                                    "n": len(files),
+                                    # NO-FILES-CAP: 全量返回，前端分页
+                                    "files": files,
+                                })
                 for root, tag in (("/data/obj_assets_pc", "pc"),
                                   ("/data/obj_assets_real", "real"),
                                   ("/data/obj_assets", "proc")):
@@ -2816,13 +3559,29 @@ class H(BaseHTTPRequestHandler):
                             "key": cls, "kind": tag,
                             "root": "real" if tag == "real" else "proc",
                             "n": len(fs),
-                            "files": fs[:24],
+                            "files": fs,      # NO-FILES-CAP
                         })
                 return items
 
             def scan_gnd():
                 root = "/data/gnd_assets"
                 items = []
+                # ASSETS-GLOBAL: 新矢量素材库（按国家分层）
+                _gsvg = "/data/assets_global/GND_SVG"
+                if os.path.isdir(_gsvg):
+                    for country in sorted(os.listdir(_gsvg)):
+                        cd = os.path.join(_gsvg, country)
+                        pd = os.path.join(cd, "png")
+                        if not os.path.isdir(pd):
+                            continue
+                        fs = [f for f in sorted(os.listdir(pd))
+                              if f.lower().endswith(".png")]
+                        if fs:
+                            items.append({
+                                "key": country, "kind": "svg",
+                                "root": "global", "n": len(fs),
+                                "files": fs,
+                            })
                 if not os.path.isdir(root):
                     return items
                 for key in sorted(os.listdir(root)):
@@ -2867,19 +3626,55 @@ class H(BaseHTTPRequestHandler):
             key = (q.get("key") or [""])[0]
             fn = (q.get("file") or ["tex.png"])[0]
             kind = (q.get("kind") or ["real"])[0]
-            if (not key or "/" in key or ".." in key or "/" in fn
-                    or ".." in fn):
+            # VAL-GLOBAL-KEY: glb3d/svg 允许 key 含一层国家前缀（GLOBAL/car）
+            #   fn 也允许 <uid>/view_xxx.png 一层
+            #   仍然禁止 ".." 防止目录穿越
+            # CANON-KEY-OK: canon3d/obs3d 的 key 也含一层前缀（CANON/car）
+            _allow_slash = kind in ("glb3d", "svg", "canon3d", "obs3d")
+            if (not key or ".." in key or ".." in fn
+                    or (not _allow_slash and "/" in key)
+                    or (kind != "glb3d" and "/" in fn)):
                 return self._send(400, {"error": "bad param"})
             if module == "gnd":
-                fp = os.path.join("/data/gnd_assets", key, fn)
+                # GLOBAL-IMG-ROUTE: kind=svg -> assets_global/GND_SVG/<国家>/png
+                if kind == "svg":
+                    fp = os.path.join("/data/assets_global/GND_SVG", key,
+                                      "png", fn)
+                else:
+                    fp = os.path.join("/data/gnd_assets", key, fn)
             elif module == "obj":
-                if kind == "pc":
+                # THUMB-FOR-CANON: canonical / obstacle 的缩略图
+                if kind == "canon3d":
+                    # key="CANON/car", fn="00_car_xxx.glb" -> 找同名 png
+                    u = os.path.splitext(fn)[0]
+                    fp = os.path.join(
+                        "/data/assets_global/OBJ_3D", "canonical",
+                        u + ".png")
+                    if not os.path.isfile(fp):
+                        # 回退到 SELECTED 里的 view_000.png
+                        cls = key.split("/")[-1]
+                        cand = glob.glob(
+                            "/data/assets_global/OBJ_3D/SELECTED/%s/"
+                            "%s*/view_000.png" % (cls, u.split("_")[0] + "_"))
+                        if cand:
+                            fp = cand[0]
+                elif kind == "obs3d":
+                    cls = key.split("/")[-1]
+                    fp = os.path.join(
+                        "/data/assets_global/OBJ_3D/_obs_dec", cls,
+                        os.path.splitext(fn)[0], "view_000.png")
+                elif kind == "glb3d":
+                    # key 形如 "GLOBAL/car"，fn 形如 "<uid>/view_000.png"
+                    fp = os.path.join("/data/assets_global/OBJ_3D", key, fn)
+                elif kind == "pc":
                     root = "/data/obj_assets_pc"
+                    fp = os.path.join(root, key, fn)
                 elif kind == "real":
                     root = "/data/obj_assets_real"
+                    fp = os.path.join(root, key, fn)
                 else:
                     root = "/data/obj_assets"
-                fp = os.path.join(root, key, fn)
+                    fp = os.path.join(root, key, fn)
             else:
                 return self._send(400, {"error": "bad module"})
             if not os.path.isfile(fp):
@@ -2907,10 +3702,426 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, _r)
 
         return self._send(404, {"error": "not found"})
+    def _delete_canonical(self, key, fn):
+        """DEL-CANON-SUPPORT: 删除 canonical/obs3d 素材 + 索引条目。"""
+        try:
+            import glob as _g2
+            uid = os.path.splitext(os.path.basename(fn))[0]
+            if ".." in uid or "/" in uid:
+                return self._send(400, {"ok": False, "error": "bad uid"})
+            deleted = []
+            cls = key.split("/")[-1] if "/" in key else key
+            if key.startswith("CANON/"):
+                base = os.path.join(CANON_DIR, uid)
+                idx_fp = OBJ3D_INDEX
+            else:
+                base = os.path.join(
+                    "/data/assets_global/OBJ_3D/_obs_dec", cls, uid,
+                    "mesh")
+                idx_fp = None
+            # 删 glb + png + 同 stem 所有文件
+            for p in _g2.glob(base + ".*"):
+                try:
+                    os.remove(p)
+                    deleted.append(p)
+                except Exception:
+                    pass
+            # 删 raw_external 里的原始上传
+            raw = os.path.join(RAW_EXTERNAL, uid)
+            if os.path.isdir(raw):
+                try:
+                    import shutil as _sh
+                    _sh.rmtree(raw)
+                    deleted.append(raw)
+                except Exception:
+                    pass
+            # 从索引移除
+            if idx_fp and os.path.isfile(idx_fp):
+                try:
+                    import json as _j4
+                    _d = _j4.load(open(idx_fp, encoding="utf-8"))
+                    _before = len(_d.get("assets") or [])
+                    _d["assets"] = [a for a in (_d.get("assets") or [])
+                                    if a.get("uid") != uid]
+                    if len(_d["assets"]) != _before:
+                        with open(idx_fp, "w", encoding="utf-8") as _f4:
+                            _j4.dump(_d, _f4, indent=1,
+                                     ensure_ascii=False)
+                        deleted.append("index:%s" % uid)
+                except Exception:
+                    pass
+            if deleted:
+                return self._send(200, {"ok": True, "deleted": deleted})
+            return self._send(404, {"ok": False, "error": "not found"})
+        except Exception as e:
+            return self._send(500, {"ok": False, "error": str(e)[:200]})
+
     def do_POST(self):
         # POST-U-DEF: 解析 URL（do_POST 里必须重新定义）
         u = urlparse(self.path)
         q = parse_qs(u.query)
+
+        if u.path == "/api/light/save":
+            try:
+                body = self._body()
+                assets = (body or {}).get("assets") or {}
+                if not isinstance(assets, dict):
+                    return self._send(400, {"ok": False, "error": "bad payload"})
+                LIGHT_IDX = "/data/assets_global/OBJ_3D/light_index.json"
+                # 备份
+                if os.path.isfile(LIGHT_IDX):
+                    try:
+                        import shutil as _sh
+                        _sh.copy2(LIGHT_IDX, LIGHT_IDX + ".bak")
+                    except Exception:
+                        pass
+                n = 0
+                for uid, a in assets.items():
+                    g = a.get("groups") or {}
+                    a["n_light_mats"] = sum(len(g.get(k) or []) for k in
+                                            ("head", "tail", "turn"))
+                    a["supported"] = a["n_light_mats"] >= 2
+                    if a["supported"]:
+                        n += 1
+                payload = {"version": 1, "total": len(assets),
+                           "supported": n, "assets": assets}
+                tmp = LIGHT_IDX + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False, indent=1)
+                os.replace(tmp, LIGHT_IDX)
+                return self._send(200, {"ok": True, "n": n,
+                                        "total": len(assets)})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:300]})
+
+        if u.path in ('/api/taskclip/inspect','/api/taskclip/start'):
+            try:
+                import clip_task_api as _tc
+                body=self._body()
+                if not isinstance(body,dict): return self._send(400, {'ok':False,'error':'参数无效'})
+                result=_tc.inspect(body.get('path'),body.get('module') or 'obj') if u.path.endswith('/inspect') else _tc.start(body)
+                return self._send(200, result)
+            except (ValueError, OSError, KeyError) as e: return self._send(400, {'ok':False,'error':str(e)[:300]})
+            except Exception as e: return self._send(500, {'ok':False,'error':str(e)[:300]})
+
+        if u.path == '/api/studio/v2/image3d-submit':
+            try:
+                if TOOLS_DIR not in sys.path: sys.path.insert(0, TOOLS_DIR)
+                import studio_image3d
+                n=int(self.headers.get('Content-Length') or 0)
+                if n <= 0 or n > 20*1024*1024: raise ValueError('图片为空或超过 20 MB')
+                return self._send(200, studio_image3d.submit(self.rfile.read(n)))
+            except Exception as e:
+                return self._send(400, {'ok':False, 'error':str(e)[:500]})
+
+        if u.path in ('/api/studio/v2/2d-upload','/api/studio/v2/2d-publish'):
+            try:
+                import sys as _studio_sys
+                if TOOLS_DIR not in _studio_sys.path: _studio_sys.path.insert(0, TOOLS_DIR)
+                from studio_2d import upload as _upload2d, publish as _publish2d
+                n=int(self.headers.get('Content-Length') or 0)
+                if n<=0 or n>30*1024*1024: return self._send(400,{'ok':False,'error':'文件为空或超过 30 MB'})
+                raw=self.rfile.read(n)
+                if u.path.endswith('/2d-upload'):
+                    result=_upload2d(raw,(q.get('module') or [''])[0])
+                else:
+                    result=_publish2d(json.loads(raw.decode('utf-8')))
+                return self._send(200,result)
+            except Exception as e:
+                return self._send(400,{'ok':False,'error':str(e)[:800]})
+
+        if u.path in ('/api/studio/v2/upload','/api/studio/v2/preview','/api/studio/v2/publish'):
+            try:
+                import sys as _studio_sys
+                if TOOLS_DIR not in _studio_sys.path: _studio_sys.path.insert(0, TOOLS_DIR)
+                from studio_safe import upload, preview, publish
+                n=int(self.headers.get('Content-Length') or 0)
+                if n <= 0 or n > 300*1024*1024:
+                    return self._send(400,{'ok':False,'error':'文件为空或超过 300 MB'})
+                raw=self.rfile.read(n)
+                if u.path.endswith('/upload'):
+                    result=upload(raw)
+                else:
+                    body=json.loads(raw.decode('utf-8'))
+                    result=preview(body) if u.path.endswith('/preview') else publish(body)
+                return self._send(200,result)
+            except Exception as e:
+                return self._send(400,{'ok':False,'error':str(e)[:800]})
+
+        # -------- TO-LABEL-EXPORT-API --------
+        if u.path == "/api/to_label/export":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n).decode("utf-8")) \
+                    if n else {}
+            except Exception as e:
+                return self._send(400, {"ok": False,
+                                        "error": "bad json: %s" % e})
+
+            mod = str(body.get("module") or "").lower()
+            items = body.get("items") or []
+            clip = str(body.get("clip") or "").strip()
+            ts = str(body.get("timestamp") or "").strip() or "sim"
+            extra = body.get("extra") or {}
+            root = "/mnt/Data_Platform/zhj_datasim"
+            if not os.path.isdir(root):
+                return self._send(500, {"ok": False,
+                                        "error": "网盘未挂载: %s" % root})
+
+            try:
+                sys.path.insert(0, "/opt/ue5_synth/tools")
+                if mod == "obj":
+                    from export_to_label import (build_xml, write_pretty,
+                                                 build_objects_from_items)
+                    out = os.path.join(root, "OBJ", clip or "sim_clip")
+                    os.makedirs(out, exist_ok=True)
+                    objs = build_objects_from_items({"objects": items})
+                    ego = extra.get("ego") or {
+                        "wx": 0.0, "wy": 0.0, "wz": 0.0, "roll": 0.0,
+                        "pitch": 0.0, "yaw": 0.0, "qx": 0.0,
+                        "qy": 0.0, "qz": 0.0, "qw": 1.0}
+                    K = extra.get("K") or [1319.71, 0.0, 953.25,
+                                           0.0, 1319.36, 540.01,
+                                           0.0, 0.0, 1.0]
+                    el = build_xml(ego, K, [0.0] * 8,
+                                   [1.5707963, 0.0, 0.0],
+                                   [0.0, 1.5, 1.2], objs)
+                    fp = os.path.join(out, "%s.xml" % ts)
+                    write_pretty(el, fp)
+                    open(os.path.join(out, "%s_ctrl.txt" % ts),
+                         "w").close()
+                    return self._send(200, {"ok": True, "path": fp,
+                                            "n": len(objs),
+                                            "module": "obj"})
+
+                if mod == "tsr":
+                    from export_tsr_gnd import export_tsr
+                    out = os.path.join(root, "TSR", clip or "sim_clip")
+                    os.makedirs(out, exist_ok=True)
+                    tmp = "/tmp/_tl_tsr_%s.json" % ts
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump({"objects": items}, f,
+                                  ensure_ascii=False)
+                    fp = export_tsr(tmp, out, ts)
+                    return self._send(200, {"ok": True, "path": fp,
+                                            "n": len(items),
+                                            "module": "tsr"})
+
+                if mod == "gnd":
+                    from export_tsr_gnd import (export_gnd,
+                                                validate_seg_lane)
+                    out = os.path.join(root, "GND")
+                    os.makedirs(out, exist_ok=True)
+                    rd = export_gnd(extra.get("sim_jpg"),
+                                    extra.get("orig_jpg"),
+                                    extra.get("seg_png"),
+                                    out, ts, extra.get("yaml_src"))
+                    pok = None
+                    if extra.get("seg_png"):
+                        ok, _ = validate_seg_lane(
+                            os.path.join(rd, "seg_lane", "%s.png" % ts))
+                        pok = ok
+                    return self._send(200, {"ok": True, "path": rd,
+                                            "palette_ok": pok,
+                                            "module": "gnd"})
+
+                return self._send(400, {"ok": False,
+                                        "error": "unknown module: %s" % mod})
+            except Exception as e:
+                import traceback
+                return self._send(500, {
+                    "ok": False, "error": str(e),
+                    "trace": traceback.format_exc()[:800]})
+
+        # -------- TSR-RENDER-API --------
+        if u.path == "/api/tsr/render":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n).decode("utf-8")) \
+                    if n else {}
+            except Exception as e:
+                return self._send(400, {"ok": False,
+                                        "error": "bad json: %s" % e})
+            batch = str(body.get("batch") or "")
+            clip = str(body.get("clip") or "")
+            params = body.get("params") or {}
+            spec = body.get("spec") or {}
+            if not (batch and clip):
+                return self._send(400, {"ok": False,
+                                        "error": "missing batch/clip"})
+            # 把指定牌信息合并进 params
+            if spec.get("cls"):
+                params["spec_sign"] = spec
+                params["mode"] = "spec"
+            try:
+                jid = _start_render_job("tsr", batch, clip, params)
+                return self._send(202, {"ok": True, "job": jid})
+            except Exception as e:
+                return self._send(500, {"ok": False,
+                                        "error": str(e)[:200]})
+
+        # -------- STUDIO-POST-API: 素材工坊 POST 接口 --------
+        if u.path == "/api/studio/upload":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n) if n else b""
+                if not raw:
+                    return self._send(400, {"ok": False, "error": "empty body"})
+                qs = parse_qs(u.query or "")
+                uid = (qs.get("uid") or [""])[0].strip()
+                if not uid:
+                    import time as _t
+                    uid = "ext_%d" % int(_t.time())
+                safe = "".join(c for c in uid
+                               if c.isalnum() or c in "_-")[:64]
+                if not safe:
+                    return self._send(400, {"ok": False, "error": "bad uid"})
+                dst_dir = os.path.join(RAW_EXTERNAL, safe)
+                os.makedirs(dst_dir, exist_ok=True)
+                dst = os.path.join(dst_dir, "mesh.glb")
+                with open(dst, "wb") as f:
+                    f.write(raw)
+                return self._send(200, {"ok": True, "uid": safe,
+                                        "path": dst, "bytes": len(raw)})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:200]})
+
+        if u.path == "/api/studio/canonicalize":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    body = {}
+                uid = str(body.get("uid") or "").strip()
+                cls = str(body.get("cls") or "car").strip()
+                yaw = float(body.get("yaw") or 0.0)
+                length = body.get("length")
+                write_index = bool(body.get("write_index"))
+                if not uid:
+                    return self._send(400, {"ok": False, "error": "missing uid"})
+                src = os.path.join(RAW_EXTERNAL, uid, "mesh.glb")
+                if not os.path.isfile(src):
+                    return self._send(404, {"ok": False, "error": "glb not uploaded"})
+                out_fp = os.path.join(CANON_DIR, uid + ".glb")
+                meta_fp = os.path.join(RAW_EXTERNAL, uid, "meta.json")
+                cmd = [BLENDER, "--background", "--python",
+                       os.path.join(TOOLS_DIR, "merge_ingest.py"), "--",
+                       "--src", src, "--out", out_fp, "--meta", meta_fp,
+                       "--uid", uid, "--class", cls, "--yaw", str(yaw)]
+                if length is not None:
+                    cmd += ["--length", str(float(length))]
+                # INDEX-PASS-FIX: 传 --index 才会真写索引
+                if not write_index:
+                    cmd += ["--dry"]
+                else:
+                    cmd += ["--index", OBJ3D_INDEX]
+                import subprocess as _sp
+                r = _sp.run(cmd, capture_output=True, text=True, timeout=600)
+                out = (r.stdout or "") + (r.stderr or "")
+                lwh, min_z = None, None
+                for ln in out.split(chr(10)):
+                    if "LWH=" in ln:
+                        try:
+                            seg = ln.split("LWH=")[1]
+                            nums = seg.split(")")[0].strip("(")
+                            a, b, c = [float(x) for x in nums.split(",")]
+                            lwh = [a, b, c]
+                        except Exception:
+                            pass
+                    if "min_z=" in ln:
+                        try:
+                            min_z = float(ln.split("min_z=")[1].split()[0])
+                        except Exception:
+                            pass
+                ok = r.returncode == 0 and lwh is not None
+
+                # STUDIO-FULL-PIPE: 入库时渲染缩略图 + 写完整元数据
+                thumb = None
+                if ok:
+                    try:
+                        thumb = os.path.join(CANON_DIR, uid + ".png")
+                        # THUMB-ALWAYS-RENDER: 每次都重渲染（预览要反映新朝向）
+                        if True:
+                            import subprocess as _sp2
+                            _sp2.run(
+                                [BLENDER, "--background", "--python",
+                                 os.path.join(TOOLS_DIR, "render_thumb.py"),
+                                 "--", out_fp, thumb, "400"],
+                                capture_output=True, text=True, timeout=300)
+                        if not os.path.isfile(thumb):
+                            thumb = None
+                    except Exception:
+                        thumb = None
+
+                # 写详细元数据（无论 dry 与否都记录）
+                meta_full = None
+                if ok:
+                    try:
+                        import json as _j2
+                        import time as _t2
+                        _mf = {}
+                        if os.path.isfile(meta_fp):
+                            _mf = _j2.load(open(meta_fp, encoding="utf-8"))
+                        _mf.update({
+                            "uid": uid,
+                            "true_class": cls,
+                            "source": str(body.get("source") or ""),
+                            "license": str(body.get("license") or ""),
+                            "author": str(body.get("author") or ""),
+                            "note": str(body.get("note") or ""),
+                            "thumb": thumb,
+                            "indexed": bool(write_index),
+                            "updated_at": _t2.strftime(
+                                "%Y-%m-%d %H:%M:%S"),
+                        })
+                        # 几何精度信息
+                        try:
+                            # TRIMESH-VENV: 服务器 python3 无 trimesh，用 venv
+                            try:
+                                import sys as _sy
+                                import subprocess as _sp3
+                            except Exception:
+                                _sp3 = None
+                            _code = (
+                                "import trimesh,json,sys;"
+                                "m=trimesh.load(sys.argv[1]);"
+                                "g=getattr(m,'geometry',None) or {};"
+                                "nv=sum(len(x.vertices) for x in g.values()) if g else len(m.vertices);"
+                                "nf=sum(len(x.faces) for x in g.values()) if g else len(m.faces);"
+                                "print(json.dumps({'v':int(nv),'f':int(nf)}))")
+                            _r3 = _sp3.run(
+                                ["/opt/ad_mining/venv/bin/python", "-c",
+                                 _code, out_fp],
+                                capture_output=True, text=True, timeout=120)
+                            import json as _j3
+                            _st = _j3.loads((_r3.stdout or "{}").strip()
+                                            .split(chr(10))[-1] or "{}")
+                            if _st.get("v"):
+                                _mf["n_vertices"] = _st["v"]
+                                _mf["n_faces"] = _st["f"]
+                        except Exception as _e3:
+                            _mf["mesh_stat_err"] = str(_e3)[:80]
+                        # TRY-RESTORE: 已用 venv 子进程统计，删除旧块
+                        _mf["file_mb"] = round(
+                            os.path.getsize(out_fp) / 1048576.0, 2)
+                        os.makedirs(os.path.dirname(meta_fp),
+                                    exist_ok=True)
+                        with open(meta_fp, "w", encoding="utf-8") as _f:
+                            _j2.dump(_mf, _f, indent=2, ensure_ascii=False)
+                        meta_full = _mf
+                    except Exception:
+                        meta_full = None
+
+                return self._send(200 if ok else 500, {
+                    "ok": ok, "uid": uid, "cls": cls,
+                    "lwh": lwh, "min_z": min_z,
+                    "out": out_fp if ok else None,
+                    "thumb": thumb,
+                    "meta": meta_full,
+                    "dry": not write_index,
+                    "log": out[-800:] if not ok else "",
+                })
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)[:300]})
 
         # -------- ASSET UPLOAD --------
         if u.path in ("/api/assets/upload", "/api/assets/delete"):
@@ -2925,17 +4136,45 @@ class H(BaseHTTPRequestHandler):
                     kind = body.get("kind") or "real"
                     if not (key and fn):
                         return self._send(400, {"ok": False, "error": "bad"})
+
+                    # DEL-CANON-SUPPORT: canonical / obs3d 走独立分支
+                    if kind in ("canon3d", "obs3d") or key.startswith("CANON/") \
+                            or key.startswith("OBS/"):
+                        return self._delete_canonical(key, fn)
+
                     if "/" in key or ".." in key or "/" in fn or ".." in fn:
                         return self._send(400, {"ok": False, "error": "bad path"})
                     if module == "gnd":
                         fp = os.path.join("/data/gnd_assets", key, fn)
                     else:
-                        root = ("/data/obj_assets_real" if kind == "real"
-                                else "/data/obj_assets")
+                        # DEL-KIND-FIX: 与 /api/assets/image 的映射保持一致
+                        # pc → obj_assets_pc / real → obj_assets_real
+                        # proc → obj_assets_v2 / 其他 → obj_assets
+                        if kind == "pc":
+                            root = "/data/obj_assets_pc"
+                        elif kind == "real":
+                            root = "/data/obj_assets_real"
+                        elif kind == "proc":
+                            root = "/data/obj_assets_v2"
+                        else:
+                            root = "/data/obj_assets"
                         fp = os.path.join(root, key, fn)
-                    if os.path.isfile(fp):
-                        os.remove(fp)
-                        return self._send(200, {"ok": True, "deleted": fp})
+                    # DEL-PAIR-FIX: 素材是 <stem>.png + <stem>.json 成对存在
+                    # 前端只传一个文件名，需删除同 stem 的所有关联文件
+                    import glob as _g
+                    _stem, _ext = os.path.splitext(fn)
+                    _base = os.path.join(os.path.dirname(fp), _stem)
+                    _hits = _g.glob(_base + ".*")
+                    _deleted = []
+                    for _p2 in _hits:
+                        try:
+                            os.remove(_p2)
+                            _deleted.append(_p2)
+                        except Exception:
+                            pass
+                    if _deleted:
+                        return self._send(200, {"ok": True,
+                                                "deleted": _deleted})
                     return self._send(404, {"ok": False, "error": "not found"})
 
                 # multipart 上传
@@ -3945,83 +5184,13 @@ class H(BaseHTTPRequestHandler):
 
         # [TSR-API] 批量替换
         if u.path == "/api/tsr/walk":
-            # 遍历式批量：递归扫描目录树，自动挑有标牌的帧
-            body = p
-            root = normalize_net_path(str(body.get("root") or "").strip())
-            if not root or not os.path.isdir(root):
-                hint = ""
-                mnt = os.path.dirname(root)
-                while mnt and mnt != "/" and not os.path.isdir(mnt):
-                    mnt = os.path.dirname(mnt)
-                if mnt and os.path.isdir(mnt):
-                    hint = "。可用的上级目录：" + mnt
-                return self._send(400, {"error": "目录不存在：" + root + hint,
-                                        "raw": str(body.get("root") or "")})
-            country = str(body.get("country") or "BR")
-            limit = int(body.get("limit") or 1000)
-            pin_class = str(body.get("pin_class") or "")
-            pin_material = str(body.get("pin_material") or "")
-            min_sign = int(body.get("min_sign") or 40)
-            conf = float(body.get("conf") or 0.30)
-            export_dir = str(body.get("export_dir") or "").strip()
-            tag = time.strftime("%Y%m%d_%H%M%S")
-            sub = country + "_" + tag
-            # 提前记下任务参数（供任务中心展示）
-            _summary_meta = {
-                "module": str(body.get("module") or "TSR").upper(),
-                "country": country,
-                "source_root": root,
-                "pin_class": pin_class,
-                "pin_material": pin_material,
-                "min_sign": min_sign,
-                "conf": conf,
-                "limit": limit,
-                "type": "batch" if export_dir else "render",
-                "created": tag,
-            }
-            if export_dir:
-                # 交付导出：写到网盘共享目录
-                base = normalize_net_path(export_dir)
-                out_dir = os.path.join(base, sub)
-                os.makedirs(out_dir, exist_ok=True)
-                prog = os.path.join(out_dir, "progress.json")
-                # 进度文件也放共享目录，便于轮询
-                TSR_OUT_DIR_IS_SHARED = True
-            else:
-                out_dir = os.path.join(TSR_OUT_DIR, "walk_" + sub)
-                prog = os.path.join(TSR_OUT_DIR, "walk_%s_progress.json" % sub)
-            cmd = [ALGO_PYTHON, os.path.join(TOOLS_DIR, "batch_walk.py"),
-                   "--images", root, "--country", country,
-                   "--out", out_dir, "--limit", str(limit),
-                   "--min-sign", str(min_sign), "--conf", str(conf),
-                   "--signs-dir", load_config().get("tsr_library") or DEFAULT_TSR_LIBRARY,
-                   "--jobs-progress", prog]
-            if body.get("vary_class", True):
-                cmd.append("--vary-class")
-            # 指定标牌：只仿这一张
-            if pin_class:
-                cmd += ["--pin-class", pin_class]
-            if pin_material:
-                cmd += ["--pin-material", pin_material]
-            if body.get("grow") is not None:
-                try:
-                    cmd += ["--grow", str(float(body["grow"]))]
-                except (TypeError, ValueError):
-                    pass
-            for k in ("bright_gain", "haze_gain", "contrast_gain",
-                      "satur_keep", "feather_ratio"):
-                v = body.get(k)
-                if v is not None:
-                    try:
-                        cmd += ["--" + k.replace("_", "-"), str(float(v))]
-                    except (TypeError, ValueError):
-                        pass
-            logf = os.path.join(TSR_OUT_DIR, "walk_%s.log" % tag)
-            lf = open(logf, "w")
-            subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                             start_new_session=True)
-            return self._send(200, {"ok": True, "job": tag,
-                                    "out": out_dir, "progress": prog, "log": logf})
+            try:
+                import clip_task_api as _tc
+                if not isinstance(p,dict):return self._send(400,{'ok':False,'error':'参数无效'})
+                root=normalize_net_path(str(p.get('root') or '').strip())
+                return self._send(200,_tc.start_tsr(p,root))
+            except (ValueError,OSError,KeyError) as e:return self._send(400,{'ok':False,'error':str(e)[:300]})
+            except Exception as e:return self._send(500,{'ok':False,'error':str(e)[:300]})
 
         if u.path == "/api/tsr/batch":
             body = p
