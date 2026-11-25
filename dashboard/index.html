@@ -10746,6 +10746,8 @@ pipe = SignRealismPipeline(cfg)`;
 
       var pr = PG[k] || {};
       var ph = pr.phase || t.phase || 'unknown';
+      var reason = String(pr.error || t.error || '未记录详细原因，请查看任务日志');
+      var reasonEsc = reason.replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]});
       var tot = pr.total || d.total || 0;
       var dn = pr.done || 0;
       var pc = ph === 'done' ? 100 : (ph === 'unknown' ? 0 : ph === 'stopped' ? 0 :
@@ -10768,7 +10770,7 @@ pipe = SignRealismPipeline(cfg)`;
         '<td class="jt-time">'+fd(st)+'</td>' +
         '<td class="jt-dur">'+fdu(du)+'</td>' +
         '<td class="jt-prog"><div class="jt-bar"><i style="width:'+pc+'%;background:'+pcC+'"></i></div>' +
-          '<em style="color:'+pcC+'">'+(ph==='unknown'?'待获取':pc+'%')+'</em></td>' +
+          '<em style="color:'+pcC+'">'+(ph==='unknown'?'待获取':ph==='stopped'?'失败':pc+'%')+'</em>'+(ph==='stopped'?'<br><button class="jt-error" data-job="'+k+'" title="'+reasonEsc+'" style="color:#fca5a5;background:none;border:0;padding:0;cursor:pointer">失败原因</button>':'')+'</td>' +
         '<td class="jt-out">'+n+unit+'</td>' +
         '<td class="jt-path" title="'+String(path || '-').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})+'">'+String(path || '-').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})+'</td>' +
         '<td class="jt-act">' +
@@ -10855,6 +10857,7 @@ pipe = SignRealismPipeline(cfg)`;
         }, 200);
       };
     });
+    Array.prototype.forEach.call(box.querySelectorAll('.jt-error'),function(b){b.onclick=function(){var id=b.dataset.job,p=(window.__PROG_CACHE||{})[id]||{},t=(window.__JOB_REG||{})[id]||{};alert('任务：'+id+'\n失败原因：'+(p.error||t.error||'未记录详细原因，请查看任务日志'));};});
     Array.prototype.forEach.call(box.querySelectorAll('.jt-del'), function(b){
       b.onclick = function(e){
         e.preventDefault(); e.stopPropagation();
@@ -17448,9 +17451,9 @@ window.ThumbDropdown = function(container, opts){
         if(!reg.versions && t.versions){reg.versions=t.versions;changed=true;}
         var phase=t.state==='failed'?'stopped':t.state, n=Number(t.done)||0, output=(module==='tsr'?Number(t.output_count)||0:n);
         var prev=window.__PROG_CACHE[t.job];
-        if(!prev||prev.phase!==phase||prev.done!==n||prev.total!==t.frames||reg.n!==output)changed=true;
-        reg.phase=phase;reg.n=output;
-        window.__PROG_CACHE[t.job]={phase:phase,total:Number(t.frames)||0,done:n};
+        if(!prev||prev.phase!==phase||prev.done!==n||prev.total!==t.frames||reg.n!==output||reg.error!==(t.error||''))changed=true;
+        reg.phase=phase;reg.n=output;reg.error=t.error||'';
+        window.__PROG_CACHE[t.job]={phase:phase,total:Number(t.frames)||0,done:n,error:t.error||''};
       });
       try{localStorage.setItem('psim.gnd.imported',JSON.stringify(seen));if(changed)localStorage.setItem('psim.jobs',JSON.stringify(window.__JOB_REG));}catch(e){}
       if(changed&&window.__jtRender)window.__jtRender();

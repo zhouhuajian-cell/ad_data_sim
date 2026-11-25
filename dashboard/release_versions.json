@@ -3,8 +3,8 @@
   "baseline_recorded_at": "2026-11-24",
   "note": "首次建立版本基线；不追溯此前版本",
   "versions": {
-    "platform": "1.1.0",
-    "tsr": "1.0.0",
+    "platform": "1.1.1",
+    "tsr": "1.0.1",
     "obj": "1.1.0",
     "gnd": "1.0.0"
   },
@@ -26,6 +26,18 @@
       "component": "platform",
       "version": "1.1.0",
       "summary": "obj_multitrack_task_controls"
+    },
+    {
+      "date": "2026-11-25T09:46:24+08:00",
+      "component": "platform",
+      "version": "1.1.1",
+      "summary": "task_failure_reasons"
+    },
+    {
+      "date": "2026-11-25T09:46:24+08:00",
+      "component": "tsr",
+      "version": "1.0.1",
+      "summary": "curated_batch_preview"
     }
   ]
 }

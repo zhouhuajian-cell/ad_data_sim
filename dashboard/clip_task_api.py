@@ -201,7 +201,16 @@ def start_tsr(body, source_path):
 def _last_error(out):
     try:
         with open(os.path.join(out,'run.log'),encoding='utf8',errors='replace') as f:
-            return '\n'.join(f.read().splitlines()[-5:])[-700:]
+            lines=f.read().splitlines()
+        if not lines:return '执行日志为空，无法确定失败原因'
+        for line in reversed(lines):
+            text=line.strip()
+            if re.match(r'^(?:[\w.]+(?:Error|Exception)|Exception):',text):
+                if 'unable to determine local ground height' in text:return '点云地面拟合失败：无法确定局部地面高度（'+text+'）'
+                if 'synthetic targets overlap excessively in image space' in text:return '虚拟目标画面重叠过大，已拦截（'+text+'）'
+                if '没有通过质检的合成图' in text:return text
+                return text[-700:]
+        return '\n'.join(lines[-5:])[-700:]
     except OSError: return '渲染进程已退出，请检查服务日志'
 
 def status(job):
@@ -238,7 +247,7 @@ def list_gnd_tasks(module='gnd'):
             v=status(job)
             result.append({'job':job,'state':v['state'],'frames':v['frames'],'done':v['done'],
                 'created':meta.get('created'),'country':meta.get('country',''),
-                'mode':meta.get('marking_mode','add'),'source':meta.get('source',''), 'batch':v['batch'], 'clip':v['clip'], 'module':module,'versions':meta.get('versions')})
+                'mode':meta.get('marking_mode','add'),'source':meta.get('source',''), 'batch':v['batch'], 'clip':v['clip'], 'module':module,'versions':meta.get('versions'),'error':v.get('error')})
         except (OSError,ValueError,KeyError,TypeError):
             continue
     return result
@@ -259,10 +268,15 @@ def list_tsr_tasks():
                 try:
                     with open('/proc/%d/stat'%pid) as f: alive=f.read().split(') ',1)[1][:1]!='Z'
                 except OSError: pass
-            state='done' if phase=='done' else ('running' if alive else 'failed')
+            empty=phase=='done' and int(v.get('ok') or 0)==0
+            state='failed' if phase=='failed' or empty else ('done' if phase=='done' else ('running' if alive else 'failed'))
+            error=None
+            if state=='failed':
+                if empty:error='扫描完成但没有生成合成图：无标牌 %s，过小或不匹配 %s，渲染失败 %s'%(v.get('skip_no_sign',0),v.get('skip_small',0),v.get('fail',0))
+                else:error=v.get('error') or _last_error(os.path.dirname(mp))
             result.append({'job':job,'state':state,'frames':v.get('total') or meta.get('frames',0),
               'done':v.get('done',0),'created':meta.get('created'),'country':meta.get('country',''),
-              'source':meta.get('source',''),'module':'tsr','mode':'pipeline6_preview','output_count':v.get('ok',0),'versions':meta.get('versions')})
+              'source':meta.get('source',''),'module':'tsr','mode':'pipeline6_preview','output_count':v.get('ok',0),'versions':meta.get('versions'),'error':error})
         except (OSError,ValueError,KeyError,TypeError): continue
     return result
 
