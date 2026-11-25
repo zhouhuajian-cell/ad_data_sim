@@ -1851,55 +1851,37 @@ msg;
       });
 
       // Left Nav
-      // TSR-CLIP-LOAD-V2: 用 /api/real/clips（与 OBJ 同源）
+      // TSR uses its own task records, never OBJ/GND batch directories.
       (function(){
         var bs = document.getElementById('tsrBatch2');
         if (!bs) return;
         bs.innerHTML = '<option>加载中…</option>';
-        fetch('/api/real/clips', {cache:'no-store'})
+        fetch('/api/taskclip/list?module=tsr', {cache:'no-store'})
           .then(function(r){ return r.json(); })
           .then(function(d){
-            var list = (d && d.clips) || [];
-            if (!list.length) { bs.innerHTML = '<option>无数据</option>'; return; }
-            bs.innerHTML = list.map(function(c){
-              var n = c.name || c;
-              var nf = c.frames ? (' (' + c.frames + '帧)') : '';
-              return '<option value="' + n + '">' + n + nf + '</option>';
-            }).join('');
+            var list = ((d && d.tasks) || []).filter(function(t){return t.state==='done' && Number(t.output_count)>0;});
+            bs.replaceChildren();
+            list.forEach(function(t){var o=document.createElement('option');o.value=t.job;o.textContent=t.job+' ('+t.output_count+' 张)';bs.appendChild(o);});
+            if (!list.length) { bs.innerHTML = '<option value="">暂无TSR结果</option>'; return; }
             var cnt = document.getElementById('tsrClipCount');
             if (cnt) cnt.textContent = list.length + ' 个';
-            bs.onchange = function(){ loadTsrFrames(this.value); };
-            loadTsrFrames(bs.value);
-            window.__tsrBatch = bs.value;
+            bs.onchange = function(){ loadTsrTask(this.value); };
+            var attempts=0;function start(){if(window.__tsrLoadResult)loadTsrTask(bs.value);else if(++attempts<30)setTimeout(start,100);}
+            start();
           })
           .catch(function(e){
             bs.innerHTML = '<option>加载失败</option>';
           });
-        function loadTsrFrames(batch){
+        async function loadTsrTask(job){
           var fs = document.getElementById('tsrFrame2');
-          if (!fs) return;
-          fs.innerHTML = '<option>加载中…</option>';
-          fetch('/api/real/clips/frames?batch=' + encodeURIComponent(batch),
-                {cache:'no-store'})
-            .then(function(r){ return r.json(); })
-            .then(function(d){
-              var fr = (d && d.frames) || (d && d.clips) || [];
-              if (!fr.length) {
-                // 退化：直接列 clip 子目录
-                fs.innerHTML = '<option>' + batch + '</option>';
-                return;
-              }
-              fs.innerHTML = fr.map(function(f){
-                var n = (typeof f === 'string') ? f : (f.name || f.clip || '');
-                return '<option value="' + n + '">' + n + '</option>';
-              }).join('');
-              var cnt = document.getElementById('tsrFrameCount');
-              if (cnt) cnt.textContent = fr.length + ' 可播放';
-              window.__tsrFrame = fs.value;
-            })
-            .catch(function(e){
-              fs.innerHTML = '<option>加载失败</option>';
-            });
+          if (!fs || !job || !window.__tsrLoadResult)return;
+          fs.innerHTML='<option value="">加载中…</option>';
+          var items=await window.__tsrLoadResult(job);
+          if(bs.value!==job)return;
+          fs.replaceChildren();(items||[]).forEach(function(it,i){var o=document.createElement('option');o.value=String(i);o.textContent=it.stem;fs.appendChild(o);});
+          if(!fs.options.length)fs.innerHTML='<option value="">暂无结果</option>';
+          var cnt=document.getElementById('tsrFrameCount');if(cnt)cnt.textContent=(items||[]).length+' 可播放';
+          fs.onchange=function(){if(window.__tsrSelectFrame)window.__tsrSelectFrame(Number(this.value));};
         }
       })();
 
@@ -3331,6 +3313,7 @@ pipe = SignRealismPipeline(cfg)`;
   });
 
   async function loadResult(job){
+    var loadSeq=window.__tsrLoadSequence=(window.__tsrLoadSequence||0)+1;
     R.job = job;
     if(job){
       R.items=[];R.dir=null;
@@ -3340,8 +3323,13 @@ pipe = SignRealismPipeline(cfg)`;
         var info=await detail.json();if(!info.dir)throw Error('该任务没有仿真结果目录');
         var gallery=await fetch('/api/tsr/gallery?dir='+encodeURIComponent(info.dir)+'&limit=100',{cache:'no-store'});
         if(!gallery.ok)throw Error('任务结果目录不可读取');var result=await gallery.json();
+        if(loadSeq!==window.__tsrLoadSequence || (window.__MODFILTER && window.__MODFILTER!=='tsr'))return [];
         R.dir=info.dir;R.items=(result.items||[]).filter(function(x){return !!x.composed});
         if(!R.items.length){txt('wrCount','该任务没有可显示的仿真结果');return [];}
+        var bs=document.getElementById('tsrBatch2'),fs=document.getElementById('tsrFrame2');
+        if(bs&&Array.from(bs.options).some(function(o){return o.value===job;}))bs.value=job;
+        if(fs){fs.replaceChildren();R.items.forEach(function(it,i){var opt=document.createElement('option');opt.value=String(i);opt.textContent=it.stem;fs.appendChild(opt);});fs.onchange=function(){showInViewport(Number(this.value));};}
+        txt('tsrFrameCount',R.items.length+' 可播放');
         renderResult();return R.items;
       }catch(e){txt('wrCount','加载任务失败：'+e.message);return [];}
     }
@@ -3442,19 +3430,21 @@ pipe = SignRealismPipeline(cfg)`;
     // walk 产出的标注里带 source_path，用 /api/tsr/src?dir&stem 取原图
     // TSR-MAIN-CB: 加时间戳
     origUrl = '/api/tsr/src?dir=' + encodeURIComponent(dir) +
-              '&stem=' + encodeURIComponent(it.stem) + '&max=1600' +
-              '&t=' + Date.now();
+              '&stem=' + encodeURIComponent(it.stem) + '&max=1600';
     simUrl = '/api/tsr/result?dir=' + encodeURIComponent(dir) +
-             '&file=' + encodeURIComponent(it.composed) + '&max=1600' +
-             '&t=' + Date.now();
+             '&file=' + encodeURIComponent(it.composed) + '&max=1600';
 
     // 用 Canvas 绘制（复用 BBox/ROI/缩放/空格）
     try {
       var obj = (it.objects && it.objects[0]) || {};
       var bboxInfo = obj.bbox ? {
         bbox: obj.bbox,
-        cls: obj['class'] || '',
-        conf: obj.score != null ? obj.score : null
+        origBbox: Array.isArray(obj.source_bbox) ? obj.source_bbox : null,
+        refW: it.width || 1920, refH: it.height || 1080,
+        cls: obj.orig_class || obj.detected_as || '原始类别未提供',
+        simCls: obj['class'] || '素材类别未提供',
+        conf: obj.orig_conf != null ? obj.orig_conf : null,
+        simConf: null
       } : null;
       if (window.__canvasSetImages) {
         await window.__canvasSetImages(origUrl, simUrl, bboxInfo);
@@ -3566,6 +3556,7 @@ pipe = SignRealismPipeline(cfg)`;
   } else { boot(); }
 
   window.__WALKRESULT = R;
+  window.__tsrSelectFrame = showInViewport;
   window.__loadWalkResult = loadResult;
 })();
 
@@ -3947,6 +3938,7 @@ pipe = SignRealismPipeline(cfg)`;
     } catch(e){
       setStatus('失败：' + e.message, true);
     } finally {
+      if(window.__syncGndTasks)window.__syncGndTasks();
       P.busy = false;
       if (P.pending) { P.pending = false; setTimeout(rerender, 300); }
     }
@@ -4245,13 +4237,17 @@ pipe = SignRealismPipeline(cfg)`;
   function $(id){ return document.getElementById(id); }
 
   /* 加载图片 */
+  var tsrImages=new Map(), tsrPending=new Map();
   function loadImg(src){
-    return new Promise(function(res, rej){
+    if(tsrImages.has(src))return Promise.resolve(tsrImages.get(src));
+    if(tsrPending.has(src))return tsrPending.get(src);
+    var pending=new Promise(function(res, rej){
       var im = new Image();
-      im.onload = function(){ res(im); };
-      im.onerror = function(){ rej(new Error('加载失败')); };
+      im.onload = function(){ tsrPending.delete(src);tsrImages.set(src,im);if(tsrImages.size>24)tsrImages.delete(tsrImages.keys().next().value);res(im); };
+      im.onerror = function(){ tsrPending.delete(src);rej(new Error('加载失败')); };
       im.src = src;
     });
+    tsrPending.set(src,pending);return pending;
   }
 
   /* 把图片按 contain 方式画到 canvas */
@@ -4398,10 +4394,13 @@ pipe = SignRealismPipeline(cfg)`;
   }
 
   /* 供外部调用：设置图片 */
+  var imageRequestSequence=0;
   async function setImages(origUrl, simUrl, bbox){
     try {
-      C.orig = origUrl ? await loadImg(origUrl) : null;
-      C.sim = simUrl ? await loadImg(simUrl) : null;
+      var requestId=++imageRequestSequence;
+      var loaded=await Promise.all([origUrl ? loadImg(origUrl) : null,simUrl ? loadImg(simUrl) : null]);
+      if(requestId!==imageRequestSequence || (window.__MODFILTER && window.__MODFILTER!=='tsr'))return false;
+      C.orig=loaded[0]; C.sim=loaded[1];
       // 关键：两张图分辨率不同（原图 1600x900，仿真 1920x1080），
       // 按各自尺寸缩放会导致内容错位。统一把仿真图缩到原图尺寸。
       if (C.orig && C.sim &&
@@ -4565,9 +4564,9 @@ pipe = SignRealismPipeline(cfg)`;
 
       // BBox（左右不同标签）
       var isSimCanvas = (canvas.id === 'canvasSim') && !(window.__CANVAS?.spacePressed && window.__CANVAS?.orig);
-      var bbArr = bbox && bbox.bbox ? bbox.bbox : bbox;
+      var bbArr = bbox && bbox.bbox ? (isSimCanvas ? bbox.bbox : (Object.prototype.hasOwnProperty.call(bbox,'origBbox') ? bbox.origBbox : bbox.bbox)) : bbox;
       if (showBbox && bbArr && bbArr.length === 4) {
-        var refW = 1920, refH = 1080;
+        var refW = (bbox && bbox.refW) || 1920, refH = (bbox && bbox.refH) || 1080;
         var sx = dw / refW, sy = dh / refH;
         var bx = dx + bbArr[0] * sx, by = dy + bbArr[1] * sy;
         var bw = (bbArr[2] - bbArr[0]) * sx, bh = (bbArr[3] - bbArr[1]) * sy;
@@ -4578,7 +4577,7 @@ pipe = SignRealismPipeline(cfg)`;
         var cls, conf;
         if (isSimCanvas) {
           cls = (bbox && bbox.simCls) ? bbox.simCls : ((bbox && bbox.cls) || '');
-          conf = (bbox && bbox.simConf != null) ? bbox.simConf : ((bbox && bbox.conf != null) ? bbox.conf : null);
+          conf = (bbox && bbox.simConf != null) ? bbox.simConf : null;
         } else {
           cls = (bbox && bbox.cls) ? bbox.cls : '';
           conf = (bbox && bbox.conf != null) ? bbox.conf : null;
@@ -4895,14 +4894,16 @@ pipe = SignRealismPipeline(cfg)`;
     var simUrl = '/api/tsr/result?dir=' + encodeURIComponent(PG.dir) +
                  '&file=' + encodeURIComponent(it.composed) + '&max=1600';
     // 左边：YOLO 对原牌的检测（orig_class）；右边：仿真后类别（class）
-    var origCls = obj.orig_class || obj['class'] || '';
+    var origCls = obj.orig_class || obj.detected_as || '原始类别未提供';
     var simCls = obj['class'] || '';
     var bboxInfo = obj.bbox ? {
       bbox: obj.bbox,
+      origBbox: Array.isArray(obj.source_bbox) ? obj.source_bbox : null,
+      refW: it.width || 1920, refH: it.height || 1080,
       cls: origCls,                                   // 左图标签
       simCls: simCls,                                 // 右图标签
       conf: obj.orig_conf != null ? obj.orig_conf : obj.score,
-      simConf: obj.score != null ? obj.score : null
+      simConf: null
     } : null;
     if (window.__canvasSetImages) {
       await window.__canvasSetImages(origUrl, simUrl, bboxInfo);
@@ -8244,11 +8245,13 @@ pipe = SignRealismPipeline(cfg)`;
   // SHOW-CLIP-JOB: 从任务ID精确打开 view-clip 双栏
   window.__showClipJob = async function(job, mod){
     mod = (mod || 'obj').toLowerCase();
+    var showSeq=window.__clipShowSeq=(window.__clipShowSeq||0)+1;
     try{
       // 1) 查任务拿到 batch/clip
       var r = await fetch('/api/taskclip/status?job=' + encodeURIComponent(job),
                           {cache:'no-store'});
       var v = await r.json();
+      if(showSeq!==window.__clipShowSeq)return;
       if (!v.ok) throw new Error(v.error || '查询失败');
       var batch = v.batch || '', clip = v.clip || '';
       if (!batch) throw new Error('该任务缺少批次信息');
@@ -8270,6 +8273,7 @@ pipe = SignRealismPipeline(cfg)`;
       // 4) 加载批次 + 片段
       if (!window.__loadClips || !window.__setSimSource) throw new Error('工作台尚未初始化');
       var loaded = await window.__loadClips(batch, clip);
+      if(showSeq!==window.__clipShowSeq)return;
       var player = window.__clipPlayer;
       if (!loaded || !player || player.batch !== batch || player.clip !== clip || !player.frames.length)
         throw new Error('任务片段加载失败或已切换');
@@ -9299,13 +9303,7 @@ pipe = SignRealismPipeline(cfg)`;
   // JR-INFO-FULL 定时器已关闭（JR-FINAL 接管）
 
   // 首次进入也刷
-  setInterval(function(){
-    var box = $('jrBox');
-    if (box && !box.dataset.rich) {
-      box.dataset.rich = '1';
-      render();
-    }
-  }, 1500);
+  // Legacy job-table renderer disabled: the module-aware table owns jrBox.
 
   window.__jrRender = render;
   console.log('[JOB-INFO-FULL] installed');
@@ -10389,18 +10387,7 @@ pipe = SignRealismPipeline(cfg)`;
   st.textContent = CSS;
   document.head.appendChild(st);
 
-  var lastSig = '';
-  setInterval(function(){
-    var v = $('view-tasks');
-    if (!v || getComputedStyle(v).display === 'none') return;
-    var REG = window.__JOB_REG || {};
-    var sig = Object.keys(REG).sort().join(',');
-    if (sig === lastSig && $('jrBox')) return;
-    lastSig = sig;
-    render();
-  }, 3000);
-
-  setTimeout(render, 2500);
+  // Legacy TABLE-FINAL-V2 must not overwrite the current task table.
   window.__tfRender = render;
   console.log('[TABLE-FINAL-V2] installed');
 })();
@@ -10713,19 +10700,20 @@ pipe = SignRealismPipeline(cfg)`;
       return;
     }
 
-    var D = {};
-    for (var i = 0; i < keys.length; i++) {
-      try {
-        var r = await fetch('/api/tsr/job_detail?job='+encodeURIComponent(keys[i]), {cache:'no-store'});
-        if (r.ok) D[keys[i]] = await r.json();
-      } catch(e) {}
-    }
-    if(revision!==tableRenderRevision)return;
-
     var tp = Math.max(1, Math.ceil(keys.length / PAGE.size));
     if (PAGE.p >= tp) PAGE.p = tp - 1;
     keys.sort(function(a,b){var ca=(REG[a].country||'ZZ'),cb=(REG[b].country||'ZZ');return ca.localeCompare(cb)||((REG[b].started||0)-(REG[a].started||0));});
     var page = keys.slice(PAGE.p*PAGE.size, (PAGE.p+1)*PAGE.size);
+    var D = {};
+    await Promise.all(page.map(async function(key){
+      try {
+        var cache=window.__taskDetailCache||(window.__taskDetailCache=new Map()),hit=cache.get(key);
+        if(hit&&Date.now()-hit.time<30000){D[key]=hit.data;return;}
+        var r=await fetch('/api/tsr/job_detail?job='+encodeURIComponent(key),{cache:'no-store'});
+        if(r.ok){var data=await r.json();D[key]=data;cache.set(key,{time:Date.now(),data:data});if(cache.size>100)cache.delete(cache.keys().next().value);}
+      }catch(e){}
+    }));
+    if(revision!==tableRenderRevision)return;
     var previousCountry=null;
     var rows = page.map(function(k){
       var t = REG[k] || {}, d = D[k] || {};
@@ -10834,6 +10822,9 @@ pipe = SignRealismPipeline(cfg)`;
         e.preventDefault(); e.stopPropagation();
         var job = b.dataset.job;
 
+        if (REG[job] && REG[job].manual && window.__showManualRenderJob) {
+          window.__showManualRenderJob(REG[job].manualData);return;
+        }
         // Full clip tasks must load their own batch, clip and rendered output.
         if (/^(objtask_|gndtask_)/i.test(job)) {
           if (window.__showClipJob) window.__showClipJob(job, /^gndtask_/i.test(job) ? 'gnd' : 'obj');
@@ -11370,6 +11361,13 @@ pipe = SignRealismPipeline(cfg)`;
     options=options||{};
     MOD = (m || 'tsr').toLowerCase();
     if (['tsr','obj','gnd'].indexOf(MOD) < 0) MOD = 'tsr';
+    window.__clipShowSeq=(window.__clipShowSeq||0)+1;
+    window.__MODFILTER = MOD;
+    if (MOD === 'tsr' && window.__clipPlayer) {
+      var cp=window.__clipPlayer;cp._openSeq=(cp._openSeq||0)+1;
+      cp.playing=false;if(cp.timer){clearInterval(cp.timer);cp.timer=null;}
+      cp.module='tsr';cp.lastModule='tsr';
+    }
 
     // 按钮高亮（内联样式，优先级最高）
     var MOD_COLOR = { tsr: '#1F6FEB', obj: '#22C55E', gnd: '#EAB308' };
@@ -11418,11 +11416,8 @@ pipe = SignRealismPipeline(cfg)`;
     }
 
     // TSR-AUTO-LOAD: 进 TSR 自动拉产出
-    if (MOD === 'tsr' && !options.skipAutoLoad && window.__tsrLoadResult) {
-      setTimeout(function(){
-        try { window.__tsrLoadResult(''); } catch(e){}
-      }, 300);
-    }
+    // Keep the explicitly selected TSR task; never auto-select another module's output.
+    if(!options.skipAutoLoad && window.__tsrState && !window.__tsrState.items.length){var ts=$('tsrBatch2');if(ts&&ts.value&&ts.onchange)ts.onchange();}
 
     // TSR：原有工作台
     var targetId = 'view-workbench';
@@ -11434,7 +11429,9 @@ pipe = SignRealismPipeline(cfg)`;
 
     if (target) {
       Array.prototype.forEach.call(document.querySelectorAll('.view-pane'), function(v){
-        v.style.display = (v.id === targetId) ? 'flex' : 'none';
+        var active=v.id===targetId;
+        v.classList.toggle('hidden',!active);
+        v.style.setProperty('display',active?'flex':'none','important');
       });
     } else if (window.__navShow) {
       window.__navShow('workbench');
@@ -14395,7 +14392,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     if (_pPending[url]) return _pPending[url];
     _pPending[url] = new Promise(function(res){
       var im = new Image();
-      im.onload = function(){ _pCache[url] = im; delete _pPending[url]; res(im); };
+      im.onload = function(){ _pCache[url] = im; var keys=Object.keys(_pCache);if(keys.length>24)delete _pCache[keys[0]]; delete _pPending[url]; res(im); };
       im.onerror = function(){ delete _pPending[url]; res(null); };
       im.src = url;
     });
@@ -14480,8 +14477,9 @@ LatestRequest.prototype.run = async function(fetcher, apply){
       pause();
       showFrame(parseInt(this.value, 10) || 0);
     };
-    $('cpBatch').onchange = function(){ loadClips(this.value); };
-    $('cpClip').onchange = function(){ loadFrames(P.batch, this.value); };
+    // The delegated change handler below handles both visible and hidden selects.
+    $('cpBatch').onchange = null;
+    $('cpClip').onchange = null;
     // BTN-NULL-GUARD: 该按钮已移除（顶部工具栏有 BBox）
     var _tb = $('cpToggleBBox');
     if (_tb) _tb.onclick = function(){
@@ -14496,6 +14494,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
 
   function loadClips(batch, requestedClip){
     P.batch = batch;
+    var expectedModule=P.module, expectedOpen=P._openSeq;
     // A task may point to a registered batch absent from the current dropdown.
     var batchSelect = $('cpBatch');
     if (batchSelect && batch && !Array.from(batchSelect.options).some(function(o){return o.value === batch;})) {
@@ -14522,6 +14521,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
           {cache:'no-store'})
       .then(function(r){ return r.json(); })
       .then(function(d){
+        if(P.module!==expectedModule || P._openSeq!==expectedOpen || P.batch!==batch)return false;
         var cs = d.clips || [];
         var sel = $('cpClip');
         sel.innerHTML = cs.map(function(c){
@@ -14563,11 +14563,13 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     if (_c2) _c2.style.display = 'none';
 
     P.batch = batch; P.clip = clip;
+    var expectedModule=P.module, expectedOpen=P._openSeq;
     P.loaded.t = Date.now();
     console.log('[LOAD]', batch, clip);
 
     // LATEST-REQUEST-WIRED: AbortController 防竞态
     var _applyFrames = function(d){
+      if(P.module!==expectedModule || P._openSeq!==expectedOpen || P.batch!==batch || P.clip!==clip)return;
       // ORIG-SIM-URL-FIX: 接口只给 {stem,file}，这里补 orig/sim URL
       var _raw = d.frames || [];
       P.frames = _raw.map(function(f){
@@ -14580,7 +14582,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         return Object.assign({}, f, {
           stem: st, orig: original, sim: f.sim || original,
           __needsRawProjection: /[?&]job=objtask_/.test(f.sim || ''),
-          objects: Array.isArray(f.objects) ? f.objects : []
+          objects: Array.isArray(f.objects) ? (P.simOverride ? f.objects.filter(function(o){return o.source==='real';}) : f.objects) : []
         });
       });
       var _seek = $('cpSeek');
@@ -14752,6 +14754,33 @@ LatestRequest.prototype.run = async function(fetcher, apply){
   // LOADCLIPS-EXPOSED: 供其他 IIFE 调用
   window.__loadClips = loadClips;
   window.__loadFrames = loadFrames;
+  window.__showManualRenderJob = async function(rec){
+    if(!rec)return;
+    if(rec.state!=='done'){alert(rec.state==='failed'?'任务失败：'+(rec.err||'请查看日志'):'任务仍在排队或渲染中');return;}
+    try{
+      if(window.__navShow2)window.__navShow2('workbench');
+      if(rec.kind==='tsr'){
+        if(window.__setModule)window.__setModule('tsr',{skipAutoLoad:true});
+        var parent=(rec.parent_dir||'').split('/').pop().replace(/^walk_/,'');
+        var items=await window.__tsrLoadResult(parent),idx=items.findIndex(function(x){return x.stem===rec.stem;});
+        if(idx<0){
+          var ar=await fetch('/api/job/annotation?job='+encodeURIComponent(parent)+'&stem='+encodeURIComponent(rec.stem),{cache:'no-store'});
+          if(ar.ok){var ann=await ar.json(),state=window.__tsrState;idx=state.items.length;state.items.push({stem:rec.stem,composed:ann.image,objects:ann.objects||[],width:ann.width,height:ann.height});}
+        }
+        if(idx<0)throw Error('原任务帧不可用');
+        await window.__tsrSelectFrame(idx);if(rec.url)await window.__canvasSetSim(rec.url);return;
+      }
+      if(window.__setModule)window.__setModule(rec.kind);
+      P._openSeq=(P._openSeq||0)+1;P.module=rec.kind;P.lastModule=rec.kind;
+      P.simOverride={job:rec.output_job,suffix:rec.suffix||(rec.kind==='gnd'?'_gnd.jpg':'_obj.jpg'),t:Date.now(),batch:rec.batch,clip:rec.clip,onlyStem:null};
+      var vc=ensureView();vc.classList.remove('hidden');vc.style.setProperty('display','flex','important');
+      if(!await loadClips(rec.batch,rec.clip))throw Error('任务片段不可用');
+      if(P.module!==rec.kind||P.batch!==rec.batch||P.clip!==rec.clip)return;
+      window.__setSimSource(rec.output_job,rec.kind);
+      if(P.simOverride&&rec.suffix)P.simOverride.suffix=rec.suffix;
+      showFrame(P.idx);
+    }catch(e){alert('无法打开手动任务：'+e.message);}
+  };
     // EVENT-DELEGATE-SELECT: 事件委托，避免元素未创建时绑定失败
     document.addEventListener('change', function(e){
       var t = e.target;
@@ -15834,7 +15863,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
       var ep = (mod === 'gnd') ? '/api/gnd/render' : '/api/real/render_params';
       var r = await fetch(ep, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ module: mod, batch: batch, clip: clip,
+        body: JSON.stringify({ module: mod, batch: batch, clip: clip, source_job: (p.simOverride||{}).job || '',
                                params: renderParams })
       });
       var d = await r.json();
@@ -15843,15 +15872,16 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         return;
       }
       var jid = d.job;
+      if(window.__syncGndTasks)window.__syncGndTasks();
       stat.textContent = '渲染中…（可等待）';
       var t0 = Date.now();
-      for (var i = 0; i < 200; i++) {
+      while (true) {
         await new Promise(function(res){ setTimeout(res, 1500); });
         var sec = Math.round((Date.now() - t0) / 1000);
         var st;
         try {
-          st = await (await fetch('/api/render/job?id=' + encodeURIComponent(jid),
-                                  {cache:'no-store'})).json();
+          var sr=await fetch('/api/render/job?id=' + encodeURIComponent(jid),{cache:'no-store'});
+          st = await sr.json();if(!sr.ok){stat.textContent='任务记录不可用：'+(st.error||sr.status);return;}
         } catch(e) { continue; }
         if (st.state === 'queued') { stat.textContent = '排队中… ' + sec + 's'; continue; }
         if (st.state === 'running') { stat.textContent = '渲染中… ' + sec + 's'; continue; }
@@ -15877,28 +15907,19 @@ LatestRequest.prototype.run = async function(fetcher, apply){
               var orig = '/api/real/image?batch=' + encodeURIComponent(batch) + '&clip=' + encodeURIComponent(clip) + '&stem=' + encodeURIComponent(rec.frame);
               return known[rec.frame] || {stem:rec.frame, orig:orig, sim:orig, objects:[]};
             });
-            var annotations = await Promise.all(fullFrames.map(async function(fr){
-              var url = '/api/job/annotation?job=' + encodeURIComponent(clipJob) + '&stem=' + encodeURIComponent(fr.stem);
-              var res = await fetch(url, {cache:'no-store'});
-              if (!res.ok) throw new Error('逐帧标注缺失：' + fr.stem);
-              return res.json();
-            }));
             if (window.__clipPlayer.batch !== batch || window.__clipPlayer.clip !== clip) {
               stat.textContent = '任务完成，但已切换片段'; return;
             }
-            var rendered = 0;
-            fullFrames.forEach(function(fr, i){
-              var ann = annotations[i]; if (ann.frame !== fr.stem) throw new Error('标注帧不匹配');
-              fr.objects = (fr.objects || []).filter(function(o){return o.source === 'real';}).concat(ann.objects || []);
-              if (ann.frame_status === 'synthetic') rendered++;
-            });
+            // Load per-frame annotations on demand in showFrame instead of 50 parallel requests.
+            var rendered = Number(manifest.synthetic)||0;
+            fullFrames.forEach(function(fr){fr.objects=(fr.objects||[]).filter(function(o){return o.source==='real';});});
             cpNow.frames = fullFrames;
             stat.textContent = '完成 ' + rendered + '/' + cpNow.frames.length + ' 帧；其余显示原图';
             if (window.__setSimSource) window.__setSimSource(clipJob, mod, null);
           } else {
-            stat.textContent = '✓ 完成 ' + (st.n || 0) + ' 帧（' + sec + 's）';
+            stat.textContent = '✓ 完成 ' + (st.n || 0) + ' 帧（' + sec + 's）' + (st.warning?'；'+st.warning:'');
             if (window.__viewerReset) { try { window.__viewerReset(); } catch(e){} }
-            if (window.__setSimSource) window.__setSimSource('gnd_params', mod, null);
+            if (window.__setSimSource) {window.__setSimSource(st.output_job, mod, null);if(window.__clipPlayer.simOverride)window.__clipPlayer.simOverride.suffix=st.suffix||'_gnd.jpg';}
           }
           // 再刷一次（等新图落盘）
           setTimeout(function(){
@@ -15910,7 +15931,6 @@ LatestRequest.prototype.run = async function(fetcher, apply){
           return;
         }
       }
-      stat.textContent = '超时（任务仍在后台跑）';
     } catch(e) {
       stat.textContent = '失败: ' + e.message;
     }
@@ -16455,10 +16475,10 @@ LatestRequest.prototype.run = async function(fetcher, apply){
     // FSMOD-SYNC-FIX: 以 clipPlayer 实际模块为准（__MODFILTER 可能滞后）
     var mod = window.__MODFILTER || 'obj';
     var _P0 = window.__clipPlayer;
-    if (_P0 && _P0.frames && _P0.frames.length) {
+    if (!window.__MODFILTER && _P0 && _P0.frames && _P0.frames.length) {
       mod = _P0.module || mod;
     }
-    if (window.__fsState && window.__fsState.module) {
+    if (window.__fsState && window.__fsState.open && window.__fsState.module) {
       mod = window.__fsState.module;
     }
     if (mod === 'tsr') {
@@ -16468,14 +16488,13 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         return R.items.map(function(it, i){
           return {
             stem: it.stem,
+            width: it.width || 1920, height: it.height || 1080,
             // TSR-SIZE-SYNC: 两边统一 1920，避免 canvas 尺寸不一致导致 BBox 越界
             // TSR-CACHE-BUST: 加时间戳，重跑后不会读旧缓存
             orig: '/api/tsr/src?dir=' + encodeURIComponent(dir) +
-                  '&stem=' + encodeURIComponent(it.stem) + '&max=1920' +
-                  '&t=' + Date.now(),
+                  '&stem=' + encodeURIComponent(it.stem) + '&max=1920',
             sim: '/api/tsr/result?dir=' + encodeURIComponent(dir) +
-                 '&file=' + encodeURIComponent(it.composed) + '&max=1920' +
-                 '&t=' + Date.now(),
+                 '&file=' + encodeURIComponent(it.composed) + '&max=1920',
             // TSR-BBOX-FIX: 左右两栏都画，字段名与 drawFsBbox 对齐
             objects: (function(){
               var arr = [];
@@ -16483,11 +16502,11 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                 var b = o.bbox || o.bbox2d;
                 if (!b || b.length !== 4) return;
                 // TSR-LABEL-SPLIT: 左栏=原牌类别(detected_as)，右栏=新素材(class)
-                var _origCls = o['detected_as'] || o['class'] || o.cls || 'sign';
+                var _origCls = o.orig_class || o.detected_as || '原始类别未提供';
                 var _newCls = o['class'] || o.cls || 'sign';
-                arr.push({
+                if (Array.isArray(o.source_bbox) && o.source_bbox.length===4) arr.push({
                   source: 'real',
-                  bbox2d: b,
+                  bbox2d: o.source_bbox,
                   'class': _origCls,
                   cls: _origCls,
                   label: '原 ' + _origCls,
@@ -16540,19 +16559,21 @@ LatestRequest.prototype.run = async function(fetcher, apply){
 
   // FS-NO-FLICKER: 预加载 + 双缓冲，新帧完全就绪才切换
   var _fpReq = 0;
-  var _fpCache = {};   // url -> Image
+  var _fpCache = {}, _fpPending = {};   // bounded decoded frames
 
   function _preload(url){
     if (!url) return Promise.resolve(null);
     if (_fpCache[url] && _fpCache[url].complete) {
       return Promise.resolve(_fpCache[url]);
     }
-    return new Promise(function(res){
+    if (_fpPending[url]) return _fpPending[url];
+    _fpPending[url]=new Promise(function(res){
       var im = new Image();
-      im.onload = function(){ _fpCache[url] = im; res(im); };
-      im.onerror = function(){ res(null); };
+      im.onload = function(){ _fpCache[url] = im; var keys=Object.keys(_fpCache);if(keys.length>24)delete _fpCache[keys[0]];delete _fpPending[url];res(im); };
+      im.onerror = function(){ delete _fpPending[url];res(null); };
       im.src = url;
     });
+    return _fpPending[url];
   }
 
   function showFrame(i){
@@ -16650,6 +16671,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
       //   仿真栏 → synthetic + real（你要求：仿真上显示原图 bbox）
       var objs = (f.objects || []).filter(function(o){
         if (side === 'orig') return o.source === 'real';
+        if (FS.module === 'tsr') return o.source === 'synthetic';
         return o.source === 'synthetic' || o.source === 'real';
       });
       var im = $(side === 'orig' ? 'fsImgL' : 'fsImg');
@@ -17433,6 +17455,8 @@ window.ThumbDropdown = function(container, opts){
       var data=await Promise.all(responses.map(function(r){return r.json();}));
       if(responses.some(function(r){return !r.ok})||data.some(function(d){return !d.ok||!Array.isArray(d.tasks)}))return;
       var tasks=data[0].tasks.concat(data[1].tasks,data[2].tasks);
+      var mr=await Promise.all(['gnd','obj','tsr'].map(function(m){return fetch('/api/render/jobs?module='+m,{cache:'no-store'}).then(function(r){return r.ok?r.json():{tasks:[]};}).catch(function(){return {tasks:[]};});}));
+      mr.forEach(function(d){(d.tasks||[]).forEach(function(x){tasks.push({job:x.id,module:x.kind,state:x.state,created:x.t0,frames:x.total||0,done:x.n||0,output_count:x.n||0,source:x.source||'',country:x.country||'',error:x.err||'',versions:x.versions,manual:true,manualData:x});});});
       window.__JOB_REG=window.__JOB_REG||{};window.__JOB_MOD=window.__JOB_MOD||{};window.__PROG_CACHE=window.__PROG_CACHE||{};
       var seen={};try{seen=JSON.parse(localStorage.getItem('psim.gnd.imported')||'{}')||{}}catch(e){}
       var changed=false;
@@ -17448,6 +17472,7 @@ window.ThumbDropdown = function(container, opts){
         if(!reg)return;
         if(!reg.path && t.source){reg.path=t.source;changed=true;}
         if(!reg.country && t.country){reg.country=t.country;changed=true;}
+        if(t.manual){reg.manual=true;reg.manualData=t.manualData;}
         if(!reg.versions && t.versions){reg.versions=t.versions;changed=true;}
         var phase=t.state==='failed'?'stopped':t.state, n=Number(t.done)||0, output=(module==='tsr'?Number(t.output_count)||0:n);
         var prev=window.__PROG_CACHE[t.job];

@@ -983,6 +983,45 @@ import uuid as _uuid
 _RJ = {}
 _RJ_Q = _q.Queue()
 _RJ_LOCK = _th.Lock()
+_MANUAL_DIR = '/data/render/manual_task_records'
+_CLIPS_CACHE={'value':None,'at':0}
+_CLIPS_CACHE_LOCK=_th.Lock()
+
+def _manual_save(jid, rec):
+    os.makedirs(_MANUAL_DIR, exist_ok=True)
+    data=dict(rec);data['id']=jid
+    tmp=os.path.join(_MANUAL_DIR,'.'+jid+'.tmp')
+    with open(tmp,'w',encoding='utf8') as f: json.dump(data,f,ensure_ascii=False)
+    os.replace(tmp,os.path.join(_MANUAL_DIR,jid+'.json'))
+
+def _manual_load(jid):
+    if not re.fullmatch(r'(?:obj|gnd|tsr)_\d+_[0-9a-f]{6}',str(jid or '')):return None
+    try:
+        with open(os.path.join(_MANUAL_DIR,jid+'.json'),encoding='utf8') as f:return json.load(f)
+    except (OSError,ValueError):return None
+
+def _manual_versions():
+    try:
+        with open('/opt/ue5_synth/dashboard/release_versions.json',encoding='utf8') as f:return json.load(f).get('versions',{})
+    except (OSError,ValueError):return {}
+
+def _manual_list(kind):
+    import glob
+    result=[]
+    for path in sorted(glob.glob(os.path.join(_MANUAL_DIR,kind+'_*.json')),reverse=True)[:200]:
+        try:
+            with open(path,encoding='utf8') as f:r=json.load(f)
+            result.append(r)
+        except (OSError,ValueError):continue
+    return result
+
+def _manual_recover():
+    for kind in ('obj','gnd','tsr'):
+        for rec in _manual_list(kind):
+            if rec.get('state') in ('queued','running'):
+                rec.update(state='failed',err='服务重启导致任务中断，请重新发起',t1=time.time())
+                _manual_save(rec['id'],rec)
+_manual_recover()
 
 
 def _render_worker():
@@ -994,25 +1033,31 @@ def _render_worker():
         rec = _RJ.get(jid)
         if rec is None:
             continue
-        out_dir = ("/data/render/gnd_params" if kind == "gnd"
+        out_dir = (os.path.join('/data/render','manual_gnd_'+jid) if kind == "gnd"
                    else "/data/render/obj_params")
+        queue_lock=None
         try:
+            os.makedirs('/data/render_hybrid',exist_ok=True)
+            queue_lock=open('/data/render_hybrid/.objtask.lock','a')
+            if fcntl:fcntl.flock(queue_lock,fcntl.LOCK_EX)
             with _RJ_LOCK:
                 rec["state"] = "running"
+                _manual_save(jid,rec)
             os.makedirs(out_dir, exist_ok=True)
             payload = os.path.join(out_dir, "_p_%s.json" % jid)
             with open(payload, "w", encoding="utf-8") as f:
-                json.dump({"batch": batch, "clip": clip, "params": params,
-                           "out": out_dir}, f, ensure_ascii=False)
-            script = os.path.join(
-                TOOLS_DIR,
-                "gnd_render_one.py" if kind == "gnd" else "render_obj_params.py")
+                if kind=='gnd' and params.get('_world_source'):
+                    data={'batch':batch,'clip':clip,'source':params['_world_source'],'out':out_dir,'params':{'mat':params.get('lane_type','lane_dashed_white'),'marking_mode':'replace' if params.get('gnd_mode')=='clean' else 'add','lanes':int(params.get('lanes') or 3),'render_mode':'world_preview','dash':int(bool(params.get('dash'))),'stop':int(bool(params.get('stop')))}}
+                else:data={"batch": batch, "clip": clip, "params": params,"out": out_dir}
+                json.dump(data, f, ensure_ascii=False)
+            script = os.path.join(TOOLS_DIR, "gnd_render_one.py" if kind == "gnd" else "render_obj_params.py")
+            if kind=='gnd' and params.get('_world_source'):script=os.path.join(TOOLS_DIR,'gnd_clip_world.py')
             env = dict(os.environ)
             env["PYTHONPATH"] = TOOLS_DIR
             env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
             r = subprocess.run([ALGO_PYTHON, script, "--config", payload],
                                capture_output=True, text=True,
-                               timeout=1800, env=env)
+                               timeout=3600, env=env)
             # COUNT-FIX: 输出可能在根目录或 frames/ 子目录，两处都数
             n = 0
             for _cand in (out_dir, os.path.join(out_dir, "frames")):
@@ -1021,21 +1066,36 @@ def _render_worker():
                                 if f.endswith(("_sim.jpg", "_gnd.jpg",
                                                "_obj.jpg"))])
                     n = max(n, _cnt)
+            if kind=='obj':
+                target=os.path.join('/data/render_hybrid','obj3d_'+jid)
+                manifest=os.path.join(target,'annotations','__clip__.json')
+                if os.path.isfile(manifest):
+                    with open(manifest,encoding='utf8') as f: m=json.load(f)
+                    n=int(m.get('synthetic') or 0)
+                    rec['total']=int(m.get('total') or 0)
+                    rec['output_job']='obj3d_'+jid
+            else:
+                rec['output_job']='manual_gnd_'+jid
+                rec['suffix']='_gnd.jpg' if params.get('_world_source') else '_sim.jpg'
             with _RJ_LOCK:
-                rec["state"] = "done" if r.returncode == 0 else "failed"
+                rec["state"] = "done" if r.returncode == 0 and n>0 else "failed"
                 rec["n"] = n
-                if r.returncode != 0:
-                    rec["err"] = ((r.stderr or r.stdout or "")[-600:])
+                if r.returncode != 0 or n==0:
+                    rec["err"] = ((r.stderr or r.stdout or "")[-600:] if r.returncode != 0 else '任务执行结束，但没有生成有效仿真帧')
                 rec["t1"] = time.time()
         except subprocess.TimeoutExpired:
             with _RJ_LOCK:
                 rec["state"] = "failed"
-                rec["err"] = "timeout"
+                rec["err"] = "渲染超过服务器最大时限（60分钟）"
         except Exception as e:
             with _RJ_LOCK:
                 rec["state"] = "failed"
                 rec["err"] = str(e)[:400]
         finally:
+            if queue_lock:queue_lock.close()
+            with _RJ_LOCK:
+                rec.setdefault('t1',time.time());_manual_save(jid,rec)
+            _RJ_Q.task_done()
             try:
                 os.remove(os.path.join(out_dir, "_p_%s.json" % jid))
             except Exception:
@@ -1084,7 +1144,10 @@ def _start_render_job(kind, batch, clip, params):
     jid = "%s_%d_%s" % (kind, int(time.time()), _uuid.uuid4().hex[:6])
     with _RJ_LOCK:
         _RJ[jid] = {"state": "queued", "kind": kind, "batch": batch,
-                    "clip": clip, "n": 0, "t0": time.time()}
+                    "clip": clip, "n": 0, "t0": time.time(),"manual":True,"params":params,"versions":_manual_versions(),"source":params.get('_world_source') or os.path.join('/data/test_data/real_clips',batch,clip)}
+        if params.get('_world_source'):_RJ[jid]['world_source']=params['_world_source']
+        if params.get('_world_source'):_RJ[jid]['warning']='真实片段当前仅应用标线类型、车道数和虚实线设置；磨损、反光等参数暂未接入'
+        _manual_save(jid,_RJ[jid])
         if len(_RJ) > 40:
             for o in sorted(_RJ, key=lambda k: _RJ[k]["t0"])[:10]:
                 if _RJ[o]["state"] in ("done", "failed"):
@@ -1097,7 +1160,8 @@ def _render_job_status(jid):
     with _RJ_LOCK:
         rec = dict(_RJ.get(jid) or {})
     if not rec:
-        return None
+        rec = _manual_load(jid)
+        if not rec:return None
     rec["id"] = jid
     return rec
 
@@ -1152,6 +1216,10 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
 
+        if u.path == '/api/render/jobs':
+            kind=(q.get('module') or [''])[0].lower()
+            if kind not in ('obj','gnd','tsr'):return self._send(400,{'ok':False,'error':'invalid module'})
+            return self._send(200,{'ok':True,'tasks':_manual_list(kind)})
         if u.path == '/api/platform/versions':
             try:
                 with open('/opt/ue5_synth/dashboard/release_versions.json',encoding='utf8') as f: data=json.load(f)
@@ -1362,6 +1430,20 @@ class H(BaseHTTPRequestHandler):
             # CLIPS-MULTI-ROOT: 扫描 real_clips + real_clips_extra
             out = []
             seen = set()
+            # Scan output indexes once, not once for every network batch.
+            import glob as _glob
+            _preferred=set();_available=set()
+            for _af in _glob.glob('/data/render/obj_good/annotations/*.json')[:400]:
+                try:
+                    with open(_af,encoding='utf8') as f: b=(json.load(f) or {}).get('batch')
+                    if b:_preferred.add(b)
+                except (OSError,ValueError):pass
+            for _cfg in _glob.glob('/data/render_hybrid/*/config.json'):
+                if os.path.basename(os.path.dirname(_cfg)).startswith('gnd'):continue
+                try:
+                    with open(_cfg,encoding='utf8') as f:b=(json.load(f) or {}).get('batch')
+                    if b:_available.add(b)
+                except (OSError,ValueError):pass
             for root in (REAL_ROOT, "/data/test_data/real_clips_extra"):
                 if not os.path.isdir(root):
                     continue
@@ -1369,6 +1451,8 @@ class H(BaseHTTPRequestHandler):
                     if n in seen:
                         continue
                     p = os.path.join(root, n)
+                    if n not in _available:
+                        continue
                     if not os.path.isdir(p):
                         continue
                     # MULTI-CAM-SCAN: 支持多种前向相机
@@ -1398,39 +1482,9 @@ class H(BaseHTTPRequestHandler):
                     if any(x in n for x in _EXCL):
                         continue
                     # ONLY-WITH-OUTPUT: 只保留 obj_good 里有该批次的
-                    import glob as _g
-                    _pref = 0
-                    _anns = _g.glob(
-                        "/data/render/obj_good/annotations/*.json")
-                    for _af in _anns[:400]:
-                        try:
-                            with open(_af, encoding="utf-8") as _fh:
-                                _ad = json.load(_fh)
-                            if _ad.get("batch") == n:
-                                _pref = 1
-                                break
-                        except Exception:
-                            pass
+                    _pref = int(n in _preferred)
                     # ONLY-RENDERED-CLIPS: 仿真工作台只列有仿真产出的批次
-                    import glob as _g2
-                    _has_out = False
-                    _outs = _g2.glob("/data/render_hybrid/*/task.json")
-                    for _of in _outs:
-                        try:
-                            with open(_of, encoding="utf-8") as _fh:
-                                _md = json.load(_fh)
-                            _cfg = os.path.join(os.path.dirname(_of),
-                                                "config.json")
-                            _b = ""
-                            if os.path.isfile(_cfg):
-                                with open(_cfg, encoding="utf-8") as _cf:
-                                    _b = (json.load(_cf) or {}).get("batch") or ""
-                            if _b == n:
-                                _has_out = True
-                                break
-                        except Exception:
-                            pass
-                    if not _has_out:
+                    if n not in _available:
                         continue
                     out.append({"name": n, "clips": len(clips),
                                 "frames": njpg, "preferred": _pref})
@@ -1671,8 +1725,11 @@ class H(BaseHTTPRequestHandler):
 
         if u.path == "/api/real/clips":
             try:
-                return self._send(200, {"root": REAL_ROOT,
-                                        "clips": _real_clips()})
+                with _CLIPS_CACHE_LOCK:
+                    if _CLIPS_CACHE['value'] is None or time.monotonic()-_CLIPS_CACHE['at']>30:
+                        _CLIPS_CACHE.update(value=_real_clips(),at=time.monotonic())
+                    cached=_CLIPS_CACHE['value']
+                return self._send(200, {"root": REAL_ROOT,"clips": cached})
             except Exception as e:
                 return self._send(500, {"error": str(e)})
 
@@ -3244,6 +3301,7 @@ class H(BaseHTTPRequestHandler):
                     "stem": fn[:-5],
                     "composed": a.get("image", ""),
                     "source_name": a.get("source_image", ""),
+                    "width": a.get("width"), "height": a.get("height"),
                     "country": "",
                     "objects": a.get("objects", []),
                 })
@@ -4251,7 +4309,22 @@ class H(BaseHTTPRequestHandler):
                 params = body.get("params") or {}
                 if not (batch and clip):
                     return self._send(400, {"ok": False, "error": "missing"})
+                source_job=str(body.get('source_job') or '')
                 cp = os.path.join("/data/test_data/gnd_train", batch, clip)
+                if re.fullmatch(r'gndtask_\d{8}_\d{6}_[0-9a-f]{6}',source_job):
+                    mp=os.path.join('/data/render_hybrid',source_job,'task.json')
+                    with open(mp,encoding='utf8') as f:meta=json.load(f)
+                    with open(os.path.join(os.path.dirname(mp),'config.json'),encoding='utf8') as f:old=json.load(f)
+                    if old.get('batch')!=batch or old.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
+                    if params.get('gnd_spec_on') and params.get('gnd_items'):
+                        return self._send(400,{'ok':False,'error':'当前真实片段重绘暂不支持指定多素材位置，请关闭指定素材后使用'})
+                    cp=meta.get('source') or '';params=dict(params);params['_world_source']=cp
+                elif source_job.startswith('manual_gnd_'):
+                    previous=_manual_load(source_job[len('manual_gnd_'):])
+                    if not previous or previous.get('batch')!=batch or previous.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
+                    if previous.get('world_source'):
+                        if params.get('gnd_spec_on') and params.get('gnd_items'):return self._send(400,{'ok':False,'error':'当前真实片段重绘暂不支持指定多素材位置，请关闭指定素材后使用'})
+                        cp=previous['world_source'];params=dict(params);params['_world_source']=cp
                 if not os.path.isdir(cp):
                     return self._send(404, {"ok": False,
                                             "error": "clip not found"})
@@ -5132,6 +5205,9 @@ class H(BaseHTTPRequestHandler):
                 args += ["--bbox", ",".join(str(round(float(v), 1)) for v in bbox)]
             args += ["--params", json.dumps(params, ensure_ascii=False)]
 
+            jid='tsr_%d_%s'%(int(time.time()),_uuid.uuid4().hex[:6])
+            manual={'id':jid,'kind':'tsr','state':'running','manual':True,'source':src,'country':country,'t0':time.time(),'n':0,'parent_dir':d,'stem':stem,'params':params,'material':mat0,'versions':_manual_versions()}
+            _manual_save(jid,manual)
             try:
                 r = subprocess.run(args, capture_output=True, text=True, timeout=120)
                 last = (r.stdout or "").strip().split("\n")[-1]
@@ -5139,9 +5215,12 @@ class H(BaseHTTPRequestHandler):
                 if info.get("ok"):
                     info["url"] = ("/api/tsr/result?dir=" + quote(TSR_OUT_DIR) +
                                    "&file=" + quote(os.path.basename(out)))
+                manual.update(state='done' if info.get('ok') else 'failed',n=1 if info.get('ok') else 0,err='' if info.get('ok') else str(info.get('error') or '单帧预览失败'),t1=time.time(),url=info.get('url',''))
+                _manual_save(jid,manual);info['job']=jid
                 return self._send(200 if info.get("ok") else 500, info)
             except Exception as e:
-                return self._send(500, {"error": "渲染异常: " + str(e)})
+                manual.update(state='failed',err='渲染异常: '+str(e),t1=time.time());_manual_save(jid,manual)
+                return self._send(500, {"error": "渲染异常: " + str(e),"job":jid})
 
         # [TSR-API] 单图替换预览
         if u.path == "/api/tsr/replace":

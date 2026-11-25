@@ -3,10 +3,10 @@
   "baseline_recorded_at": "2026-11-24",
   "note": "首次建立版本基线；不追溯此前版本",
   "versions": {
-    "platform": "1.1.1",
-    "tsr": "1.0.1",
-    "obj": "1.1.0",
-    "gnd": "1.0.0"
+    "platform": "1.1.4",
+    "tsr": "1.0.2",
+    "obj": "1.1.1",
+    "gnd": "1.0.1"
   },
   "changes": [
     {
@@ -38,6 +38,42 @@
       "component": "tsr",
       "version": "1.0.1",
       "summary": "curated_batch_preview"
+    },
+    {
+      "date": "2026-11-25T11:41:01+08:00",
+      "component": "platform",
+      "version": "1.1.2",
+      "summary": "工作台模块切换隔离、任务表修复、图片缓存及TSR左右标注区分"
+    },
+    {
+      "date": "2026-11-25T12:15:13+08:00",
+      "component": "platform",
+      "version": "1.1.3",
+      "summary": "修复从其他模块切回TSR时工作台被隐藏"
+    },
+    {
+      "date": "2026-11-25T13:03:42+08:00",
+      "component": "platform",
+      "version": "1.1.4",
+      "summary": "工作台数据加载提速，手动任务持久化及任务中心统一管理"
+    },
+    {
+      "date": "2026-11-25T13:03:42+08:00",
+      "component": "obj",
+      "version": "1.1.1",
+      "summary": "整段手动渲染持续跟踪，记录任务状态和有效帧"
+    },
+    {
+      "date": "2026-11-25T13:03:42+08:00",
+      "component": "gnd",
+      "version": "1.0.1",
+      "summary": "手动重绘任务单独保存并显示处理结果"
+    },
+    {
+      "date": "2026-11-25T13:03:42+08:00",
+      "component": "tsr",
+      "version": "1.0.2",
+      "summary": "工作台按TSR任务加载，手动预览结果纳入任务记录"
     }
   ]
 }
