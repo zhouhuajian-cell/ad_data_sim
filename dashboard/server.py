@@ -1048,7 +1048,7 @@ def _render_worker():
             with open(payload, "w", encoding="utf-8") as f:
                 if kind=='gnd' and params.get('_world_source'):
                     world_params={k:v for k,v in params.items() if not k.startswith('_')}
-                    world_params.update(mat=params.get('lane_type','lane_dashed_white'),marking_mode='replace',render_mode='world_preview')
+                    world_params.update(mat=params.get('lane_type','lane_dashed_white'),marking_mode=params.get('marking_mode','replace'),render_mode='world_preview')
                     data={'batch':batch,'clip':clip,'source':params['_world_source'],'out':out_dir,'params':world_params}
                 elif kind=='obj':
                     obj_params=dict(params)
@@ -1594,14 +1594,7 @@ class H(BaseHTTPRequestHandler):
         # -------- DELIVERY-EXPORT-API: 数据交付导出 --------
         if u.path == "/api/delivery/presets":
             # 常用交付路径预设
-            _pre = [
-                {"label": "网盘 zhj_datasim（默认）",
-                 "path": "/mnt/Data_Platform/zhj_datasim/delivery"},
-                {"label": "本地 /data/delivery",
-                 "path": "/data/delivery"},
-                {"label": "网盘 zhj_datasim/OBJ",
-                 "path": "/mnt/Data_Platform/zhj_datasim/OBJ"},
-            ]
+            _pre = [{"label": "服务器 /data/delivery（默认）", "path": "/data/delivery"}]
             _mods = [
                 {"key": "obj", "label": "OBJ 3D 目标"},
                 {"key": "tsr", "label": "TSR 交通标牌"},
@@ -1618,11 +1611,17 @@ class H(BaseHTTPRequestHandler):
                 if not path:
                     return self._send(400, {"ok": False,
                                             "error": "missing path"})
+                if os.path.commonpath(['/data', os.path.realpath(path)]) != '/data':
+                    return self._send(400, {"ok": False, "error": "当前交付只允许服务器 /data 下的目录"})
                 os.makedirs(path, exist_ok=True)
                 tst = os.path.join(path, ".dsh_write_test")
                 with open(tst, "w") as f:
                     f.write("ok")
-                os.remove(tst)
+                try:
+                    os.remove(tst)
+                except OSError:
+                    # 网盘只允许写入，不允许删除；写成功即可交付
+                    pass
                 # 剩余空间
                 import shutil as _sh2
                 tot, used, free = _sh2.disk_usage(path)
@@ -1645,6 +1644,8 @@ class H(BaseHTTPRequestHandler):
                 if not out_root:
                     return self._send(400, {"ok": False,
                                             "error": "missing path"})
+                if os.path.commonpath(['/data', os.path.realpath(out_root)]) != '/data':
+                    return self._send(400, {"ok": False, "error": "当前交付只允许服务器 /data 下的目录"})
                 os.makedirs(out_root, exist_ok=True)
 
                 import subprocess as _sp5
@@ -3305,7 +3306,20 @@ class H(BaseHTTPRequestHandler):
                             cands.append((os.path.getmtime(full), full))
                 cands.sort()
                 walks = [c for c in cands if "/walk_" in c[1] + "/"]
-                d = (walks or cands)[-1][1] if (walks or cands) else ""
+                pool = walks or cands
+                # GALLERY-PICK-MOST: 默认展示产出最多的目录（最近 60 个里挑），
+                # 只按 mtime 取最新会选到刚跑完但只有几张的任务
+                if pool:
+                    def _cnt(item):
+                        ad = os.path.join(item[1], "annotations")
+                        try:
+                            return sum(1 for x in os.listdir(ad) if x.endswith(".json"))
+                        except OSError:
+                            return 0
+                    recent = pool[-60:]
+                    d = max(recent, key=lambda it: (_cnt(it), it[0]))[1]
+                else:
+                    d = ""
             if not d or not os.path.isdir(d):
                 return self._send(404, {"error": "目录不存在", "dir": d})
             ann_dir = os.path.join(d, "annotations")
@@ -3843,6 +3857,10 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
 
+        # DELIVERY-EXPORT-POST: 导出处理器位于 do_GET 分支，POST 请求转发过去
+        if u.path == "/api/delivery/export":
+            return self.do_GET()
+
         if u.path == "/api/light/save":
             try:
                 body = self._body()
@@ -3945,10 +3963,8 @@ class H(BaseHTTPRequestHandler):
             clip = str(body.get("clip") or "").strip()
             ts = str(body.get("timestamp") or "").strip() or "sim"
             extra = body.get("extra") or {}
-            root = "/mnt/Data_Platform/zhj_datasim"
-            if not os.path.isdir(root):
-                return self._send(500, {"ok": False,
-                                        "error": "网盘未挂载: %s" % root})
+            root = "/data/delivery"
+            os.makedirs(root, exist_ok=True)
 
             try:
                 sys.path.insert(0, "/opt/ue5_synth/tools")
@@ -4340,12 +4356,14 @@ class H(BaseHTTPRequestHandler):
                     with open(mp,encoding='utf8') as f:meta=json.load(f)
                     with open(os.path.join(os.path.dirname(mp),'config.json'),encoding='utf8') as f:old=json.load(f)
                     if old.get('batch')!=batch or old.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
-                    cp=meta.get('source') or '';params=dict(params);params['_world_source']=cp
+                    cp=old.get('source') or meta.get('source') or '';params=dict(params);params['_world_source']=cp
+                    params.setdefault('marking_mode',(old.get('params') or {}).get('marking_mode','replace'))
                 elif source_job.startswith('manual_gnd_'):
                     previous=_manual_load(source_job[len('manual_gnd_'):])
                     if not previous or previous.get('batch')!=batch or previous.get('clip')!=clip:raise ValueError('原任务与当前片段不匹配')
                     if previous.get('world_source'):
                         cp=previous['world_source'];params=dict(params);params['_world_source']=cp
+                        params.setdefault('marking_mode',(previous.get('params') or {}).get('marking_mode','replace'))
                 if not params.get('_world_source'):
                     return self._send(400, {'ok':False,'error':'请选择支持自车世界轨迹的 GND 片段任务，当前来源不能进行世界轨迹重绘'})
                 if not os.path.isdir(cp):

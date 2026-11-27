@@ -49,3 +49,82 @@ def refine_temporal(current,previous,H,road):
         return current,0
     out=current.copy();out[added]=255
     return out,int(np.count_nonzero(added))
+
+
+def validate_ground_alignment(previous_image, current_image, previous_road, H,
+                              min_points=12, max_median_px=3.0, max_p90_px=8.0):
+    """Fail closed when the projected road disagrees with tracked image features.
+
+    This is a consistency check, not proof of an accurate world pose. Restrict
+    features to the previous road mask and reject unreliable optical flow tracks.
+    """
+    result = {'valid': False, 'reason': 'missing_input', 'points': 0}
+    if previous_image is None or current_image is None or previous_road is None or H is None:
+        return result
+    if previous_image.shape != current_image.shape or previous_road.shape != previous_image.shape[:2]:
+        result['reason'] = 'shape_mismatch'
+        return result
+    old = cv2.cvtColor(previous_image, cv2.COLOR_BGR2GRAY)
+    new = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+    road = cv2.erode((previous_road > 0).astype(np.uint8), np.ones((7, 7), np.uint8))
+    points = cv2.goodFeaturesToTrack(old, 400, 0.01, 8, mask=road)
+    if points is None:
+        result['reason'] = 'insufficient_features'
+        return result
+    projected = cv2.perspectiveTransform(points, np.asarray(H, dtype=np.float64))
+    if not np.isfinite(projected).all():
+        result['reason'] = 'invalid_projection'
+        return result
+    # Road motion can exceed LK's default search range; use the candidate
+    # projection as an initial estimate, then independently check round trips.
+    target, status, _ = cv2.calcOpticalFlowPyrLK(
+        old, new, points, projected.astype(np.float32).copy(),
+        winSize=(31, 31), maxLevel=4, flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
+    if target is None or status is None:
+        result['reason'] = 'flow_failed'
+        return result
+    back, back_status, _ = cv2.calcOpticalFlowPyrLK(
+        new, old, target, points.copy(), winSize=(31, 31), maxLevel=4,
+        flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
+    if back is None or back_status is None:
+        result['reason'] = 'flow_failed'
+        return result
+    projected = projected[:, 0]
+    forward = target[:, 0]
+    ok = ((status[:, 0] > 0) & (back_status[:, 0] > 0)
+          & (np.linalg.norm(back[:, 0] - points[:, 0], axis=1) < 1.0)
+          & np.isfinite(projected).all(axis=1) & np.isfinite(forward).all(axis=1))
+    errors = np.linalg.norm(projected[ok] - forward[ok], axis=1)
+    result['points'] = int(len(errors))
+    if len(errors) < min_points:
+        result['reason'] = 'insufficient_features'
+        return result
+    result['median_px'] = float(np.median(errors))
+    result['p90_px'] = float(np.percentile(errors, 90))
+    result['within_3px'] = int(np.count_nonzero(errors <= 3.0))
+    result['valid'] = result['median_px'] <= max_median_px and result['p90_px'] <= max_p90_px
+    result['reason'] = 'ok' if result['valid'] else 'projection_mismatch'
+    return result
+
+
+def stabilize_repaired_road(current, current_mask, previous, previous_mask, H,
+                            weight=.35, max_channel_difference=12):
+    """Experiment: blend only mutually erased, photometrically similar pixels.
+
+    The caller must check the projection and road/foreground masks first. This
+    doesn't stabilize the erase mask itself or establish training-quality labels.
+    """
+    if previous is None or previous_mask is None or H is None:
+        return current, 0
+    if current.shape != previous.shape or current_mask.shape != current.shape[:2] or previous_mask.shape != current_mask.shape:
+        raise ValueError('temporal repair shape mismatch')
+    h, w = current_mask.shape
+    warped = cv2.warpPerspective(previous, H, (w, h), flags=cv2.INTER_LINEAR)
+    warped_mask = cv2.warpPerspective(previous_mask, H, (w, h), flags=cv2.INTER_NEAREST) > 0
+    similar = np.max(np.abs(warped.astype(np.int16) - current.astype(np.int16)), axis=2) < max_channel_difference
+    eligible = warped_mask & (current_mask > 0) & similar
+    eligible = cv2.erode(eligible.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    out = current.copy()
+    wgt = float(np.clip(weight, 0, 1))
+    out[eligible] = np.rint((1-wgt)*current[eligible] + wgt*warped[eligible]).astype(np.uint8)
+    return out, int(np.count_nonzero(eligible))

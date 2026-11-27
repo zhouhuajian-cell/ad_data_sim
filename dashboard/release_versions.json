@@ -3,10 +3,10 @@
   "baseline_recorded_at": "2026-11-24",
   "note": "首次建立版本基线；不追溯此前版本",
   "versions": {
-    "platform": "1.1.9",
-    "tsr": "1.1.2",
-    "obj": "1.1.3",
-    "gnd": "1.0.4"
+    "platform": "1.3.1",
+    "tsr": "1.6.3",
+    "obj": "1.1.6",
+    "gnd": "1.0.7"
   },
   "changes": [
     {
@@ -164,6 +164,168 @@
       "component": "tsr",
       "version": "1.1.2",
       "summary": "require higher confidence for generic speed classification"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "gnd",
+      "version": "1.0.5",
+      "summary": "RTK 位姿与时序路面修复试验"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "platform",
+      "version": "1.2.0",
+      "summary": "GND 时序修复试验入口"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "obj",
+      "version": "1.1.4",
+      "summary": "任务中心默认启用已配置的车灯并记录材质匹配诊断"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "gnd",
+      "version": "1.0.6",
+      "summary": "默认尝试 RTK 对齐和路面时序修复；缺少或校验失败时沿用最新版 KISS-ICP 管线"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "platform",
+      "version": "1.2.1",
+      "summary": "简化控制项与素材工坊布局，调整车灯配置位置"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "platform",
+      "version": "1.2.2",
+      "summary": "提高工作台功能栏文字可读性"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "obj",
+      "version": "1.1.5",
+      "summary": "修复直接导入 GLB 时未驱动车灯材质"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "tsr",
+      "version": "1.1.3",
+      "summary": "任务按国家优先选择精选素材库；工作台预览与批处理共用标牌渲染核心"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "platform",
+      "version": "1.2.3",
+      "summary": "简化 TSR 默认开关及自动画质控件"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "tsr",
+      "version": "1.1.4",
+      "summary": "片段仿真只扫描唯一前向相机目录，避免重复扫描解析副本"
+    },
+    {
+      "date": "2026-11-25",
+      "component": "platform",
+      "version": "1.2.4",
+      "summary": "TSR 任务记录先按创建时间排序再分页，修复跨国家漏显"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "obj",
+      "version": "1.1.6",
+      "summary": "多目标轨迹增加逐帧画面重叠预检，统一规划与渲染范围并保留隐藏目标轨迹 ID"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "gnd",
+      "version": "1.0.7",
+      "summary": "工作台重绘沿用原任务标线处理模式及解析后的数据路径"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "platform",
+      "version": "1.2.5",
+      "summary": "修复 GND 原任务路径与模式在工作台重绘中丢失"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "tsr",
+      "version": "1.1.5",
+      "summary": "Reject circular sign replacement when refined area undercovers original detection; record reason"
+    },
+    {
+      "date": "2026-11-26T15:14:47+08:00",
+      "component": "platform",
+      "version": "1.3.0",
+      "summary": "数据交付默认落点改为网盘 W:\\zhj_datasim（服务器 /mnt/Data_Platform/zhj_datasim）；导出接口支持 POST 调用；写权限检查容忍网盘禁止删除"
+    },
+    {
+      "date": "2026-11-26T15:14:59+08:00",
+      "component": "tsr",
+      "version": "1.2.0",
+      "summary": "小标牌门限放宽：最小尺寸默认 16->12px、下限 12->8px，接口同步允许 8px；A/B 实测同片段 16px 生成 40 张、12/8px 生成 41 张"
+    },
+    {
+      "date": "2026-11-26T15:54:27+08:00",
+      "component": "tsr",
+      "version": "1.3.0",
+      "summary": "接入 Qwen2-VL-2B 形状判别：任务开始预扫描判形状（跨任务缓存），素材按形状+单牌+底色筛选；菱形/六边形/八角原牌自动跳过"
+    },
+    {
+      "date": "2026-11-26T15:59:09+08:00",
+      "component": "tsr",
+      "version": "1.4.0",
+      "summary": "圆牌按实测圆环定径并跳过旋转；V4.11 缺失时下沉 6 步流水线；6 步流水线改用 VLM 形状避免误判形状不符"
+    },
+    {
+      "date": "2026-11-26T16:16:15+08:00",
+      "component": "tsr",
+      "version": "1.4.1",
+      "summary": "6 步流水线羽化宽度改为按标牌尺寸 12% 自适应（原固定 3px 边缘过硬）"
+    },
+    {
+      "date": "2026-11-26T16:46:46+08:00",
+      "component": "tsr",
+      "version": "1.4.2",
+      "summary": "圆牌把实测圆环框传给渲染器，替代偏大的检测框，贴合尺寸更接近原牌"
+    },
+    {
+      "date": "2026-11-26T17:32:05+08:00",
+      "component": "tsr",
+      "version": "1.5.0",
+      "summary": "取消素材底色硬约束（TSR 本就要换牌）；宽泛类别不再校原牌颜色；VLM 判不出形状时按类别规范兜底，产出 85→109 张/批"
+    },
+    {
+      "date": "2026-11-26T17:45:48+08:00",
+      "component": "tsr",
+      "version": "1.6.0",
+      "summary": "VLM 形状判别重做：提示词加形状规则、输入 384px、裁剪带背景上下文；unknown 从 60% 降到 17%，单批产出 109→122 张"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "tsr",
+      "version": "1.6.1",
+      "summary": "VLM shape cache keys include model script revision and source file metadata; atomic unique temporary files"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "tsr",
+      "version": "1.6.2",
+      "summary": "Use each detection own VLM shape when rendering multiple signs"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "tsr",
+      "version": "1.6.3",
+      "summary": "Release detector before VLM, single-image inference, GPU headroom check and guaranteed model cleanup; compare rendered sign coverage with original detection"
+    },
+    {
+      "date": "2026-11-26",
+      "component": "platform",
+      "version": "1.3.1",
+      "summary": "Default delivery output to server local /data/delivery and reject network output for delivery APIs"
     }
   ]
 }

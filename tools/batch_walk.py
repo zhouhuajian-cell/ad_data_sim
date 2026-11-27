@@ -159,6 +159,13 @@ def main():
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--signs-dir", default="/data/tsr_library_v2")
     ap.add_argument("--vary-class", action="store_true")
+    # ASSET-SEMANTIC: 标签语义取自已粘贴素材，原图类别只用于定位，
+    # 因此素材挑选只要求形状一致，不再要求原图类别可兼容。
+    ap.add_argument("--asset-semantic", action="store_true")
+    # VLM-SHAPE-HOOK: 用 Qwen2-VL 判定原牌形状，替代「按类别猜形状」
+    ap.add_argument("--vlm-shape", action="store_true")
+    ap.add_argument("--shape-cache",
+                    default="/data/avsynth/state/tsr_shape_cache.json")
     for name in ("bright-gain", "haze-gain", "contrast-gain", "satur-keep", "feather-ratio"):
         ap.add_argument("--" + name, type=float, default=None)
     # 实测检测框/原牌红圈的比值在 0.76~1.39 之间乱跳，任何固定倍数都会在
@@ -243,6 +250,7 @@ def main():
     from quality_contract import check_frame
     from fix_grow import grow_for_frame
     from pipeline6 import run_pipeline6
+    from tsr_sign_render import render_sign
     from pipeline_v411 import SignRealismV411Renderer, DoubleSignSkip
     from sign_rotate import estimate_angle, rotate_asset
     from sd_refine import refine as sd_refine, make_sign_mask, strength_for_size as sd_strength
@@ -299,6 +307,20 @@ def main():
     except OSError:
         detector_key = weights + ':missing'
 
+    # VLM-SHAPE-PASS: 任务开始先批量判形状（模型只加载一次），然后写到缓存
+    shape_map = {}
+    if getattr(a, "vlm_shape", False):
+        try:
+            import vlm_shape_pass as _vsp
+            print("  [VLM] 形状预扫描…", flush=True)
+            shape_map = _vsp.build_shape_map(
+                files, min_sign=a.min_sign, conf=a.conf,
+                cache_path=a.shape_cache, detector_key=detector_key)
+            print("  [VLM] 可用形状记录 %d 条" % len(shape_map), flush=True)
+        except Exception as _ve:
+            print("  [VLM] 预扫描失败，回退类别先验：%s" % str(_ve)[:160], flush=True)
+            shape_map = {}
+
     ok = skip_no_sign = skip_small = skip_color = fail = 0
     qc_reject = 0
     qc_unchecked = 0
@@ -317,6 +339,98 @@ def main():
     sd_fail = 0
     qc_reasons = {}
     match_reasons = {}
+    # ASSET-CLEAN-CHECK: 名称判定形状不可靠（存在拼板/偏移裁切素材），
+    # 这里按素材像素本身校验，只允许居中单牌进入候选池。
+    _clean_cache = {}
+
+    # ASSET-COLOR-GATE: 素材底色必须与原牌底色一致，避免蓝牌贴成红牌
+    _asset_col_cache = {}
+
+    def _ring_of_asset(path):
+        # BODY-COLOR-SWITCH: 用牌面主体色，外环色会把「蓝底红圈禁停牌」判成红
+        if path in _asset_col_cache:
+            return _asset_col_cache[path]
+        col = "other"
+        try:
+            from asset_fit import asset_body as _ab
+            col = _ab(path)
+        except Exception:
+            col = "other"
+        _asset_col_cache[path] = col
+        return col
+
+    def _ring_of_orig(crop_bgr):
+        # BODY-COLOR-SWITCH: 主体色；小标牌测不出时退回整块主色
+        try:
+            from asset_fit import orig_body as _ob
+            return _ob(crop_bgr)
+        except Exception:
+            return "other"
+
+    # ASSET-CLEAN-CHECK: 名称判定形状不可靠，按像素校验只留居中单牌
+    # CIRCLE-RING-FIT: 用原牌彩色圆环实测直径（只认红/蓝，含限幅）
+    def circle_from_ring(im, bbox, pad_ratio=0.30):
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+            side = max(x2 - x1, y2 - y1)
+            pad = side * pad_ratio
+            H0, W0 = im.shape[:2]
+            a1 = int(max(0, x1 - pad)); b1 = int(max(0, y1 - pad))
+            a2 = int(min(W0, x2 + pad)); b2 = int(min(H0, y2 + pad))
+            roi = im[b1:b2, a1:a2]
+            if roi.shape[0] < 10 or roi.shape[1] < 10:
+                return None
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+            col = (s.astype(int) > 90) & (v.astype(int) > 45)
+            hh = h.astype(int)
+            red = col & ((hh < 12) | (hh >= 168))
+            blue = col & (hh >= 95) & (hh < 140)
+            m = ((red | blue).astype(np.uint8)) * 255
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=2)
+            cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                return None
+            c = max(cnts, key=cv2.contourArea)
+            if cv2.contourArea(c) < 40:
+                return None
+            (ccx, ccy), r = cv2.minEnclosingCircle(c)
+            if r < 3:
+                return None
+            short = max(6.0, min(x2 - x1, y2 - y1))
+            if r < 0.31 * short or r > 0.525 * short:
+                return None
+            return (a1 + ccx, b1 + ccy, float(r))
+        except Exception:
+            return None
+
+    def asset_is_clean(path):
+        key = (path, os.path.getmtime(path) if os.path.isfile(path) else 0)
+        if key in _clean_cache:
+            return _clean_cache[key]
+        ok = False
+        try:
+            _im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if _im is not None and _im.ndim == 3 and _im.shape[2] == 4:
+                _a = _im[:, :, 3]
+                _m = _a > 32
+                _cov = float(_m.mean())
+                _ys, _xs = np.where(_m)
+                if len(_ys) > 0:
+                    _bw = float(_xs.max() - _xs.min() + 1)
+                    _bh = float(_ys.max() - _ys.min() + 1)
+                    _ar = _bw / _bh if _bh else 0.0
+                    _h, _w = _a.shape[:2]
+                    _cx = (_xs.min() + _xs.max()) / 2.0 / max(_w, 1)
+                    _cy = (_ys.min() + _ys.max()) / 2.0 / max(_h, 1)
+                    _centered = abs(_cx - 0.5) < 0.12 and abs(_cy - 0.5) < 0.12
+                    ok = (0.80 <= _ar <= 1.25 and 0.18 <= _cov <= 0.92 and _centered)
+        except Exception:
+            ok = False
+        _clean_cache[key] = ok
+        return ok
+
     def reject(reason):
         match_reasons[reason] = match_reasons.get(reason, 0) + 1
     summary = []
@@ -426,17 +540,44 @@ def main():
                 sh = std_shape(im, d["bbox"])
                 # 颜色一致性：检测框主色与类别族必须匹配
                 _crop = im[max(0, _y1):_y2, max(0, _x1):_x2]
+                # COARSE-COLOR-SKIP: 宽泛类别（mandatory/prohibition/warning）各地配色不同，
+                # 不再用类别去要求原牌颜色；只对具体子类（限速等）保留校验
+                _cls_low = str(d.get("class") or "").lower()
+                _coarse = _cls_low in ("mandatory", "prohibition", "warning", "guide", "signal")
                 ok_color, _why = color_consistent(_crop, _crop, d.get("class") or d.get("cls"),min_red=.04,min_blue=.06)
-                if not ok_color:
+                if not ok_color and not _coarse:
                     skip_color += 1
                     reject('sign_color_mismatch')
                     continue
                 inferred_class = a.pin_class or d.get('class') or ''
-                sh, shape_basis = candidate_shape(sh, asset_shape(inferred_class), d.get('conf',0))
+                _vlm = None
+                if shape_map:
+                    try:
+                        import vlm_shape_pass as _vsp2
+                        _vlm = shape_map.get(_vsp2.key_of(p, d["bbox"]))
+                    except Exception:
+                        _vlm = None
+                if _vlm in ('circle', 'triangle', 'square', 'rect'):
+                    sh = _vlm
+                    shape_basis = 'vlm'
+                elif _vlm in ('diamond', 'hexagon', 'octagon'):
+                    # 素材库没有这几类形状，贴上去必然露角
+                    reject('vlm_shape_unsupported')
+                    continue
+                elif _vlm == 'unknown':
+                    # VLM-UNKNOWN-FALLBACK: 2B 模型在 30~50px 上约六成判不出，
+                    # 判不出就退回「类别→形状」设计规范，而不是直接丢帧
+                    sh, shape_basis = candidate_shape(
+                        sh, asset_shape(inferred_class), d.get('conf', 0))
+                    if sh != 'unknown':
+                        shape_basis = 'class_fallback'
+                else:
+                    sh, shape_basis = candidate_shape(sh, asset_shape(inferred_class), d.get('conf',0))
                 if sh == 'unknown':
                     reject('unknown_sign_shape')
                     continue
                 d['_shape_basis'] = shape_basis
+                d['_resolved_shape'] = sh
                 want = "circle" if sh == "circle" else ("triangle" if sh == "triangle" else "rect")
                 keep_dets.append((d, want))
             if not keep_dets:
@@ -479,9 +620,27 @@ def main():
                     cls_name, path = semantic_name(base_cls, a.country), pin_pp
                 else:
                     # 在该大类下找「形状匹配」的素材
-                    cands = [(nm, pp) for nm, pp in table.items()
-                             if compatible(d["class"], nm, a.country)
-                             and asset_shape(nm) == want]
+                    if a.asset_semantic:
+                        # 标签用素材语义；形状一致 + 单牌 + 底色一致（ASSET-COLOR-GATE）
+                        _oc = _ring_of_orig(
+                            im[max(0, int(d["bbox"][1])):int(d["bbox"][3]),
+                               max(0, int(d["bbox"][0])):int(d["bbox"][2])])
+                        # COLOR-CLASS-PRIOR: 小标牌测不出底色时，用检测类别兜底
+                        if _oc in ("other", None):
+                            _dk = str(d.get("class") or "").lower()
+                            if _dk.startswith("mandatory"):
+                                _oc = "blue"
+                            elif _dk.startswith(("prohibition", "speed_limit", "warning")):
+                                _oc = "red"
+                        # COLOR-GATE-DISABLED: 颜色不需要匹配 —— TSR 本就要换成不同标牌，
+                        # 只要形状与尺寸对得上、能整块盖住原牌即可。
+                        # 底色仍算出来供统计/诊断，但不参与筛选。
+                        cands = [(nm, pp) for nm, pp in table.items()
+                                 if asset_shape(nm) == want and asset_is_clean(pp)]
+                    else:
+                        cands = [(nm, pp) for nm, pp in table.items()
+                                 if compatible(d["class"], nm, a.country)
+                                 and asset_shape(nm) == want]
                     if not cands:
                         reject('no_compatible_asset')
                         continue
@@ -498,7 +657,8 @@ def main():
                 # 旋转对齐：标牌在画面里有旋转角时，素材也要转同样角度。
                 # 实测 200 帧里 81.5% 是圆/方牌（旋转对称，角度无意义），
                 # 16% 能估出角度、其中 |角度| 90 分位 33 度 —— 这部分贴正的会明显假。
-                if not a.no_rotate:
+                # CIRCLE-COVER-FIX: 圆牌旋转无意义，只会带来重采样变形
+                if not a.no_rotate and not (want == "circle" and (a.asset_semantic or a.vlm_shape)):
                     try:
                         ang, ainfo = estimate_angle(out_im, d["bbox"])
                         if abs(ang) >= 1.0:
@@ -528,7 +688,20 @@ def main():
                 hw = (d["bbox"][2] - d["bbox"][0]) * 0.5 * g_use
                 hh = (d["bbox"][3] - d["bbox"][1]) * 0.5 * g_use
                 grown = [cx - hw, cy - hh, cx + hw, cy + hh]
-                bbox = fit_bbox(grown, m.shape)
+                # CIRCLE-RING-FIT: 优先用原牌彩色圆环实测直径；测不到再退回长边
+                if want == "circle" and (a.asset_semantic or a.vlm_shape):
+                    _ring = circle_from_ring(out_im, d["bbox"])
+                    if _ring is not None:
+                        _cx, _cy, _r = _ring
+                        _side = _r * 2.0 * 1.03
+                    else:
+                        _cx, _cy = cx, cy
+                        _side = max(d["bbox"][2] - d["bbox"][0],
+                                    d["bbox"][3] - d["bbox"][1]) * g_use
+                    bbox = [_cx - _side * 0.5, _cy - _side * 0.5,
+                            _cx + _side * 0.5, _cy + _side * 0.5]
+                else:
+                    bbox = fit_bbox(grown, m.shape)
                 # 底板方案试过并放弃：
                 #   从原牌四角采样底板颜色，但四角往往是背景而不是底板，
                 #   贴上去多出一块明显的灰方块，比不带底板更突兀。
@@ -561,23 +734,37 @@ def main():
                         continue
                     except Exception as e:
                         v46_fail += 1
-                        continue
+                        # V46-FALLBACK: V4.11 渲染器不可用时下沉到 6 步流水线，而不是丢帧
 
                 # ===== 6 步严格流水线（回退选项）=====
                 if a.pipe6 and not a.legacy_pipe:
                     # 这里必须现算 dst_shape —— 之前误用了 QC 分支里的 sh0，
                     # 那个变量在当前作用域根本不存在，导致 NameError。
-                    sh_dst = std_shape(im, d["bbox"])
+                    # PIPE6-VLM-SHAPE: 有 VLM 形状时直接用它，避免内部再测形状造成误判
+                    sh_dst = d['_resolved_shape'] if d.get('_shape_basis') == "vlm" else std_shape(im, d["bbox"])
                     if sh_dst == "unknown":
                         sh_dst = "circle"
                     s_rgba = np.dstack([s[:, :, :3], m]) if s.shape[2] == 3 else s
-                    out_im, p6 = run_pipeline6(
-                        out_im, d["bbox"], s_rgba, sh_dst,
-                        jpeg_quality=a.pipe6_jpeg, pad_ratio=a.pipe6_pad)
+                    # FEATHER-WIRE: 默认按标牌尺寸 12% 羽化，圆牌 12%、其他 8%
+                    _feather = a.feather_ratio if a.feather_ratio else (0.12 if want == "circle" else 0.08)
+                    # V6-RING-BBOX: 圆牌把实测圆环框传给 6 步流水线，避免用偏大的检测框
+                    _bb6 = d["bbox"]
+                    if want == "circle":
+                        _r6 = circle_from_ring(out_im, d["bbox"])
+                        if _r6 is not None:
+                            _c6x, _c6y, _r6v = _r6
+                            _s6 = _r6v * 2.0 * 1.02
+                            _bb6 = [_c6x - _s6 * 0.5, _c6y - _s6 * 0.5,
+                                    _c6x + _s6 * 0.5, _c6y + _s6 * 0.5]
+                    out_im, p6 = render_sign(
+                        out_im, _bb6, s_rgba, sh_dst,
+                        jpeg_quality=a.pipe6_jpeg, pad_ratio=a.pipe6_pad,
+                        feather_ratio=_feather, coverage_bbox=d['bbox'])
                     if not p6.get("ok"):
                         p6_fail += 1
-                        p6_reasons[p6.get("reason", "unknown").split("_")[0]] = \
-                            p6_reasons.get(p6.get("reason", "unknown").split("_")[0], 0) + 1
+                        reason = p6.get("reason", "unknown")
+                        p6_reasons[reason] = p6_reasons.get(reason, 0) + 1
+                        reject(reason)
                         continue
                     bbox_used = p6["bbox"]
                     objects.append({

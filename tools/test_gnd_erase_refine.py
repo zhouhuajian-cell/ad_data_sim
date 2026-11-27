@@ -1,9 +1,27 @@
 import unittest
 import cv2
 import numpy as np
-from gnd_erase_refine import refine_local, ground_homography, refine_temporal
+from gnd_erase_refine import refine_local, ground_homography, refine_temporal, validate_ground_alignment, stabilize_repaired_road
 
 class EraseTest(unittest.TestCase):
+    def test_temporal_repair_only_changes_shared_repair_region(self):
+        current=np.full((40,40,3),100,np.uint8);previous=np.full_like(current,108)
+        mask=np.zeros((40,40),np.uint8);mask[10:30,10:30]=255
+        result,count=stabilize_repaired_road(current,mask,previous,mask,np.eye(3))
+        self.assertGreater(count,0)
+        self.assertTrue(np.array_equal(result[mask==0],current[mask==0]))
+        self.assertEqual(int(result[20,20,0]),103)
+        different=np.full_like(current,180)
+        result,count=stabilize_repaired_road(current,mask,different,mask,np.eye(3))
+        self.assertEqual(count,0)
+        self.assertTrue(np.array_equal(result,current))
+    def test_alignment_gate_rejects_incorrect_projection(self):
+        image=np.random.default_rng(9).integers(0,256,(240,320,3),dtype=np.uint8)
+        road=np.ones(image.shape[:2],np.uint8)
+        self.assertTrue(validate_ground_alignment(image,image,road,np.eye(3))['valid'])
+        shifted=np.eye(3);shifted[0,2]=30
+        self.assertFalse(validate_ground_alignment(image,image,road,shifted)['valid'])
+        self.assertFalse(validate_ground_alignment(image,image,np.zeros_like(road),np.eye(3))['valid'])
     def test_refinement_remains_in_road_and_near_seed(self):
         im=np.full((80,100,3),80,np.uint8);road=np.ones((80,100),np.uint8);road[:,50:]=0
         mask=np.zeros((80,100),np.uint8);mask[40,45]=255

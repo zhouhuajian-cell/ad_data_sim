@@ -28,10 +28,18 @@ with open('/data/render_hybrid/.objtask.lock','w') as lock:
   m.refine=unavailable;m.make_sign_mask=unavailable;m.strength_for_size=unavailable;sys.modules['sd_refine']=m
  sys.argv=['/opt/ue5_synth/tools/batch_walk.py','--images',cfg['images'],
    '--country',cfg['country'],'--out',cfg['out'],'--limit',str(cfg.get('limit') or 10000),
-   '--min-sign',str(cfg.get('min_sign') or 16),'--conf',str(cfg.get('conf') or .15),'--signs-dir','/data/tsr_library_v2',
+   '--min-sign',str(cfg.get('min_sign') or 16),'--conf',str(cfg.get('conf') or .15),'--signs-dir',cfg['signs_dir'],
    '--jobs-progress',progress,'--vary-class','--legacy-render']
  if cfg.get('pin_class'):sys.argv+=['--pin-class',cfg['pin_class']]
  if cfg.get('pin_material'):sys.argv+=['--pin-material',cfg['pin_material']]
+ # VLM-SHAPE-RUNNER: 用 Qwen2-VL 判定原牌形状，并按素材语义筛选（形状/底色/单牌）
+ if cfg.get('vlm_shape', True):
+  sys.argv+=['--vlm-shape','--asset-semantic']
+  # VLM-RENDERER-SWITCH: 去掉 legacy-render，让 V4.11 缺失时下沉到 6 步流水线
+  if '--legacy-render' in sys.argv:
+   sys.argv.remove('--legacy-render')
+  if cfg.get('shape_cache'):
+   sys.argv+=['--shape-cache',cfg['shape_cache']]
  try: runpy.run_path(sys.argv[0],run_name='__main__')
  except SystemExit as e:
   if e.code not in (None,0):

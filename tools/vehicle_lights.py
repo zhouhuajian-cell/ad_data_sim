@@ -95,6 +95,8 @@ def apply_lights(objs, uid, frame_idx, fps, cfg, log=None):
         return {}
     groups = get_asset_groups(uid)
     if not any(groups.values()):
+        if log:
+            log('  lights 未配置: %s' % uid)
         return {}
 
     factors = frame_group_factors(frame_idx, fps, cfg)

@@ -281,6 +281,7 @@ def main():
             log("direct placed %-24s at (%.1f, %.1f, %.2f) size=%s" % (
                 os.path.basename(direct_glb), v["x"], v["y"],
                 v.get("z", 0.0), sz))
+            _PLACED.append((new, uid))
             placed += 1
             continue
 

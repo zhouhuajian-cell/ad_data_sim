@@ -390,9 +390,40 @@ def _run_canonical_branch(cfg, pp, frames, out, sp, cls,
     if count>1 or _tmode=='random':
         if _tmode not in ('follow_road','random'):raise ValueError('multi-object tasks require random or follow_road')
         from smooth_track import plan_multiple_tracks
+        _pair_clear=None
+        if count>1 and _tmode=='random':
+            from PIL import Image as _PILImage
+            from obj_track_projection import projected_bbox,too_much_overlap
+            from lidar_depth_core import ground_z as _ground_at
+            _cam_by_stem={};_size_by_stem={}
+            for _img,_xml in frames:
+                _stem=os.path.splitext(os.path.basename(_img))[0]
+                if not _xml:raise ValueError('多目标轨迹预检缺少同帧标定: '+_stem)
+                _labels=load_frame_labels(clip_root,xml_path=_xml)
+                if not _labels or not _labels.get('camera'):raise ValueError('多目标轨迹预检无法读取标定: '+_stem)
+                _cam_by_stem[_stem]=_labels['camera']
+                with _PILImage.open(_img) as _im:
+                    _size_by_stem[_stem]=(_im.height,_im.width)
+            def _plan_bbox(_track,_size,_stem):
+                _local=_track.get(_stem);_plane=_planes_by_stem.get(_stem)
+                if _local is None:return None
+                _gz=_gz_by_stem.get(_stem)
+                if _plane:
+                    _target=_ground_at(_plane,_local['x'],_local['y'])
+                    _gz=_target if _gz is None else _gz+_target-_ground_at(_plane,15.,0.)
+                if _gz is None:_gz=0.
+                return projected_bbox(_local,_size,_cam_by_stem[_stem],_size_by_stem[_stem],_gz)
+            def _pair_clear(_local,_size,_accepted):
+                for _prior in _accepted:
+                    for _stem in stems:
+                        if too_much_overlap(_plan_bbox(_local,_size,_stem),
+                                            _plan_bbox(_prior['lidar'],_prior['size'],_stem),.12):
+                            return False
+                return True
         _planning_specs=[{'uid':q['sprite']['uid'],'lwh':q['sprite'].get('lwh') or [4.6,1.9,1.4],'motion':q.get('motion','straight'),'direction':q.get('direction','same')} for q in asset_specs]
         plans=plan_multiple_tracks(ego_poses,stems,_obst_by_stem,_planes_by_stem,_planning_specs,
-                                  relative_speed_mps=float(pp.get('relative_speed_mps',1.0)))
+                                  relative_speed_mps=float(pp.get('relative_speed_mps',1.0)),image_pair_clear=_pair_clear,
+                                  visible_y_max=max(lat+2.0,8.0))
     else:
         _plan=plan_smooth_track(
             ego_poses, stems, _obst_by_stem, _planes_by_stem, lwh,
@@ -636,7 +667,7 @@ def _run_canonical_branch(cfg, pp, frames, out, sp, cls,
                 if existing_track is not None or _sd is not None:
                     _tid = (existing_track["track_id"]
                             if existing_track is not None
-                            else "ego_fwd")
+                            else _tid0)
                     trajectory_records.append({
                         "stem": stem, "track_id": _tid,
                         "rendered": False, "reason": fail_reason
@@ -810,6 +841,10 @@ def _run_canonical_branch(cfg, pp, frames, out, sp, cls,
                 print("  [%s] Blender exit %d: %s" % (stem, result.returncode,
                       result.stderr.decode("utf-8", "replace")[-400:]))
                 continue
+            # Preserve light-material diagnostics from successful Blender runs.
+            for line in result.stdout.decode("utf-8", "replace").splitlines():
+                if "lights f" in line or "lights 失败" in line or "lights 未匹配" in line or "lights 未配置" in line or "灯组冲突" in line:
+                    print("  [%s] %s" % (stem, line), flush=True)
         except Exception as e:
             print("  blender fail:", str(e)[:60])
             continue

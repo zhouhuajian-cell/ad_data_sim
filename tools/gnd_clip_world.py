@@ -13,7 +13,7 @@ from kiss_icp.kiss_icp import KissICP
 sys.path.insert(0, '/opt/ue5_synth/tools')
 from gnd_asset_render import load_asset_tex, load_asset_meta
 from gnd_world_style import prepare_texture, composite
-from gnd_erase_refine import refine_local, ground_homography, refine_temporal
+from gnd_erase_refine import refine_local, ground_homography, refine_temporal, validate_ground_alignment, stabilize_repaired_road
 
 CAMS=('cam_st_x2f_front','cam_st_x8d_front','cam_ld_x8d_front','cam_hk_x8b_front')
 
@@ -221,12 +221,26 @@ def main():
         tex=solid
     tex=prepare_texture(tex,float(pp.get('wear',.35)),float(pp.get('dirt',.25)),str(pp['mat']))
     os.makedirs(out,exist_ok=True); ad=os.path.join(out,'annotations');os.makedirs(ad,exist_ok=True)
-    poses,ground=odometry(clouds); path,smax=build_reference_path(poses,ground)
-    with open(os.path.join(out,'ego_trajectory.json'),'w') as f:json.dump({'source':'KISS-ICP on LAS; assumes LAS is body coordinates','poses':[p.tolist() for p in poses],'training_eligible':False},f)
+    poses,ground=odometry(clouds)
+    pose_info={'source':'KISS-ICP on LAS; assumes LAS is body coordinates','pixel_alignment_verified':False}
+    pose_source=pp.get('pose_source','auto')
+    if pose_source in ('auto','rtk_checked'):
+        from gnd_rtk_pose import load_body_poses
+        try:
+            poses,pose_info=load_body_poses(src,timestamps(imgs),poses)
+        except (ValueError,OSError,KeyError,ImportError) as exc:
+            if pose_source=='rtk_checked':raise
+            pose_info.update(rtk_fallback_reason=str(exc)[:300])
+            print('RTK fallback:',str(exc)[:300],flush=True)
+    elif pose_source != 'kiss_icp':
+        raise ValueError('invalid pose source')
+    path,smax=build_reference_path(poses,ground)
+    with open(os.path.join(out,'ego_trajectory.json'),'w') as f:json.dump({**pose_info,'poses':[p.tolist() for p in poses],'training_eligible':False},f)
     mode=str(pp.get('marking_mode') or 'add');
     if mode not in ('add','replace'):raise ValueError('invalid marking mode')
     seg=Segmenter(); inpainter=(Cv2Inpainter() if pp.get('gnd_mode')=='legacy' else RoadInpainter()) if mode=='replace' else None; n=0; painted=0
-    prev_erase=None;prev_pose=None
+    prev_erase=None;prev_pose=None;prev_image=None;prev_road=None
+    prev_clean=None;prev_clean_mask=None;prev_clean_pose=None
     for i,(im,Twb) in enumerate(zip(imgs,poses)):
         t=time.monotonic();raw=cv2.imread(im)
         if raw is None:raise ValueError('image unreadable: '+im)
@@ -237,10 +251,16 @@ def main():
             raw_erase=erase.copy()
             erase,refine_info=refine_local(und,road,erase)
             H=ground_homography(K,Tcb,prev_pose,Twb,ground) if prev_pose is not None else None
-            erase,added=refine_temporal(erase,prev_erase,H,road)
-            refine_info.update(temporal_added_pixels=added,temporal_aligned=H is not None)
-            prev_erase=raw_erase;prev_pose=Twb.copy()
+            alignment=validate_ground_alignment(prev_image,und,prev_road,H)
+            erase,added=refine_temporal(erase,prev_erase,H if alignment['valid'] else None,road)
+            refine_info.update(temporal_added_pixels=added,temporal_aligned=alignment['valid'],alignment_check=alignment)
+            prev_erase=raw_erase;prev_pose=Twb.copy();prev_image=und;prev_road=road.copy()
         clean=inpainter.apply(und,erase) if inpainter else und
+        if inpainter and pp.get('erase_temporal_stabilize',True) and pose_info['source']=='rtk_imu_to_body_verified_against_icp':
+            repair_H=ground_homography(K,Tcb,prev_clean_pose,Twb,ground) if prev_clean_pose is not None else None
+            clean,blend_pixels=stabilize_repaired_road(clean,erase,prev_clean,prev_clean_mask,repair_H)
+            refine_info.update(temporal_repair_pixels=blend_pixels,temporal_repair_projection_checked=False)
+            prev_clean=clean.copy();prev_clean_mask=erase.copy();prev_clean_pose=Twb.copy()
         rgb,a=paint(clean,K,Tcb,Twb,tex,meta,pp,path,smax)
         sim,a=composite(clean,rgb,a,road,opacity=pp.get('opacity',.82),reflectivity=pp.get('reflectivity',1.95),optical_blur=pp.get('optical_blur',1.2),occlusion=bool(pp.get('occlusion',True)))
         stem=Path(im).stem; mask=(a>0.05).astype(np.uint8)*255
@@ -255,6 +275,6 @@ def main():
         px=int(np.count_nonzero(mask));painted+=bool(px)
         with open(os.path.join(ad,stem+'.json'),'w') as f:json.dump({'frame':stem,'index':i,'rendered':True,'synthetic_pixels':px,'erased_pixels':int(np.count_nonzero(erase)) if inpainter else 0,'erase_refinement':refine_info,'marking_mode':mode,'mask':'synthetic_masks/'+stem+'.png','params':pp,'labels_complete':False,'training_eligible':False,'image_space':'undistorted'},f)
         n+=1;print('RENDER %d/%d paint=%d %.2fs'%(n,len(imgs),px,time.monotonic()-t),flush=True)
-    with open(os.path.join(out,'trajectory_manifest.json'),'w') as f:json.dump({'schema_version':1,'module':'gnd','frames_total':len(imgs),'frames_rendered':n,'frames_with_paint':painted,'camera_lidar_max_offset_ms':float(dt.max()*1000),'ground_z':ground,'marking_mode':mode,'params':pp,'training_eligible':False,'labels_complete':False,'note':'validation preview; road layout approximated from ego trajectory; original labels not merged'},f)
+    with open(os.path.join(out,'trajectory_manifest.json'),'w') as f:json.dump({'schema_version':1,'module':'gnd','frames_total':len(imgs),'frames_rendered':n,'frames_with_paint':painted,'camera_lidar_max_offset_ms':float(dt.max()*1000),'ground_z':ground,'pose_info':pose_info,'marking_mode':mode,'params':pp,'training_eligible':False,'labels_complete':False,'note':'validation preview; road layout approximated from ego trajectory; original labels not merged'},f)
     return 0 if painted else 2
 if __name__=='__main__':sys.exit(main())

@@ -380,7 +380,8 @@ if __name__ == "__main__":
 # 编排：严格按 6 步顺序执行
 # ---------------------------------------------------------------------------
 def run_pipeline6(orig_bgr, yolo_bbox, asset_rgba, dst_shape,
-                  jpeg_quality=60, pad_ratio=1.04, debug=False):
+                  jpeg_quality=60, pad_ratio=1.04, debug=False,
+                  feather_ratio=0.0):
     """严格按 6 步执行一次标牌替换。
 
     orig_bgr   原图（不会被修改）
@@ -473,9 +474,18 @@ def run_pipeline6(orig_bgr, yolo_bbox, asset_rgba, dst_shape,
     info["steps"].append({"step": 4, "name": "light_degrade", **dinfo})
 
     # ---- Step 5：动态边缘融合（不腐蚀，ksize=3）----
-    blended_roi, soft = blend_narrow(bg_roi, asset_bgr3, asset_alpha, ksize=3)
+    # FEATHER-PROP: 羽化宽度按标牌尺寸成比例，固定 3px 在 40~80px 牌上太硬
+    _bh, _bw = asset_alpha.shape[:2]
+    _side = float(min(_bw, _bh))
+    _k = 3
+    if feather_ratio and feather_ratio > 0:
+        _k = max(3, int(round(_side * float(feather_ratio))))
+        if _k % 2 == 0:
+            _k += 1
+        _k = min(_k, 31)
+    blended_roi, soft = blend_narrow(bg_roi, asset_bgr3, asset_alpha, ksize=_k)
     mask_roi = (soft * 255).astype(np.uint8)
-    info["steps"].append({"step": 5, "name": "narrow_blend", "ksize": 3})
+    info["steps"].append({"step": 5, "name": "narrow_blend", "ksize": _k})
 
     # ---- Step 6：JPEG 压缩 + 贴回原图 ----
     final_roi, jinfo = apply_dashcam_jpeg_artifact(blended_roi, mask_roi,

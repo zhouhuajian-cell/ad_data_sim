@@ -115,7 +115,7 @@ def start(body):
     else:os.symlink(parent,dest,target_is_directory=True)
     job='objtask_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
     out=os.path.join(OUT,job);os.makedirs(out)
-    cfg={'batch':batch,'clip':clip,'out':out,'params':{'cls':asset['class'],'asset_id':uid,'asset_specs':specs, 'count':len(selected),'dist_min':12,'dist_max':30,'lat':3.5,'lateral_candidates':([0.0,-3.5,3.5] if mode in ('random','follow_road') else [0.0]),'contact_sink_m':0,'occlusion':True,'world_speed_mps':8.0,'relative_speed_mps':1.0,'trajectory_mode':mode}}
+    cfg={'batch':batch,'clip':clip,'out':out,'params':{'cls':asset['class'],'asset_id':uid,'asset_specs':specs, 'count':len(selected),'dist_min':12,'dist_max':30,'lat':3.5,'lateral_candidates':([0.0,-3.5,3.5] if mode in ('random','follow_road') else [0.0]),'contact_sink_m':0,'occlusion':True,'world_speed_mps':8.0,'relative_speed_mps':1.0,'trajectory_mode':mode,'lights':{'enabled':True,'target':'driving','brightness':1.0,'mode':'steady'}}}
     config=os.path.join(out,'config.json');json.dump(cfg,open(config,'w'),ensure_ascii=False)
     meta={'job':job,'source':str(body['path']),'country':str(body.get('country') or ''),'trajectory':mode,'asset_ids':[a['uid'] for a in selected],'asset_specs':specs,'frames':source['frames'],'created':time.time(),'versions':versions()}
     json.dump(meta,open(os.path.join(out,'task.json'),'w'),ensure_ascii=False)
@@ -171,26 +171,30 @@ def start_tsr(body, source_path):
     """TSR preview output is always local; input paths are read-only."""
     country=country_code(body.get('country'))
     if not source_path or not os.path.isdir(source_path):raise ValueError('数据路径不存在')
-    library=os.path.join('/data/tsr_library_v2',country)
-    if not os.path.isdir(library):raise ValueError('该国家暂无 TSR 标牌素材：'+country)
+    curated='/data/tsr_curated_20261125_v1'
+    library=curated if os.path.isdir(os.path.join(curated,country)) else '/data/tsr_library_v2'
+    if not os.path.isdir(os.path.join(library,country)):raise ValueError('该国家暂无 TSR 标牌素材：'+country)
     export=str(body.get('export_dir') or '').strip()
     if export and not os.path.realpath(export).startswith('/data/render/'):
         raise ValueError('输出仅支持服务器本地 /data/render，网盘数据保持只读')
-    conf=float(body.get('conf') or .15);min_sign=int(body.get('min_sign') or 16)
-    if not .05 <= conf <= .95 or not 12 <= min_sign <= 500:
+    conf=float(body.get('conf') or .15);min_sign=int(body.get('min_sign') or 12)
+    if not .05 <= conf <= .95 or not 8 <= min_sign <= 500:
         raise ValueError('置信度需在 0.05 至 0.95，最小尺寸需在 12 至 500 像素')
+    cameras=[os.path.join(source_path,c) for c in CAMS if os.path.isdir(os.path.join(source_path,c))]
+    if len(cameras)>1:raise ValueError('片段存在多个前向相机目录，请明确输入相机目录')
+    images=cameras[0] if cameras else source_path
     base='/data/render/tsr_v3_10';os.makedirs(base,exist_ok=True)
     job=country+'_'+time.strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6]
     out=os.path.join(base,'walk_'+job);os.makedirs(out)
     progress=os.path.join(base,'walk_'+job+'_progress.json')
-    cfg={'images':source_path,'source':source_path,'country':country,'out':out,'progress':progress,
+    cfg={'images':images,'source':source_path,'country':country,'signs_dir':library,'out':out,'progress':progress,
          'frames':0,'limit':int(body.get('limit') or 10000),'min_sign':min_sign,
          'conf':conf,'pin_class':str(body.get('pin_class') or ''),
          'pin_material':str(body.get('pin_material') or '')}
     config=os.path.join(out,'config.json');json.dump(cfg,open(config,'w'),ensure_ascii=False)
     json.dump({'phase':'queued','done':0,'total':0,'ok':0},open(progress,'w'))
     meta={'job':job,'module':'tsr','country':country,'source':source_path,'created':time.time(),
-          'frames':0,'renderer':'pipeline6_legacy_preview','versions':versions()}
+          'frames':0,'renderer':'pipeline6_legacy_preview','signs_dir':library,'versions':versions()}
     mp=os.path.join(out,'task.json');json.dump(meta,open(mp,'w'),ensure_ascii=False)
     log=open(os.path.join(out,'run.log'),'w')
     try:
@@ -258,7 +262,7 @@ def list_gnd_tasks(module='gnd'):
 def list_tsr_tasks():
     import glob
     base='/data/render/tsr_v3_10'; result=[]
-    for mp in sorted(glob.glob(os.path.join(base,'walk_*','task.json')),reverse=True)[:100]:
+    for mp in glob.glob(os.path.join(base,'walk_*','task.json')):
         try:
             with open(mp,encoding='utf8') as f: meta=json.load(f)
             job=meta['job']; prog=os.path.join(base,'walk_'+job+'_progress.json')
@@ -281,7 +285,8 @@ def list_tsr_tasks():
               'done':v.get('done',0),'created':meta.get('created'),'country':meta.get('country',''),
               'source':meta.get('source',''),'module':'tsr','mode':'pipeline6_preview','output_count':v.get('ok',0),'versions':meta.get('versions'),'error':error})
         except (OSError,ValueError,KeyError,TypeError): continue
-    return result
+    result.sort(key=lambda item: float(item.get('created') or 0), reverse=True)
+    return result[:100]
 
 def frame(job,index):
     status(job)

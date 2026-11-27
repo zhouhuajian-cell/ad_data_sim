@@ -124,8 +124,13 @@ def main():
 
     # 渲染
     try:
-        from tsr_preview_fallback import render
-        sim, bb = render(img, bbox, asset, p)
+        from batch_replace import std_shape
+        from tsr_sign_render import render_sign
+        sim, info = render_sign(img, bbox, asset, std_shape(img,bbox),
+                                jpeg_quality=jpeg_q, pad_ratio=overcover, rotate=True)
+        if not info.get('ok'):
+            raise ValueError(info.get('reason') or '标牌质检未通过')
+        bb = info['bbox']
     except Exception as e:
         print(json.dumps({"ok": False, "error": "渲染失败: " + str(e)}))
         return 1
@@ -139,7 +144,7 @@ def main():
         "overcover": overcover,
         "jpeg_quality": jpeg_q,
         "preview_only": True,
-        "warning": "仅单帧预览，未检测组合牌或清除旧牌，不可直接用于训练",
+        "warning": "单帧验证预览，素材与轨迹标签需独立确认，不可直接用于训练",
     }, ensure_ascii=False))
     return 0
 

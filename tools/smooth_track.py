@@ -325,7 +325,8 @@ def plan_smooth_track(poses, stems, obst_by_stem, planes_by_stem,
 
 def plan_multiple_tracks(poses, stems, obst_by_stem, planes_by_stem, asset_specs,
                          offset_candidates=(12.,18.,25.,32.,40.,50.,60.),
-                         lateral_candidates=(0.,-3.5,3.5,-7.,7.), relative_speed_mps=1.):
+                         lateral_candidates=(0.,-3.5,3.5,-7.,7.), relative_speed_mps=1.,
+                         image_pair_clear=None, visible_y_max=8.0):
     """Plan distinct targets over the clip; reject point-cloud and pairwise overlaps.
 
     Pairwise circumscribed circles are conservative for arbitrary yaw. This is
@@ -346,7 +347,7 @@ def plan_multiple_tracks(poses, stems, obst_by_stem, planes_by_stem, asset_specs
                 tr=build_ego_path_track(poses,stems,offset_m=off,lateral_m=lat,relative_speed_mps=relative_speed_mps,motion=spec.get('motion','straight'),direction=spec.get('direction','same'))
                 tr['track_id']='synthetic_%d_%s'%(index,str(spec['uid']))
                 local=world_to_lidar(tr,poses,stems)
-                check=precheck_track(local,stems,obst_by_stem,planes_by_stem,size,max_collision_ratio=0.)
+                check=precheck_track(local,stems,obst_by_stem,planes_by_stem,size,max_collision_ratio=0.,y_max=visible_y_max)
                 if not check['ok'] or check['total'] < max(3, math.ceil(len(stems)*0.8)):continue
                 collision=False
                 radius=.5*float(np.hypot(size[0],size[1]))
@@ -358,6 +359,7 @@ def plan_multiple_tracks(poses, stems, obst_by_stem, planes_by_stem, asset_specs
                             collision=True;break
                     if collision:break
                 if collision:continue
+                if image_pair_clear is not None and not image_pair_clear(local,size,accepted):continue
                 rank=(check['total'],-abs(lat),-abs(off-(18.+index*10.)))
                 if best is None or rank>best[0]:best=(rank,{'track':tr,'lidar':local,'precheck':check,'size':size.tolist()})
         if best is None:raise ValueError('无法为素材 %s 规划无冲突的连续轨迹'%spec['uid'])

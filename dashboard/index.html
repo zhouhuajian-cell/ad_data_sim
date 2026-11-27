@@ -786,7 +786,6 @@ body:has(#view-library:not(.hidden)) #view-workbench, body:has(#view-library:not
         <div class="max-w-6xl mx-auto space-y-4">
           <div class="flex items-center justify-between">
             <h2 class="text-base font-semibold text-white">素材工坊</h2>
-            <span class="text-xs text-slate-400">选择素材类型 → 上传 → 检查预览 → 确认入库</span>
           </div>
           <div role="tablist" aria-label="素材类型" class="flex flex-wrap gap-2">
             <button type="button" role="tab" id="studioTabObj" aria-controls="studioObj" aria-selected="true" class="studio-tab px-4 py-2 rounded text-xs font-semibold">OBJ 三维目标</button>
@@ -803,62 +802,16 @@ body:has(#view-library:not(.hidden)) #view-workbench, body:has(#view-library:not
           <div id="studioObj" role="tabpanel" aria-labelledby="studioTabObj" class="space-y-4">
           <div class="p-3 rounded-lg bg-panelBg border border-slate-700">
             <h3 class="text-sm font-semibold text-white">OBJ 三维素材</h3>
-            <p class="text-xs text-slate-400 mt-1">上传 GLB，检查模型各角度后设置类别、朝向和实际尺寸。</p>
+            <p class="text-xs text-slate-400 mt-1">上传模型，设置类别、朝向与尺寸。</p>
           </div>
           <details class="p-4 rounded-lg bg-panelBg border border-slate-700 space-y-2">
             <summary class="text-sm text-cyan cursor-pointer font-semibold">照片生成 3D PBR 模型（可选）</summary>
             <div class="text-sm text-white font-semibold">照片生成 3D · 本地混元</div>
-            <p class="text-xs text-slate-400">推荐使用主体完整的透明背景 PNG。生成模型包括颜色、金属度和粗糙度贴图；真实尺寸需要人工确认。</p>
+            <p class="text-xs text-slate-400">上传主体完整的照片；生成后请检查材质与真实尺寸。</p>
             <input id="studioPhoto" type="file" accept="image/png,image/jpeg,image/webp" class="text-xs text-slate-300">
             <button id="studioGenerate" class="px-4 py-2 rounded bg-cyan text-slate-900 text-xs">生成 3D 模型</button>
             <div id="studioGenerateStatus" class="text-xs text-slate-400"></div>
           </details>
-          <!-- LIGHT-STUDIO-UI: 车灯组编辑 -->
-          <div class="p-4 rounded-lg bg-panelBg border border-slate-700 space-y-3">
-            <div class="flex items-center justify-between">
-              <h3 class="text-sm font-semibold text-white">车灯组编辑</h3>
-              <span id="lightStat" class="text-[11px] text-slate-400">加载中…</span>
-            </div>
-            <p class="text-[11px] text-slate-400 leading-relaxed">
-              选择模型 → 确认/修正 前灯 / 尾灯 / 转向灯 的材质名。
-              仿真渲染时会按这里的分组驱动自发光与闪烁。
-            </p>
-
-            <div class="grid grid-cols-3 gap-3">
-              <label class="text-[11px] text-slate-300">模型
-                <select id="lightAsset" style="width:100%;min-height:34px;background:#090e1a;
-                  color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:5px 8px;font-size:12px">
-                  <option value="">加载中…</option>
-                </select>
-              </label>
-              <label class="text-[11px] text-slate-300">筛选
-                <select id="lightFilter" style="width:100%;min-height:34px;background:#090e1a;
-                  color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:5px 8px;font-size:12px">
-                  <option value="supported">仅显示可控灯模型</option>
-                  <option value="all">全部模型</option>
-                </select>
-              </label>
-              <div class="text-[11px] text-slate-300">操作
-                <button id="lightAddGrp" type="button" style="width:100%;min-height:34px;
-                  background:#1f6feb;color:#fff;border:0;border-radius:5px;cursor:pointer;font-size:12px">
-                  + 添加材质到选中组</button>
-              </div>
-            </div>
-
-            <div id="lightGroups" class="grid grid-cols-3 gap-3"></div>
-
-            <div class="flex items-center gap-2 pt-1">
-              <button id="lightSave" type="button" style="background:#238636;color:#fff;border:0;
-                border-radius:5px;padding:7px 18px;font-size:12px;font-weight:600;cursor:pointer">
-                保存车灯配置</button>
-              <button id="lightPreview" type="button" style="background:#21262d;color:#c9d1d9;
-                border:1px solid #30363d;border-radius:5px;padding:7px 16px;font-size:12px;cursor:pointer">
-                预览闪烁</button>
-              <span id="lightMsg" class="text-[11px] text-slate-400"></span>
-            </div>
-            <div id="lightPreviewBox" style="display:none;gap:8px;margin-top:6px"></div>
-          </div>
-
           <!-- 上传区 -->
           <div id="studioDrop" class="p-6 rounded-lg border-2 border-dashed border-slate-600
                bg-panelBg text-center cursor-pointer hover:border-cyan transition"
@@ -943,6 +896,49 @@ body:has(#view-library:not(.hidden)) #view-workbench, body:has(#view-library:not
             <div id="studio3dStatus" class="text-xs text-slate-400 mt-2"></div>
           </div>
           <div id="studioPreviews" class="grid grid-cols-2 md:grid-cols-4 gap-3"></div>
+          <!-- LIGHT-STUDIO-UI: 车灯组编辑 -->
+          <div class="p-4 rounded-lg bg-panelBg border border-slate-700 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-semibold text-white">车灯组编辑</h3>
+              <span id="lightStat" class="text-[11px] text-slate-400">加载中…</span>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-relaxed">为前灯、尾灯和转向灯分别指定材质。</p>
+
+            <div class="grid grid-cols-3 gap-3">
+              <label class="text-[11px] text-slate-300">模型
+                <select id="lightAsset" style="width:100%;min-height:34px;background:#090e1a;
+                  color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:5px 8px;font-size:12px">
+                  <option value="">加载中…</option>
+                </select>
+              </label>
+              <label class="text-[11px] text-slate-300">筛选
+                <select id="lightFilter" style="width:100%;min-height:34px;background:#090e1a;
+                  color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:5px 8px;font-size:12px">
+                  <option value="supported">仅显示可控灯模型</option>
+                  <option value="all">全部模型</option>
+                </select>
+              </label>
+              <div class="text-[11px] text-slate-300">操作
+                <button id="lightAddGrp" type="button" style="width:100%;min-height:34px;
+                  background:#1f6feb;color:#fff;border:0;border-radius:5px;cursor:pointer;font-size:12px">
+                  + 添加材质到选中组</button>
+              </div>
+            </div>
+
+            <div id="lightGroups" class="grid grid-cols-3 gap-3"></div>
+
+            <div class="flex items-center gap-2 pt-1">
+              <button id="lightSave" type="button" style="background:#238636;color:#fff;border:0;
+                border-radius:5px;padding:7px 18px;font-size:12px;font-weight:600;cursor:pointer">
+                保存车灯配置</button>
+              <button id="lightPreview" type="button" style="background:#21262d;color:#c9d1d9;
+                border:1px solid #30363d;border-radius:5px;padding:7px 16px;font-size:12px;cursor:pointer">
+                预览闪烁</button>
+              <span id="lightMsg" class="text-[11px] text-slate-400"></span>
+            </div>
+            <div id="lightPreviewBox" style="display:none;gap:8px;margin-top:6px"></div>
+          </div>
+
           </div>
 
           <div id="studioGnd" role="tabpanel" aria-labelledby="studioTabGnd" hidden class="p-4 rounded-lg bg-panelBg border border-slate-700 space-y-3">
@@ -3934,7 +3930,7 @@ pipe = SignRealismPipeline(cfg)`;
         }
       }
       window.__paramLockUntil = Date.now() + 90000;   // 90 秒内不被自动刷新覆盖
-      setStatus('单帧预览：' + (d.warning || '') + ' · 模糊 ' + params.blur_sigma.toFixed(2));
+      setStatus('单帧预览 · 使用批量标牌渲染流程');
     } catch(e){
       setStatus('失败：' + e.message, true);
     } finally {
@@ -7295,7 +7291,7 @@ pipe = SignRealismPipeline(cfg)`;
     $('batchModal').remove();
 
     var pin = window.__PIN_SIGN || {};
-    var minSign = parseInt(($('yMinSign') || {}).value, 10) || 20;
+    var minSign = parseInt(($('yMinSign') || {}).value, 10) || 12;
     var conf = parseFloat(($('yConf') || {}).value) || 0.20;
     var limit = parseInt(($('yLimit') || {}).value, 10) || 120;
 
@@ -7446,7 +7442,7 @@ pipe = SignRealismPipeline(cfg)`;
             '</div>' +
             '<div style="display:flex;gap:5px;align-items:center">' +
               '<span style="color:#8b949e;font-size:11.5px">最小</span>' +
-              '<input id="thMin" type="number" value="16" min="12" max="300" ' +
+              '<input id="thMin" type="number" value="12" min="8" max="300" ' +
               'style="width:52px;background:#090E1A;border:1px solid #334155;color:#e2e8f0;' +
               'border-radius:4px;padding:2px 6px;font-size:11.5px">' +
             '</div>' +
@@ -7653,7 +7649,7 @@ pipe = SignRealismPipeline(cfg)`;
   async function runBatch(){
     var out = ($('thOut') || {}).value || H.outDir;
     var conc = parseInt(($('thConc') || {}).value, 10) || 2;
-    var minSign = parseInt(($('thMin') || {}).value, 10) || 20;
+    var minSign = parseInt(($('thMin') || {}).value, 10) || 12;
     var conf = parseFloat(($('thConf') || {}).value) || 0.15;
     var limit = parseInt(($('thLimit') || {}).value, 10) || 120;
 
@@ -8378,7 +8374,12 @@ pipe = SignRealismPipeline(cfg)`;
           cb.onchange = function(){
             var arr = a.groups[g.k] || (a.groups[g.k] = []);
             var i = arr.indexOf(name);
-            if (cb.checked && i < 0) arr.push(name);
+            if (cb.checked && i < 0) {
+              GROUPS.forEach(function(other){
+                if (other.k !== g.k) a.groups[other.k]=(a.groups[other.k]||[]).filter(function(n){return n!==name;});
+              });
+              arr.push(name);
+            }
             else if (!cb.checked && i >= 0) arr.splice(i, 1);
             a.n_light_mats = (a.groups.head||[]).length +
                              (a.groups.tail||[]).length +
@@ -8402,6 +8403,10 @@ pipe = SignRealismPipeline(cfg)`;
     function save(){
       if (!IDX || !CUR) return;
       var msg = $('lightMsg');
+      var selected=IDX.assets[CUR],groups=(selected&&selected.groups)||{},seen={};
+      var conflicts=[];
+      GROUPS.forEach(function(g){(groups[g.k]||[]).forEach(function(n){var k=n.toLowerCase();if(seen[k]&&conflicts.indexOf(n)<0)conflicts.push(n);seen[k]=g.k;});});
+      if(conflicts.length){if(msg){msg.style.color='#F85149';msg.textContent='请先解决重复分组：'+conflicts.join('、');}return;}
       if (msg) msg.textContent = '保存中…';
       fetch('/api/light/save', {
         method:'POST',
@@ -15087,10 +15092,8 @@ LatestRequest.prototype.run = async function(fetcher, apply){
         '<div style="color:#8B95A5;font-size:10.5px;margin-bottom:8px">渲染方式：写实 3D 世界轨迹全片段预览<br><span style="color:#EAB308">轨迹与任务中心一致；未经验证的数据不用于训练</span></div>' +
         '<div style="padding:8px;border:1px solid #35546b;border-radius:5px;margin-bottom:10px">' +
         '<div style="color:#22D3EE;font-size:11px;font-weight:600;margin-bottom:8px">仿真融合与材质</div>' +
-        toggle('harmonize', '轻度场景颜色融合', 'obj') +
         toggle('hdri_enabled', '街道环境反射（试验）', 'obj') +
         toggle('paint_coat_enabled', '识别车漆清漆（试验）', 'obj') +
-        toggle('lights_enabled', '启用已配置的前灯和尾灯', 'obj') +
         '<div style="color:#8B95A5;font-size:9px">调整后点击底部“应用参数并重绘”。清漆仅对可识别的车漆材质生效。</div></div>' +
         '<div style="margin-bottom:9px">' +
           '<div style="color:#8B95A5;font-size:10.5px;margin-bottom:3px">' +
@@ -15182,7 +15185,6 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                function(v){ return v.toFixed(2) + 'x'; }) +
         slider('shadow', '阴影强度', 'obj', 0, 1, 0.05, '',
                function(v){ return Math.round(v * 100) + '%'; }) +
-        toggle('occlusion', '遮挡裁剪', 'obj') +
         '<div style="color:#8B95A5;font-size:10.5px;margin:8px 0 3px">光照</div>' +
         '<select id="mpObjLight" style="width:100%;background:#161B24;' +
           'border:1px solid #2A323D;color:#8B95A5;border-radius:4px;' +
@@ -15313,8 +15315,6 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                function(v){ return v.toFixed(1); }) +
         slider('opacity', '不透明度', 'gnd', 0.2, 1.0, 0.05, '',
                function(v){ return Math.round(v * 100) + '%'; }) +
-        toggle('occlusion', '遮挡裁剪', 'gnd') +
-        toggle('erase_refine', '时序擦除增强（试验）', 'gnd') +
         // TO-LABEL-UI: 一键导出到真实标注格式
         '<button id="mpExport" style="width:100%;background:#238636;' +
           'color:#fff;border:0;border-radius:5px;padding:7px;' +
@@ -17268,7 +17268,7 @@ LatestRequest.prototype.run = async function(fetcher, apply){
                       padding:7px 10px;font-size:12px;min-width:220px">
                 <option value="">选择预设…</option>
               </select>
-              <input id="delivPath" placeholder="/mnt/Data_Platform/zhj_datasim/delivery"
+              <input id="delivPath" placeholder="/data/delivery"
                      style="flex:1;background:#161B24;border:1px solid #334155;
                      color:#e2e8f0;border-radius:6px;padding:7px 10px;
                      font-size:12px;font-family:monospace">
@@ -17739,5 +17739,27 @@ function build(){
 setInterval(build,1000);setTimeout(build,300);
 })();
 </script>
+<style id="interface-polish-v120">
+  body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; letter-spacing:.01em; }
+  body > header { background:rgba(17,22,30,.92)!important; backdrop-filter:blur(18px); border-color:rgba(143,163,190,.15)!important; }
+  #leftNav { background:#111720; border-color:rgba(143,163,190,.14); }
+  #view-tasks, #view-studio, #view-library, #view-settings { color:#e5ebf3; }
+  #view-tasks input:not([type=checkbox]):not([type=range]),
+  #view-tasks select, #view-studio input:not([type=checkbox]):not([type=range]),
+  #view-studio select { border-radius:9px!important; min-height:38px; }
+  #view-tasks button, #view-studio button, #view-library button { border-radius:9px; }
+  #rightPanel :is(label,span,select,button,input,div) { font-size:13px!important; line-height:1.4; }
+  #rightPanel select, #rightPanel button { min-height:32px; }
+  #ctrl-tsr .flex:has(> label #tsrEllipse), #ctrl-tsr .flex:has(> label #tsrSafeErase),
+  #ctrl-tsr .flex:has(> label #tsrDoubleGate) { display:none!important; }
+  #tsrQualityBody, #ctrl-tsr div:has(> #tsrQualityArrow) { display:none!important; }
+  #view-tasks :is(button,input,select):focus-visible,
+  #view-studio :is(button,input,select):focus-visible,
+  #view-library :is(button,input,select):focus-visible { outline:2px solid #70a8ff; outline-offset:2px; }
+  #view-tasks table, #view-library table { font-variant-numeric:tabular-nums; }
+  #view-studio .studio-tab { border-radius:9px!important; }
+  #view-studio #studioObj > .border, #view-studio #studioGnd, #view-studio #studioTsr { border-radius:12px!important; }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
+</style>
 </body>
 </html>
